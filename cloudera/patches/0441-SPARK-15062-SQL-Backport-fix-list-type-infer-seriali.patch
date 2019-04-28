@@ -1,0 +1,85 @@
+From 937de7daa1d19f1b333dcf24880a1feea6f696d2 Mon Sep 17 00:00:00 2001
+From: Burak Yavuz <brkyvz@gmail.com>
+Date: Thu, 6 Oct 2016 13:47:49 -0700
+Subject: [PATCH 441/517] [SPARK-15062][SQL] Backport fix list type infer
+ serializer issue
+
+This backports https://github.com/apache/spark/commit/733cbaa3c0ff617a630a9d6937699db37ad2943b
+to Branch 1.6. It's a pretty simple patch, and would be nice to have for Spark 1.6.3.
+
+Unit tests
+
+Author: Burak Yavuz <brkyvz@gmail.com>
+
+Closes #15380 from brkyvz/bp-SPARK-15062.
+
+Signed-off-by: Michael Armbrust <michael@databricks.com>
+(cherry picked from commit d3890deb7bb49dd5016c823a0de0429f73877d70)
+---
+ .../spark/sql/catalyst/ScalaReflection.scala       |   11 +++++++----
+ .../spark/sql/catalyst/ScalaReflectionSuite.scala  |   14 ++++++++++++++
+ 2 files changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/ScalaReflection.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/ScalaReflection.scala
+index 8722191..9cf400f 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/ScalaReflection.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/ScalaReflection.scala
+@@ -485,6 +485,13 @@ object ScalaReflection extends ScalaReflection {
+                 extractorFor(unwrapped, optType, newPath))
+           }
+ 
++        // Since List[_] also belongs to localTypeOf[Product], we put this case before
++        // "case t if t <:< localTypeOf[Product]" to make sure it will match to the
++        // case "localTypeOf[Seq[_]]"
++        case t if t <:< localTypeOf[Seq[_]] =>
++          val TypeRef(_, _, Seq(elementType)) = t
++          toCatalystArray(inputObject, elementType)
++
+         case t if t <:< localTypeOf[Product] =>
+           val params = getConstructorParameters(t)
+           val nonNullOutput = CreateNamedStruct(params.flatMap { case (fieldName, fieldType) =>
+@@ -500,10 +507,6 @@ object ScalaReflection extends ScalaReflection {
+           val TypeRef(_, _, Seq(elementType)) = t
+           toCatalystArray(inputObject, elementType)
+ 
+-        case t if t <:< localTypeOf[Seq[_]] =>
+-          val TypeRef(_, _, Seq(elementType)) = t
+-          toCatalystArray(inputObject, elementType)
+-
+         case t if t <:< localTypeOf[Map[_, _]] =>
+           val TypeRef(_, _, Seq(keyType, valueType)) = t
+ 
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/ScalaReflectionSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/ScalaReflectionSuite.scala
+index c2aace1..fc58699 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/ScalaReflectionSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/ScalaReflectionSuite.scala
+@@ -21,7 +21,9 @@ import java.math.BigInteger
+ import java.sql.{Date, Timestamp}
+ 
+ import org.apache.spark.SparkFunSuite
++import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal, NewInstance}
+ import org.apache.spark.sql.types._
++import org.apache.spark.unsafe.types.UTF8String
+ 
+ case class PrimitiveData(
+     intField: Int,
+@@ -229,4 +231,16 @@ class ScalaReflectionSuite extends SparkFunSuite {
+     assert(anyTypes.forall(!_.isPrimitive))
+     assert(anyTypes === Seq(classOf[java.lang.Object], classOf[java.lang.Object]))
+   }
++
++  test("SPARK-15062: Get correct serializer for List[_]") {
++    val list = List(1, 2, 3)
++    val serializer = extractorsFor[List[Int]](BoundReference(
++      0, ObjectType(list.getClass), nullable = false))
++    assert(serializer.children.size == 2)
++    assert(serializer.children.head.isInstanceOf[Literal])
++    assert(serializer.children.head.asInstanceOf[Literal].value === UTF8String.fromString("value"))
++    assert(serializer.children.last.isInstanceOf[NewInstance])
++    assert(serializer.children.last.asInstanceOf[NewInstance]
++      .cls.isInstanceOf[Class[org.apache.spark.sql.catalyst.util.GenericArrayData]])
++  }
+ }
+-- 
+1.7.9.5
+

@@ -1,0 +1,75 @@
+From 36620eabf16a864abb9ad83d4f5f0668c14c85c9 Mon Sep 17 00:00:00 2001
+From: Sean Owen <sowen@cloudera.com>
+Date: Fri, 29 Jul 2016 05:40:58 -0700
+Subject: [PATCH 407/517] =?UTF-8?q?Revert=20"[SPARK-16664][SQL]=20Fix=20pers?=
+ =?UTF-8?q?ist=20call=20on=20Data=20frames=20with=20more=20than=20200=E2=80=A6?=
+ =?UTF-8?q?"?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This reverts commit 15abbf9d26fd80ae44d6aaee4b435ec4dc08aa95.
+
+(cherry picked from commit f445cce94e525fd8005948d69c40c81e31140b1c)
+---
+ .../columnar/GenerateColumnAccessor.scala          |    4 ++--
+ .../org/apache/spark/sql/DataFrameSuite.scala      |    8 --------
+ .../columnar/InMemoryColumnarQuerySuite.scala      |    3 +--
+ 3 files changed, 3 insertions(+), 12 deletions(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/GenerateColumnAccessor.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/GenerateColumnAccessor.scala
+index a040208..4f6f58b 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/GenerateColumnAccessor.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/GenerateColumnAccessor.scala
+@@ -129,7 +129,7 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
+         val groupedAccessorsItr = initializeAccessors.grouped(numberOfStatementsThreshold)
+         val groupedExtractorsItr = extractors.grouped(numberOfStatementsThreshold)
+         var groupedAccessorsLength = 0
+-        groupedAccessorsItr.zipWithIndex.foreach { case (body, i) =>
++        groupedAccessorsItr.zipWithIndex.map { case (body, i) =>
+           groupedAccessorsLength += 1
+           val funcName = s"accessors$i"
+           val funcCode = s"""
+@@ -139,7 +139,7 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
+            """.stripMargin
+           ctx.addNewFunction(funcName, funcCode)
+         }
+-        groupedExtractorsItr.zipWithIndex.foreach { case (body, i) =>
++        groupedExtractorsItr.zipWithIndex.map { case (body, i) =>
+           val funcName = s"extractors$i"
+           val funcCode = s"""
+              |private void $funcName() {
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/DataFrameSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/DataFrameSuite.scala
+index bf2280a..8994556 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/DataFrameSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/DataFrameSuite.scala
+@@ -1186,12 +1186,4 @@ class DataFrameSuite extends QueryTest with SharedSQLContext {
+       Seq(1 -> "a").toDF("i", "j").filter($"i".cast(StringType) === "1"),
+       Row(1, "a"))
+   }
+-
+-  test("SPARK-16664: persist with more than 200 columns") {
+-    val size = 201L
+-    val rdd = sparkContext.makeRDD(Seq(Row.fromSeq(Seq.range(0, size))))
+-    val schemas = List.range(0, size).map(a => StructField("name" + a, LongType, true))
+-    val df = spark.createDataFrame(rdd, StructType(schemas), false)
+-    assert(df.persist.take(1).apply(0).toSeq(100).asInstanceOf[Long] == 100)
+-  }
+ }
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala
+index f763971..4012bea 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala
+@@ -238,8 +238,7 @@ class InMemoryColumnarQuerySuite extends QueryTest with SharedSQLContext {
+     val columnTypes1 = List.fill(length1)(IntegerType)
+     val columnarIterator1 = GenerateColumnAccessor.generate(columnTypes1)
+ 
+-    // SPARK-16664: the limit of janino is 8117
+-    val length2 = 8117
++    val length2 = 10000
+     val columnTypes2 = List.fill(length2)(IntegerType)
+     val columnarIterator2 = GenerateColumnAccessor.generate(columnTypes2)
+   }
+-- 
+1.7.9.5
+

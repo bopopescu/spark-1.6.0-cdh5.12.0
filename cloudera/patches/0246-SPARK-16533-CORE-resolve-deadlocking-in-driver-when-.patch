@@ -1,0 +1,767 @@
+From 5c99eacfa6ede8c482d7ae675cbd88f52eb38063 Mon Sep 17 00:00:00 2001
+From: Angus Gerry <angolon@gmail.com>
+Date: Thu, 1 Sep 2016 10:35:31 -0700
+Subject: [PATCH 246/517] [SPARK-16533][CORE] resolve deadlocking in driver
+ when executors die
+
+This pull request reverts the changes made as a part of #14605, which simply side-steps the deadlock issue. Instead, I propose the following approach:
+* Use `scheduleWithFixedDelay` when calling `ExecutorAllocationManager.schedule` for scheduling executor requests. The intent of this is that if invocations are delayed beyond the default schedule interval on account of lock contention, then we avoid a situation where calls to `schedule` are made back-to-back, potentially releasing and then immediately reacquiring these locks - further exacerbating contention.
+* Replace a number of calls to `askWithRetry` with `ask` inside of message handling code in `CoarseGrainedSchedulerBackend` and its ilk. This allows us queue messages with the relevant endpoints, release whatever locks we might be holding, and then block whilst awaiting the response. This change is made at the cost of being able to retry should sending the message fail, as retrying outside of the lock could easily cause race conditions if other conflicting messages have been sent whilst awaiting a response. I believe this to be the lesser of two evils, as in many cases these RPC calls are to process local components, and so failures are more likely to be deterministic, and timeouts are more likely to be caused by lock contention.
+
+Existing tests, and manual tests under yarn-client mode.
+
+Author: Angus Gerry <angolon@gmail.com>
+
+Closes #14710 from angolon/SPARK-16533.
+
+(cherry picked from commit a0aac4b775bc8c275f96ad0fbf85c9d8a3690588)
+---
+ .../apache/spark/ExecutorAllocationManager.scala   |    2 +-
+ .../org/apache/spark/deploy/client/AppClient.scala |   38 +++----
+ .../cluster/CoarseGrainedSchedulerBackend.scala    |  107 +++++++++++++-------
+ .../cluster/SparkDeploySchedulerBackend.scala      |   10 +-
+ .../scheduler/cluster/YarnSchedulerBackend.scala   |   82 +++++++--------
+ .../mesos/CoarseMesosSchedulerBackend.scala        |   37 +++----
+ .../org/apache/spark/HeartbeatReceiverSuite.scala  |   10 +-
+ .../deploy/StandaloneDynamicAllocationSuite.scala  |    4 +-
+ .../spark/deploy/client/AppClientSuite.scala       |   30 ++++--
+ .../mesos/CoarseMesosSchedulerBackendSuite.scala   |   15 ++-
+ 10 files changed, 188 insertions(+), 147 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/ExecutorAllocationManager.scala b/core/src/main/scala/org/apache/spark/ExecutorAllocationManager.scala
+index 1c05127..f686360 100644
+--- a/core/src/main/scala/org/apache/spark/ExecutorAllocationManager.scala
++++ b/core/src/main/scala/org/apache/spark/ExecutorAllocationManager.scala
+@@ -230,7 +230,7 @@ private[spark] class ExecutorAllocationManager(
+         }
+       }
+     }
+-    executor.scheduleAtFixedRate(scheduleTask, 0, intervalMillis, TimeUnit.MILLISECONDS)
++    executor.scheduleWithFixedDelay(scheduleTask, 0, intervalMillis, TimeUnit.MILLISECONDS)
+   }
+ 
+   /**
+diff --git a/core/src/main/scala/org/apache/spark/deploy/client/AppClient.scala b/core/src/main/scala/org/apache/spark/deploy/client/AppClient.scala
+index 1e2f469..3129267 100644
+--- a/core/src/main/scala/org/apache/spark/deploy/client/AppClient.scala
++++ b/core/src/main/scala/org/apache/spark/deploy/client/AppClient.scala
+@@ -21,6 +21,8 @@ import java.util.concurrent._
+ import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+ import java.util.concurrent.{Future => JFuture, ScheduledFuture => JScheduledFuture}
+ 
++import scala.concurrent.Future
++import scala.util.{Failure, Success}
+ import scala.util.control.NonFatal
+ 
+ import org.apache.spark.{Logging, SparkConf}
+@@ -77,11 +79,6 @@ private[spark] class AppClient(
+     private val registrationRetryThread =
+       ThreadUtils.newDaemonSingleThreadScheduledExecutor("appclient-registration-retry-thread")
+ 
+-    // A thread pool to perform receive then reply actions in a thread so as not to block the
+-    // event loop.
+-    private val askAndReplyThreadPool =
+-      ThreadUtils.newDaemonCachedThreadPool("appclient-receive-and-reply-threadpool")
+-
+     override def onStart(): Unit = {
+       try {
+         registerWithMaster(1)
+@@ -221,19 +218,13 @@ private[spark] class AppClient(
+         endpointRef: RpcEndpointRef,
+         context: RpcCallContext,
+         msg: T): Unit = {
+-      // Create a thread to ask a message and reply with the result.  Allow thread to be
++      // Ask a message and create a thread to reply with the result.  Allow thread to be
+       // interrupted during shutdown, otherwise context must be notified of NonFatal errors.
+-      askAndReplyThreadPool.execute(new Runnable {
+-        override def run(): Unit = {
+-          try {
+-            context.reply(endpointRef.askWithRetry[Boolean](msg))
+-          } catch {
+-            case ie: InterruptedException => // Cancelled
+-            case NonFatal(t) =>
+-              context.sendFailure(t)
+-          }
+-        }
+-      })
++      endpointRef.ask[Boolean](msg).andThen {
++        case Success(b) => context.reply(b)
++        case Failure(ie: InterruptedException) => // Cancelled
++        case Failure(NonFatal(t)) => context.sendFailure(t)
++      }(ThreadUtils.sameThread)
+     }
+ 
+     override def onDisconnected(address: RpcAddress): Unit = {
+@@ -273,7 +264,6 @@ private[spark] class AppClient(
+       registrationRetryThread.shutdownNow()
+       registerMasterFutures.get.foreach(_.cancel(true))
+       registerMasterThreadPool.shutdownNow()
+-      askAndReplyThreadPool.shutdownNow()
+     }
+ 
+   }
+@@ -302,12 +292,12 @@ private[spark] class AppClient(
+    *
+    * @return whether the request is acknowledged.
+    */
+-  def requestTotalExecutors(requestedTotal: Int): Boolean = {
++  def requestTotalExecutors(requestedTotal: Int): Future[Boolean] = {
+     if (endpoint.get != null && appId.get != null) {
+-      endpoint.get.askWithRetry[Boolean](RequestExecutors(appId.get, requestedTotal))
++      endpoint.get.ask[Boolean](RequestExecutors(appId.get, requestedTotal))
+     } else {
+       logWarning("Attempted to request executors before driver fully initialized.")
+-      false
++      Future.successful(false)
+     }
+   }
+ 
+@@ -315,12 +305,12 @@ private[spark] class AppClient(
+    * Kill the given list of executors through the Master.
+    * @return whether the kill request is acknowledged.
+    */
+-  def killExecutors(executorIds: Seq[String]): Boolean = {
++  def killExecutors(executorIds: Seq[String]): Future[Boolean] = {
+     if (endpoint.get != null && appId.get != null) {
+-      endpoint.get.askWithRetry[Boolean](KillExecutors(appId.get, executorIds))
++      endpoint.get.ask[Boolean](KillExecutors(appId.get, executorIds))
+     } else {
+       logWarning("Attempted to kill executors before driver fully initialized.")
+-      false
++      Future.successful(false)
+     }
+   }
+ 
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+index 7efe167..b5882e7 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+@@ -21,13 +21,15 @@ import java.util.concurrent.TimeUnit
+ import java.util.concurrent.atomic.AtomicInteger
+ 
+ import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
++import scala.concurrent.Future
++import scala.concurrent.duration.Duration
+ 
+ import org.apache.spark.rpc._
+ import org.apache.spark.{ExecutorAllocationClient, Logging, SparkEnv, SparkException, TaskState}
+ import org.apache.spark.scheduler._
+ import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages._
+ import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend.ENDPOINT_NAME
+-import org.apache.spark.util.{ThreadUtils, SerializableBuffer, AkkaUtils, Utils}
++import org.apache.spark.util.{ThreadUtils, SerializableBuffer, AkkaUtils, RpcUtils, Utils}
+ 
+ /**
+  * A scheduler backend that waits for coarse grained executors to connect to it through Akka.
+@@ -47,6 +49,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+   var totalRegisteredExecutors = new AtomicInteger(0)
+   val conf = scheduler.sc.conf
+   private val akkaFrameSize = AkkaUtils.maxFrameSizeBytes(conf)
++  private val defaultAskTimeout = RpcUtils.askRpcTimeout(conf)
+   // Submit tasks only after (registered resources / total expected resources)
+   // is equal to at least this value, that is double between 0 and 1.
+   var minRegisteredRatio =
+@@ -248,6 +251,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+ 
+     // Remove a disconnected slave from the cluster
+     def removeExecutor(executorId: String, reason: ExecutorLossReason): Unit = {
++      logDebug(s"Asked to remove executor $executorId with reason $reason")
+       executorDataMap.get(executorId) match {
+         case Some(executorInfo) =>
+           // This must be synchronized because variables mutated
+@@ -407,19 +411,24 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+    * Request an additional number of executors from the cluster manager.
+    * @return whether the request is acknowledged.
+    */
+-  final override def requestExecutors(numAdditionalExecutors: Int): Boolean = synchronized {
++  final override def requestExecutors(numAdditionalExecutors: Int): Boolean = {
+     if (numAdditionalExecutors < 0) {
+       throw new IllegalArgumentException(
+         "Attempted to request a negative number of additional executor(s) " +
+         s"$numAdditionalExecutors from the cluster manager. Please specify a positive number!")
+     }
+     logInfo(s"Requesting $numAdditionalExecutors additional executor(s) from the cluster manager")
+-    logDebug(s"Number of pending executors is now $numPendingExecutors")
+ 
+-    numPendingExecutors += numAdditionalExecutors
+-    // Account for executors pending to be added or removed
+-    val newTotal = numExistingExecutors + numPendingExecutors - executorsPendingToRemove.size
+-    doRequestTotalExecutors(newTotal)
++    val response = synchronized {
++      numPendingExecutors += numAdditionalExecutors
++      logDebug(s"Number of pending executors is now $numPendingExecutors")
++
++      // Account for executors pending to be added or removed
++      doRequestTotalExecutors(
++        numExistingExecutors + numPendingExecutors - executorsPendingToRemove.size)
++    }
++
++    defaultAskTimeout.awaitResult(response)
+   }
+ 
+   /**
+@@ -440,19 +449,24 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+       numExecutors: Int,
+       localityAwareTasks: Int,
+       hostToLocalTaskCount: Map[String, Int]
+-    ): Boolean = synchronized {
++    ): Boolean = {
+     if (numExecutors < 0) {
+       throw new IllegalArgumentException(
+         "Attempted to request a negative number of executor(s) " +
+           s"$numExecutors from the cluster manager. Please specify a positive number!")
+     }
+ 
+-    this.localityAwareTasks = localityAwareTasks
+-    this.hostToLocalTaskCount = hostToLocalTaskCount
++    val response = synchronized {
++      this.localityAwareTasks = localityAwareTasks
++      this.hostToLocalTaskCount = hostToLocalTaskCount
++
++      numPendingExecutors =
++        math.max(numExecutors - numExistingExecutors + executorsPendingToRemove.size, 0)
+ 
+-    numPendingExecutors =
+-      math.max(numExecutors - numExistingExecutors + executorsPendingToRemove.size, 0)
+-    doRequestTotalExecutors(numExecutors)
++      doRequestTotalExecutors(numExecutors)
++    }
++
++    defaultAskTimeout.awaitResult(response)
+   }
+ 
+   /**
+@@ -465,15 +479,16 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+    * insufficient resources to satisfy the first request. We make the assumption here that the
+    * cluster manager will eventually fulfill all requests when resources free up.
+    *
+-   * @return whether the request is acknowledged.
++   * @return a future whose evaluation indicates whether the request is acknowledged.
+    */
+-  protected def doRequestTotalExecutors(requestedTotal: Int): Boolean = false
++  protected def doRequestTotalExecutors(requestedTotal: Int): Future[Boolean] =
++    Future.successful(false)
+ 
+   /**
+    * Request that the cluster manager kill the specified executors.
+    * @return whether the kill request is acknowledged.
+    */
+-  final override def killExecutors(executorIds: Seq[String]): Boolean = synchronized {
++  final override def killExecutors(executorIds: Seq[String]): Boolean = {
+     killExecutors(executorIds, replace = false, force = false)
+   }
+ 
+@@ -492,39 +507,53 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+   final def killExecutors(
+       executorIds: Seq[String],
+       replace: Boolean,
+-      force: Boolean): Boolean = synchronized {
++      force: Boolean): Boolean = {
+     logInfo(s"Requesting to kill executor(s) ${executorIds.mkString(", ")}")
+-    val (knownExecutors, unknownExecutors) = executorIds.partition(executorDataMap.contains)
+-    unknownExecutors.foreach { id =>
+-      logWarning(s"Executor to kill $id does not exist!")
+-    }
+ 
+-    // If an executor is already pending to be removed, do not kill it again (SPARK-9795)
+-    // If this executor is busy, do not kill it unless we are told to force kill it (SPARK-9552)
+-    val executorsToKill = knownExecutors
+-      .filter { id => !executorsPendingToRemove.contains(id) }
+-      .filter { id => force || !scheduler.isExecutorBusy(id) }
+-    executorsToKill.foreach { id => executorsPendingToRemove(id) = !replace }
+-
+-    // If we do not wish to replace the executors we kill, sync the target number of executors
+-    // with the cluster manager to avoid allocating new ones. When computing the new target,
+-    // take into account executors that are pending to be added or removed.
+-    if (!replace) {
+-      doRequestTotalExecutors(
+-        numExistingExecutors + numPendingExecutors - executorsPendingToRemove.size)
+-    } else {
+-      numPendingExecutors += knownExecutors.size
++    val response = synchronized {
++      val (knownExecutors, unknownExecutors) = executorIds.partition(executorDataMap.contains)
++      unknownExecutors.foreach { id =>
++        logWarning(s"Executor to kill $id does not exist!")
++      }
++
++      // If an executor is already pending to be removed, do not kill it again (SPARK-9795)
++      // If this executor is busy, do not kill it unless we are told to force kill it (SPARK-9552)
++      val executorsToKill = knownExecutors
++        .filter { id => !executorsPendingToRemove.contains(id) }
++        .filter { id => force || !scheduler.isExecutorBusy(id) }
++      executorsToKill.foreach { id => executorsPendingToRemove(id) = !replace }
++
++      // If we do not wish to replace the executors we kill, sync the target number of executors
++      // with the cluster manager to avoid allocating new ones. When computing the new target,
++      // take into account executors that are pending to be added or removed.
++      val adjustTotalExecutors =
++        if (!replace) {
++          doRequestTotalExecutors(
++            numExistingExecutors + numPendingExecutors - executorsPendingToRemove.size)
++        } else {
++          numPendingExecutors += knownExecutors.size
++          Future.successful(true)
++        }
++
++      val killExecutors: Boolean => Future[Boolean] =
++        if (!executorsToKill.isEmpty) {
++          _ => doKillExecutors(executorsToKill)
++        } else {
++          _ => Future.successful(false)
++        }
++
++      adjustTotalExecutors.flatMap(killExecutors)(ThreadUtils.sameThread)
+     }
+ 
+-    doKillExecutors(executorsToKill)
++    defaultAskTimeout.awaitResult(response)
+   }
+ 
+   /**
+    * Kill the given list of executors through the cluster manager.
+    * @return whether the kill request is acknowledged.
+    */
+-  protected def doKillExecutors(executorIds: Seq[String]): Boolean = false
+-
++  protected def doKillExecutors(executorIds: Seq[String]): Future[Boolean] =
++    Future.successful(false)
+ }
+ 
+ private[spark] object CoarseGrainedSchedulerBackend {
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/SparkDeploySchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/SparkDeploySchedulerBackend.scala
+index 5105475..8b081ed 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/SparkDeploySchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/SparkDeploySchedulerBackend.scala
+@@ -19,6 +19,8 @@ package org.apache.spark.scheduler.cluster
+ 
+ import java.util.concurrent.Semaphore
+ 
++import scala.concurrent.Future
++
+ import org.apache.spark.rpc.RpcAddress
+ import org.apache.spark.{Logging, SparkConf, SparkContext, SparkEnv}
+ import org.apache.spark.deploy.{ApplicationDescription, Command}
+@@ -160,12 +162,12 @@ private[spark] class SparkDeploySchedulerBackend(
+    *
+    * @return whether the request is acknowledged.
+    */
+-  protected override def doRequestTotalExecutors(requestedTotal: Int): Boolean = {
++  protected override def doRequestTotalExecutors(requestedTotal: Int): Future[Boolean] = {
+     Option(client) match {
+       case Some(c) => c.requestTotalExecutors(requestedTotal)
+       case None =>
+         logWarning("Attempted to request executors before driver fully initialized.")
+-        false
++        Future.successful(false)
+     }
+   }
+ 
+@@ -173,12 +175,12 @@ private[spark] class SparkDeploySchedulerBackend(
+    * Kill the given list of executors through the Master.
+    * @return whether the kill request is acknowledged.
+    */
+-  protected override def doKillExecutors(executorIds: Seq[String]): Boolean = {
++  protected override def doKillExecutors(executorIds: Seq[String]): Future[Boolean] = {
+     Option(client) match {
+       case Some(c) => c.killExecutors(executorIds)
+       case None =>
+         logWarning("Attempted to kill executors before driver fully initialized.")
+-        false
++        Future.successful(false)
+     }
+   }
+ 
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/YarnSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/YarnSchedulerBackend.scala
+index d1bd2d4..b212c0b 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/YarnSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/YarnSchedulerBackend.scala
+@@ -19,6 +19,7 @@ package org.apache.spark.scheduler.cluster
+ 
+ import scala.collection.mutable.ArrayBuffer
+ import scala.concurrent.{Future, ExecutionContext}
++import scala.util.{Failure, Success}
+ 
+ import org.apache.spark.{Logging, SparkContext}
+ import org.apache.spark.rpc._
+@@ -65,19 +66,18 @@ private[spark] abstract class YarnSchedulerBackend(
+    * Request executors from the ApplicationMaster by specifying the total number desired.
+    * This includes executors already pending or running.
+    */
+-  override def doRequestTotalExecutors(requestedTotal: Int): Boolean = {
+-
++  override def doRequestTotalExecutors(requestedTotal: Int): Future[Boolean] = {
+     val nodeBlacklist: Set[String] = scheduler.nodeBlacklist()
+ 
+-    yarnSchedulerEndpointRef.askWithRetry[Boolean](
++    yarnSchedulerEndpointRef.ask[Boolean](
+       RequestExecutors(requestedTotal, localityAwareTasks, hostToLocalTaskCount, nodeBlacklist))
+   }
+ 
+   /**
+    * Request that the ApplicationMaster kill the specified executors.
+    */
+-  override def doKillExecutors(executorIds: Seq[String]): Boolean = {
+-    yarnSchedulerEndpointRef.askWithRetry[Boolean](KillExecutors(executorIds))
++  override def doKillExecutors(executorIds: Seq[String]): Future[Boolean] = {
++    yarnSchedulerEndpointRef.ask[Boolean](KillExecutors(executorIds))
+   }
+ 
+   override def sufficientResourcesRegistered(): Boolean = {
+@@ -155,37 +155,35 @@ private[spark] abstract class YarnSchedulerBackend(
+     extends ThreadSafeRpcEndpoint with Logging {
+     private var amEndpoint: Option[RpcEndpointRef] = None
+ 
+-    private val askAmThreadPool =
+-      ThreadUtils.newDaemonCachedThreadPool("yarn-scheduler-ask-am-thread-pool")
+-    implicit val askAmExecutor = ExecutionContext.fromExecutor(askAmThreadPool)
+-
+     private[YarnSchedulerBackend] def handleExecutorDisconnectedFromDriver(
+         executorId: String,
+         executorRpcAddress: RpcAddress): Unit = {
+-      amEndpoint match {
++      val removeExecutorMessage = amEndpoint match {
+         case Some(am) =>
+           val lossReasonRequest = GetExecutorLossReason(executorId)
+-          val future = am.ask[ExecutorLossReason](lossReasonRequest, askTimeout)
+-          future onSuccess {
+-            case reason: ExecutorLossReason => {
+-              driverEndpoint.askWithRetry[Boolean](RemoveExecutor(executorId, reason))
+-            }
+-          }
+-          future onFailure {
+-            case NonFatal(e) => {
+-              logWarning(s"Attempted to get executor loss reason" +
+-                s" for executor id ${executorId} at RPC address ${executorRpcAddress}," +
+-                s" but got no response. Marking as slave lost.", e)
+-              driverEndpoint.askWithRetry[Boolean](RemoveExecutor(executorId, SlaveLost()))
+-            }
+-            case t => throw t
+-          }
++          am.ask[ExecutorLossReason](lossReasonRequest, askTimeout)
++            .map { reason => RemoveExecutor(executorId, reason) }(ThreadUtils.sameThread)
++            .recover {
++              case NonFatal(e) =>
++                logWarning(s"Attempted to get executor loss reason" +
++                  s" for executor id ${executorId} at RPC address ${executorRpcAddress}," +
++                  s" but got no response. Marking as slave lost.", e)
++                RemoveExecutor(executorId, SlaveLost())
++            }(ThreadUtils.sameThread)
+         case None =>
+           logWarning("Attempted to check for an executor loss reason" +
+             " before the AM has registered!")
+-          driverEndpoint.askWithRetry[Boolean](
+-            RemoveExecutor(executorId, SlaveLost("AM is not yet registered.")))
++          Future.successful(RemoveExecutor(executorId, SlaveLost("AM is not yet registered.")))
+       }
++
++      removeExecutorMessage
++        .flatMap { message =>
++          driverEndpoint.ask[Boolean](message)
++        }(ThreadUtils.sameThread)
++        .onFailure {
++          case NonFatal(e) => logError(
++            s"Error requesting driver to remove executor $executorId after disconnection.", e)
++        }(ThreadUtils.sameThread)
+     }
+ 
+     override def receive: PartialFunction[Any, Unit] = {
+@@ -203,9 +201,13 @@ private[spark] abstract class YarnSchedulerBackend(
+       case AddWebUIFilter(filterName, filterParams, proxyBase) =>
+         addWebUIFilter(filterName, filterParams, proxyBase)
+ 
+-      case RemoveExecutor(executorId, reason) =>
++      case r @ RemoveExecutor(executorId, reason) =>
+         logWarning(reason.toString)
+-        removeExecutor(executorId, reason)
++        driverEndpoint.ask[Boolean](r).onFailure {
++          case e =>
++            logError("Error requesting driver to remove executor" +
++              s" $executorId for reason $reason", e)
++        }(ThreadUtils.sameThread)
+     }
+ 
+ 
+@@ -213,13 +215,12 @@ private[spark] abstract class YarnSchedulerBackend(
+       case r: RequestExecutors =>
+         amEndpoint match {
+           case Some(am) =>
+-            Future {
+-              context.reply(am.askWithRetry[Boolean](r))
+-            } onFailure {
+-              case NonFatal(e) =>
++            am.ask[Boolean](r).andThen {
++              case Success(b) => context.reply(b)
++              case Failure(NonFatal(e)) =>
+                 logError(s"Sending $r to AM was unsuccessful", e)
+                 context.sendFailure(e)
+-            }
++            }(ThreadUtils.sameThread)
+           case None =>
+             logWarning("Attempted to request executors before the AM has registered!")
+             context.reply(false)
+@@ -228,13 +229,12 @@ private[spark] abstract class YarnSchedulerBackend(
+       case k: KillExecutors =>
+         amEndpoint match {
+           case Some(am) =>
+-            Future {
+-              context.reply(am.askWithRetry[Boolean](k))
+-            } onFailure {
+-              case NonFatal(e) =>
++            am.ask[Boolean](k).andThen {
++              case Success(b) => context.reply(b)
++              case Failure(NonFatal(e)) =>
+                 logError(s"Sending $k to AM was unsuccessful", e)
+                 context.sendFailure(e)
+-            }
++            }(ThreadUtils.sameThread)
+           case None =>
+             logWarning("Attempted to kill executors before the AM has registered!")
+             context.reply(false)
+@@ -247,10 +247,6 @@ private[spark] abstract class YarnSchedulerBackend(
+         amEndpoint = None
+       }
+     }
+-
+-    override def onStop(): Unit = {
+-      askAmThreadPool.shutdownNow()
+-    }
+   }
+ }
+ 
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/mesos/CoarseMesosSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/mesos/CoarseMesosSchedulerBackend.scala
+index 7d08eae..c8795e8 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/mesos/CoarseMesosSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/mesos/CoarseMesosSchedulerBackend.scala
+@@ -23,6 +23,7 @@ import java.util.{Collections, List => JList}
+ 
+ import scala.collection.JavaConverters._
+ import scala.collection.mutable.{HashMap, HashSet}
++import scala.concurrent.Future
+ 
+ import com.google.common.collect.HashBiMap
+ import org.apache.mesos.Protos.{TaskInfo => MesosTaskInfo, _}
+@@ -415,7 +416,7 @@ private[spark] class CoarseMesosSchedulerBackend(
+       super.applicationId
+     }
+ 
+-  override def doRequestTotalExecutors(requestedTotal: Int): Boolean = {
++  override def doRequestTotalExecutors(requestedTotal: Int): Future[Boolean] = Future.successful {
+     // We don't truly know if we can fulfill the full amount of executors
+     // since at coarse grain it depends on the amount of slaves available.
+     logInfo("Capping the total amount of executors to " + requestedTotal)
+@@ -423,26 +424,26 @@ private[spark] class CoarseMesosSchedulerBackend(
+     true
+   }
+ 
+-  override def doKillExecutors(executorIds: Seq[String]): Boolean = {
++  override def doKillExecutors(executorIds: Seq[String]): Future[Boolean] = Future.successful {
+     if (mesosDriver == null) {
+       logWarning("Asked to kill executors before the Mesos driver was started.")
+-      return false
+-    }
+-
+-    val slaveIdToTaskId = taskIdToSlaveId.inverse()
+-    for (executorId <- executorIds) {
+-      val slaveId = executorId.split("/")(0)
+-      if (slaveIdToTaskId.containsKey(slaveId)) {
+-        mesosDriver.killTask(
+-          TaskID.newBuilder().setValue(slaveIdToTaskId.get(slaveId).toString).build())
+-        pendingRemovedSlaveIds += slaveId
+-      } else {
+-        logWarning("Unable to find executor Id '" + executorId + "' in Mesos scheduler")
++      false
++    } else {
++      val slaveIdToTaskId = taskIdToSlaveId.inverse()
++      for (executorId <- executorIds) {
++        val slaveId = executorId.split("/")(0)
++        if (slaveIdToTaskId.containsKey(slaveId)) {
++          mesosDriver.killTask(
++            TaskID.newBuilder().setValue(slaveIdToTaskId.get(slaveId).toString).build())
++          pendingRemovedSlaveIds += slaveId
++        } else {
++          logWarning("Unable to find executor Id '" + executorId + "' in Mesos scheduler")
++        }
+       }
++      // no need to adjust `executorLimitOption` since the AllocationManager already communicated
++      // the desired limit through a call to `doRequestTotalExecutors`.
++      // See [[o.a.s.scheduler.cluster.CoarseGrainedSchedulerBackend.killExecutors]]
++      true
+     }
+-    // no need to adjust `executorLimitOption` since the AllocationManager already communicated
+-    // the desired limit through a call to `doRequestTotalExecutors`.
+-    // See [[o.a.s.scheduler.cluster.CoarseGrainedSchedulerBackend.killExecutors]]
+-    true
+   }
+ }
+diff --git a/core/src/test/scala/org/apache/spark/HeartbeatReceiverSuite.scala b/core/src/test/scala/org/apache/spark/HeartbeatReceiverSuite.scala
+index f82f510..0440f9c 100644
+--- a/core/src/test/scala/org/apache/spark/HeartbeatReceiverSuite.scala
++++ b/core/src/test/scala/org/apache/spark/HeartbeatReceiverSuite.scala
+@@ -21,7 +21,7 @@ import java.util.concurrent.{ExecutorService, TimeUnit}
+ 
+ import scala.collection.Map
+ import scala.collection.mutable
+-import scala.concurrent.Await
++import scala.concurrent.{Await, Future}
+ import scala.concurrent.duration._
+ import scala.language.postfixOps
+ 
+@@ -263,13 +263,13 @@ private class FakeSchedulerBackend(
+     clusterManagerEndpoint: RpcEndpointRef)
+   extends CoarseGrainedSchedulerBackend(scheduler, rpcEnv) {
+ 
+-  protected override def doRequestTotalExecutors(requestedTotal: Int): Boolean = {
+-    clusterManagerEndpoint.askWithRetry[Boolean](
++  protected override def doRequestTotalExecutors(requestedTotal: Int): Future[Boolean] = {
++    clusterManagerEndpoint.ask[Boolean](
+       RequestExecutors(requestedTotal, localityAwareTasks, hostToLocalTaskCount, Set.empty[String]))
+   }
+ 
+-  protected override def doKillExecutors(executorIds: Seq[String]): Boolean = {
+-    clusterManagerEndpoint.askWithRetry[Boolean](KillExecutors(executorIds))
++  protected override def doKillExecutors(executorIds: Seq[String]): Future[Boolean] = {
++    clusterManagerEndpoint.ask[Boolean](KillExecutors(executorIds))
+   }
+ }
+ 
+diff --git a/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala b/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala
+index 42f9c87..88f3558 100644
+--- a/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala
++++ b/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala
+@@ -372,7 +372,7 @@ class StandaloneDynamicAllocationSuite
+     assert(apps.head.getExecutorLimit === 1)
+   }
+ 
+-  test("the pending replacement executors should not be lost (SPARK-10515)") {
++  ignore("the pending replacement executors should not be lost (SPARK-10515)") {
+     sc = new SparkContext(appConf)
+     val appId = sc.applicationId
+     eventually(timeout(10.seconds), interval(10.millis)) {
+@@ -430,7 +430,7 @@ class StandaloneDynamicAllocationSuite
+     val executorIdToTaskCount = taskScheduler invokePrivate getMap()
+     executorIdToTaskCount(executors.head) = 1
+     // kill the busy executor without force; this should fail
+-    assert(killExecutor(sc, executors.head, force = false))
++    assert(!killExecutor(sc, executors.head, force = false))
+     apps = getApplications()
+     assert(apps.head.executors.size === 2)
+ 
+diff --git a/core/src/test/scala/org/apache/spark/deploy/client/AppClientSuite.scala b/core/src/test/scala/org/apache/spark/deploy/client/AppClientSuite.scala
+index 1e5c05a..18340ec 100644
+--- a/core/src/test/scala/org/apache/spark/deploy/client/AppClientSuite.scala
++++ b/core/src/test/scala/org/apache/spark/deploy/client/AppClientSuite.scala
+@@ -21,7 +21,7 @@ import scala.collection.mutable.{ArrayBuffer, SynchronizedBuffer}
+ import scala.concurrent.duration._
+ 
+ import org.scalatest.BeforeAndAfterAll
+-import org.scalatest.concurrent.Eventually._
++import org.scalatest.concurrent.{Eventually, ScalaFutures}
+ 
+ import org.apache.spark._
+ import org.apache.spark.deploy.{ApplicationDescription, Command}
+@@ -34,7 +34,12 @@ import org.apache.spark.util.Utils
+ /**
+  * End-to-end tests for application client in standalone mode.
+  */
+-class AppClientSuite extends SparkFunSuite with LocalSparkContext with BeforeAndAfterAll {
++class AppClientSuite
++    extends SparkFunSuite
++    with LocalSparkContext
++    with BeforeAndAfterAll
++    with Eventually
++    with ScalaFutures {
+   private val numWorkers = 2
+   private val conf = new SparkConf()
+   private val securityManager = new SecurityManager(conf)
+@@ -88,7 +93,12 @@ class AppClientSuite extends SparkFunSuite with LocalSparkContext with BeforeAnd
+ 
+     // Send message to Master to request Executors, verify request by change in executor limit
+     val numExecutorsRequested = 1
+-    assert(ci.client.requestTotalExecutors(numExecutorsRequested))
++    whenReady(
++        ci.client.requestTotalExecutors(numExecutorsRequested),
++        timeout(10.seconds),
++        interval(10.millis)) { acknowledged =>
++      assert(acknowledged)
++    }
+ 
+     eventually(timeout(10.seconds), interval(10.millis)) {
+       val apps = getApplications()
+@@ -96,10 +106,12 @@ class AppClientSuite extends SparkFunSuite with LocalSparkContext with BeforeAnd
+     }
+ 
+     // Send request to kill executor, verify request was made
+-    assert {
+-      val apps = getApplications()
+-      val executorId: String = apps.head.executors.head._2.fullId
+-      ci.client.killExecutors(Seq(executorId))
++    val executorId: String = getApplications().head.executors.head._2.fullId
++    whenReady(
++        ci.client.killExecutors(Seq(executorId)),
++        timeout(10.seconds),
++        interval(10.millis)) { acknowledged =>
++      assert(acknowledged)
+     }
+ 
+     // Issue stop command for Client to disconnect from Master
+@@ -117,7 +129,9 @@ class AppClientSuite extends SparkFunSuite with LocalSparkContext with BeforeAnd
+     val ci = new AppClientInst(masterRpcEnv.address.toSparkURL)
+ 
+     // requests to master should fail immediately
+-    assert(ci.client.requestTotalExecutors(3) === false)
++    whenReady(ci.client.requestTotalExecutors(3), timeout(1.seconds)) { success =>
++      assert(success === false)
++    }
+   }
+ 
+   // ===============================
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/cluster/mesos/CoarseMesosSchedulerBackendSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/cluster/mesos/CoarseMesosSchedulerBackendSuite.scala
+index 525ee0d..3c14f93 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/cluster/mesos/CoarseMesosSchedulerBackendSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/cluster/mesos/CoarseMesosSchedulerBackendSuite.scala
+@@ -19,6 +19,9 @@ package org.apache.spark.scheduler.cluster.mesos
+ 
+ import java.util
+ import java.util.Collections
++import java.util.concurrent.TimeUnit
++
++import scala.concurrent.duration._
+ 
+ import org.apache.mesos.Protos.Value.Scalar
+ import org.apache.mesos.Protos._
+@@ -26,6 +29,7 @@ import org.apache.mesos.{Protos, Scheduler, SchedulerDriver}
+ import org.mockito.Matchers._
+ import org.mockito.Mockito._
+ import org.mockito.Matchers
++import org.scalatest.concurrent.ScalaFutures
+ import org.scalatest.mock.MockitoSugar
+ import org.scalatest.BeforeAndAfter
+ 
+@@ -35,7 +39,12 @@ import org.apache.spark.{LocalSparkContext, SparkConf, SparkContext, SecurityMan
+ class CoarseMesosSchedulerBackendSuite extends SparkFunSuite
+     with LocalSparkContext
+     with MockitoSugar
+-    with BeforeAndAfter {
++    with BeforeAndAfter
++    with ScalaFutures {
++
++  // All 'requests' to the scheduler run immediately on the same thread, so
++  // demand that all futures have their value available immediately.
++  implicit override val patienceConfig = PatienceConfig(timeout = Duration(0, TimeUnit.SECONDS))
+ 
+   private def createOffer(offerId: String, slaveId: String, mem: Int, cpu: Int): Offer = {
+     val builder = Offer.newBuilder()
+@@ -113,8 +122,8 @@ class CoarseMesosSchedulerBackendSuite extends SparkFunSuite
+       any[Filters])
+ 
+     // simulate the allocation manager down-scaling executors
+-    backend.doRequestTotalExecutors(0)
+-    assert(backend.doKillExecutors(Seq("s1/0")))
++    assert(backend.doRequestTotalExecutors(0).futureValue)
++    assert(backend.doKillExecutors(Seq("s1/0")).futureValue)
+     verify(driver, times(1)).killTask(taskID0)
+ 
+     val mesosOffers2 = new java.util.ArrayList[Offer]
+-- 
+1.7.9.5
+

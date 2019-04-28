@@ -1,0 +1,312 @@
+From 6914ad6bf0f564b10bbe91d94272ee70d19b634a Mon Sep 17 00:00:00 2001
+From: Imran Rashid <irashid@cloudera.com>
+Date: Wed, 22 Jun 2016 08:35:41 -0500
+Subject: [PATCH 222/517] [SPARK-15783][CORE] Fix Flakiness in
+ BlacklistIntegrationSuite
+
+Three changes here -- first two were causing failures w/ BlacklistIntegrationSuite
+
+1. The testing framework didn't include the reviveOffers thread, so the test which involved delay scheduling might never submit offers late enough for the delay scheduling to kick in.  So added in the periodic revive offers, just like the real scheduler.
+
+2. `assertEmptyDataStructures` would occasionally fail, because it appeared there was still an active job.  This is because in DAGScheduler, the jobWaiter is notified of the job completion before the data structures are cleaned up.  Most of the time the test code that is waiting on the jobWaiter won't become active until after the data structures are cleared, but occasionally the race goes the other way, and the assertions fail.
+
+3. `DAGSchedulerSuite` was not stopping all the inner parts it was setting up, so each test was leaking a number of threads.  So we stop those parts too.
+
+4. Turns out that `assertMapOutputAvailable` is not terribly useful in this framework -- most of the places I was trying to use it suffer from some race.
+
+5. When there is an exception in the backend, try to improve the error msg a little bit.  Before the exception was printed to the console, but the test would fail w/ a timeout, and the logs wouldn't show anything.
+
+I ran all the tests in `BlacklistIntegrationSuite` 5k times and everything in `DAGSchedulerSuite` 1k times on my laptop.  Also I ran a full jenkins build with `BlacklistIntegrationSuite` 500 times and `DAGSchedulerSuite` 50 times, see https://github.com/apache/spark/pull/13548.  (I tried more times but jenkins timed out.)
+
+To check for more leaked threads, I added some code to dump the list of all threads at the end of each test in DAGSchedulerSuite, which is how I discovered the mapOutputTracker and eventLoop were leaking threads.  (I removed that code from the final pr, just part of the testing.)
+
+And I'll run Jenkins on this a couple of times to do one more check.
+
+Author: Imran Rashid <irashid@cloudera.com>
+
+Closes #13565 from squito/blacklist_extra_tests.
+---
+ .../org/apache/spark/scheduler/DAGScheduler.scala  |    4 +-
+ .../scheduler/BlacklistIntegrationSuite.scala      |   15 ++---
+ .../apache/spark/scheduler/DAGSchedulerSuite.scala |   16 ++++-
+ .../scheduler/SchedulerIntegrationSuite.scala      |   67 +++++++++++++++-----
+ 4 files changed, 74 insertions(+), 28 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/DAGScheduler.scala b/core/src/main/scala/org/apache/spark/scheduler/DAGScheduler.scala
+index eb4918d..d3289d3 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/DAGScheduler.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/DAGScheduler.scala
+@@ -1467,8 +1467,10 @@ class DAGScheduler(
+     }
+ 
+     if (ableToCancelStages) {
+-      job.listener.jobFailed(error)
++      // SPARK-15783 important to cleanup state first, just for tests where we have some asserts
++      // against the state.  Otherwise we have a *little* bit of flakiness in the tests.
+       cleanupStateForJobAndIndependentStages(job)
++      job.listener.jobFailed(error)
+       listenerBus.post(SparkListenerJobEnd(job.jobId, clock.getTimeMillis(), JobFailed(error)))
+     }
+   }
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/BlacklistIntegrationSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/BlacklistIntegrationSuite.scala
+index cb3b7c3..14c8b66 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/BlacklistIntegrationSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/BlacklistIntegrationSuite.scala
+@@ -42,12 +42,11 @@ class BlacklistIntegrationSuite extends SchedulerIntegrationSuite[MultiExecutorM
+ 
+   // Test demonstrating the issue -- without a config change, the scheduler keeps scheduling
+   // according to locality preferences, and so the job fails
+-  ignore("If preferred node is bad, without blacklist job will fail") {
++  testScheduler("If preferred node is bad, without blacklist job will fail") {
+     val rdd = new MockRDDWithLocalityPrefs(sc, 10, Nil, badHost)
+     withBackend(badHostBackend _) {
+       val jobFuture = submit(rdd, (0 until 10).toArray)
+-      val duration = Duration(1, SECONDS)
+-      Await.ready(jobFuture, duration)
++      awaitJobTermination(jobFuture, duration)
+     }
+     assertDataStructuresEmpty(noFailure = false)
+   }
+@@ -55,7 +54,7 @@ class BlacklistIntegrationSuite extends SchedulerIntegrationSuite[MultiExecutorM
+   // even with the blacklist turned on, if maxTaskFailures is not more than the number
+   // of executors on the bad node, then locality preferences will lead to us cycling through
+   // the executors on the bad node, and still failing the job
+-  ignoreScheduler(
++  testScheduler(
+     "With blacklist on, job will still fail if there are too many bad executors on bad host",
+     extraConfs = Seq(
+       // set this to something much longer than the test duration so that executors don't get
+@@ -66,15 +65,14 @@ class BlacklistIntegrationSuite extends SchedulerIntegrationSuite[MultiExecutorM
+     val rdd = new MockRDDWithLocalityPrefs(sc, 10, Nil, badHost)
+     withBackend(badHostBackend _) {
+       val jobFuture = submit(rdd, (0 until 10).toArray)
+-      val duration = Duration(3, SECONDS)
+-      Await.ready(jobFuture, duration)
++      awaitJobTermination(jobFuture, duration)
+     }
+     assertDataStructuresEmpty(noFailure = false)
+   }
+ 
+   // Here we run with the blacklist on, and maxTaskFailures high enough that we'll eventually
+   // schedule on a good node and succeed the job
+-  ignoreScheduler(
++  testScheduler(
+     "Bad node with multiple executors, job will still succeed with the right confs",
+     extraConfs = Seq(
+       // set this to something much longer than the test duration so that executors don't get
+@@ -89,8 +87,7 @@ class BlacklistIntegrationSuite extends SchedulerIntegrationSuite[MultiExecutorM
+     val rdd = new MockRDDWithLocalityPrefs(sc, 10, Nil, badHost)
+     withBackend(badHostBackend _) {
+       val jobFuture = submit(rdd, (0 until 10).toArray)
+-      val duration = Duration(1, SECONDS)
+-      Await.ready(jobFuture, duration)
++      awaitJobTermination(jobFuture, duration)
+     }
+     assert(results === (0 until 10).map { _ -> 42 }.toMap)
+     assertDataStructuresEmpty(noFailure = true)
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/DAGSchedulerSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/DAGSchedulerSuite.scala
+index aead105..d94a069 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/DAGSchedulerSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/DAGSchedulerSuite.scala
+@@ -202,7 +202,11 @@ class DAGSchedulerSuite
+     cancelledStages.clear()
+     cacheLocations.clear()
+     results.clear()
+-    mapOutputTracker = new MapOutputTrackerMaster(conf)
++    mapOutputTracker = new MapOutputTrackerMaster(conf) {
++      override def sendTracker(message: Any): Unit = {
++        // no-op, just so we can stop this to avoid leaking threads
++      }
++    }
+     scheduler = new DAGScheduler(
+         sc,
+         taskScheduler,
+@@ -213,8 +217,14 @@ class DAGSchedulerSuite
+     dagEventProcessLoopTester = new DAGSchedulerEventProcessLoopTester(scheduler)
+   }
+ 
+-  after {
+-    scheduler.stop()
++  override def afterEach(): Unit = {
++    try {
++      scheduler.stop()
++      dagEventProcessLoopTester.stop()
++      mapOutputTracker.stop()
++    } finally {
++      super.afterEach()
++    }
+   }
+ 
+   override def afterAll() {
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/SchedulerIntegrationSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/SchedulerIntegrationSuite.scala
+index d08167b..c46c4e6 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/SchedulerIntegrationSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/SchedulerIntegrationSuite.scala
+@@ -17,8 +17,8 @@
+ package org.apache.spark.scheduler
+ 
+ import java.util.Properties
+-import java.util.concurrent.TimeUnit
+-import java.util.concurrent.atomic.AtomicBoolean
++import java.util.concurrent.{TimeoutException, TimeUnit}
++import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+ 
+ import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
+ import scala.concurrent.{Await, Future}
+@@ -55,6 +55,7 @@ abstract class SchedulerIntegrationSuite[T <: MockBackend: ClassTag] extends Spa
+     }
+     results.clear()
+     failure = null
++    backendException.set(null)
+     super.beforeEach()
+   }
+ 
+@@ -90,11 +91,6 @@ abstract class SchedulerIntegrationSuite[T <: MockBackend: ClassTag] extends Spa
+     }
+   }
+ 
+-  // still a few races to work out in the blacklist tests, so ignore some tests
+-  def ignoreScheduler(name: String, extraConfs: Seq[(String, String)])(testBody: => Unit): Unit = {
+-    ignore(name)(testBody)
+-  }
+-
+   /**
+    * A map from partition -> results for all tasks of a job when you call this test framework's
+    * [[submit]] method.  Two important considerations:
+@@ -175,6 +171,7 @@ abstract class SchedulerIntegrationSuite[T <: MockBackend: ClassTag] extends Spa
+       assert(failure != null)
+     }
+     assert(scheduler.activeJobs.isEmpty)
++    assert(backendException.get() == null)
+   }
+ 
+   /**
+@@ -212,6 +209,8 @@ abstract class SchedulerIntegrationSuite[T <: MockBackend: ClassTag] extends Spa
+     new MockRDD(sc, nParts, shuffleDeps)
+   }
+ 
++  val backendException = new AtomicReference[Exception](null)
++
+   /**
+    * Helper which makes it a little easier to setup a test, which starts a mock backend in another
+    * thread, responding to tasks with your custom function.  You also supply the "body" of your
+@@ -226,7 +225,17 @@ abstract class SchedulerIntegrationSuite[T <: MockBackend: ClassTag] extends Spa
+       override def run(): Unit = {
+         while (backendContinue.get()) {
+           if (backend.hasTasksWaitingToRun) {
+-            backendFunc()
++            try {
++              backendFunc()
++            } catch {
++              case ex: Exception =>
++                // Try to do a little error handling around exceptions that might occur here --
++                // otherwise it can just look like a TimeoutException in the test itself.
++                logError("Exception in mock backend:", ex)
++                backendException.set(ex)
++                backendContinue.set(false)
++                throw ex
++            }
+           } else {
+             Thread.sleep(10)
+           }
+@@ -242,6 +251,25 @@ abstract class SchedulerIntegrationSuite[T <: MockBackend: ClassTag] extends Spa
+     }
+   }
+ 
++  /**
++   * Helper to do a little extra error checking while waiting for the job to terminate.  Primarily
++   * just does a little extra error handling if there is an exception from the backend.
++   */
++  def awaitJobTermination(jobFuture: Future[_], duration: Duration): Unit = {
++    try {
++      Await.ready(jobFuture, duration)
++    } catch {
++      case te: TimeoutException if backendException.get() != null =>
++        val msg = raw"""
++           | ----- Begin Backend Failure Msg -----
++           | ${Utils.exceptionString(backendException.get())}
++           | ----- End Backend Failure Msg ----
++        """.
++          stripMargin
++
++        fail(s"Future timed out after ${duration}, likely because of failure in backend: $msg")
++    }
++  }
+ }
+ 
+ /**
+@@ -258,6 +286,12 @@ private[spark] abstract class MockBackend(
+     ThreadUtils.newDaemonSingleThreadScheduledExecutor("driver-revive-thread")
+   private val reviveIntervalMs = conf.getTimeAsMs("spark.scheduler.revive.interval", "10ms")
+ 
++  reviveThread.scheduleAtFixedRate(new Runnable {
++    override def run(): Unit = Utils.tryLogNonFatalError {
++      reviveOffers()
++    }
++  }, 0, reviveIntervalMs, TimeUnit.MILLISECONDS)
++
+   /**
+    * Test backends should call this to get a task that has been assigned to them by the scheduler.
+    * Each task should be responded to with either [[taskSuccess]] or [[taskFailed]].
+@@ -329,7 +363,9 @@ private[spark] abstract class MockBackend(
+     }, 0, reviveIntervalMs, TimeUnit.MILLISECONDS)
+   }
+ 
+-  override def stop(): Unit = {}
++  override def stop(): Unit = {
++    reviveThread.shutdown()
++  }
+ 
+   val env = SparkEnv.get
+ 
+@@ -353,8 +389,9 @@ private[spark] abstract class MockBackend(
+   }
+ 
+   /**
+-   * This is called by the scheduler whenever it has tasks it would like to schedule.  It gets
+-   * called in the scheduling thread, not the backend thread.
++   * This is called by the scheduler whenever it has tasks it would like to schedule, when a tasks
++   * completes (which will be in a result-getter thread), and by the reviveOffers thread for delay
++   * scheduling.
+    */
+   override def reviveOffers(): Unit = {
+     val offers: Seq[WorkerOffer] = generateOffers()
+@@ -503,7 +540,7 @@ class BasicSchedulerIntegrationSuite extends SchedulerIntegrationSuite[SingleCor
+     withBackend(runBackend _) {
+       val jobFuture = submit(new MockRDD(sc, 10, Nil), (0 until 10).toArray)
+       val duration = Duration(1, SECONDS)
+-      Await.ready(jobFuture, duration)
++      awaitJobTermination(jobFuture, duration)
+     }
+     assert(results === (0 until 10).map { _ -> 42 }.toMap)
+     assertDataStructuresEmpty()
+@@ -555,7 +592,7 @@ class BasicSchedulerIntegrationSuite extends SchedulerIntegrationSuite[SingleCor
+     withBackend(runBackend _) {
+       val jobFuture = submit(d, (0 until 30).toArray)
+       val duration = Duration(1, SECONDS)
+-      Await.ready(jobFuture, duration)
++      awaitJobTermination(jobFuture, duration)
+     }
+     assert(results === (0 until 30).map { idx => idx -> (4321 + idx) }.toMap)
+     assertDataStructuresEmpty()
+@@ -595,7 +632,7 @@ class BasicSchedulerIntegrationSuite extends SchedulerIntegrationSuite[SingleCor
+     withBackend(runBackend _) {
+       val jobFuture = submit(shuffledRdd, (0 until 10).toArray)
+       val duration = Duration(1, SECONDS)
+-      Await.ready(jobFuture, duration)
++      awaitJobTermination(jobFuture, duration)
+     }
+     assert(results === (0 until 10).map { idx => idx -> (42 + idx) }.toMap)
+     assert(stageToAttempts === Map(0 -> Set(0, 1), 1 -> Set(0, 1)))
+@@ -610,7 +647,7 @@ class BasicSchedulerIntegrationSuite extends SchedulerIntegrationSuite[SingleCor
+     withBackend(runBackend _) {
+       val jobFuture = submit(new MockRDD(sc, 10, Nil), (0 until 10).toArray)
+       val duration = Duration(1, SECONDS)
+-      Await.ready(jobFuture, duration)
++      awaitJobTermination(jobFuture, duration)
+       failure.getMessage.contains("test task failure")
+     }
+     assertDataStructuresEmpty(noFailure = false)
+-- 
+1.7.9.5
+

@@ -1,0 +1,53 @@
+From 5d692fd12b170834cd00c6d31ff4040f241563b0 Mon Sep 17 00:00:00 2001
+From: Reynold Xin <rxin@databricks.com>
+Date: Fri, 29 Apr 2016 22:26:12 -0700
+Subject: [PATCH 343/517] [SPARK-14757] [SQL] Fix nullability bug in
+ EqualNullSafe codegen
+
+This patch fixes a null handling bug in EqualNullSafe's code generation.
+
+Updated unit test so they would fail without the fix.
+
+Closes #12628.
+
+Author: Reynold Xin <rxin@databricks.com>
+Author: Arash Nabili <arash@levyx.com>
+
+Closes #12799 from rxin/equalnullsafe.
+
+(cherry picked from commit 10d513feb4b657d62d576b39e97ad87a988a9e2a)
+---
+ .../sql/catalyst/expressions/predicates.scala      |    2 +-
+ .../sql/catalyst/expressions/PredicateSuite.scala  |    3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/predicates.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/predicates.scala
+index 304b438..77e8506 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/predicates.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/predicates.scala
+@@ -416,7 +416,7 @@ case class EqualNullSafe(left: Expression, right: Expression) extends BinaryComp
+     ev.isNull = "false"
+     eval1.code + eval2.code + s"""
+         boolean ${ev.value} = (${eval1.isNull} && ${eval2.isNull}) ||
+-           (!${eval1.isNull} && $equalCode);
++           (!${eval1.isNull} && !${eval2.isNull} && $equalCode);
+       """
+   }
+ }
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/PredicateSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/PredicateSuite.scala
+index 03e7611..b3f2069 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/PredicateSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/PredicateSuite.scala
+@@ -273,7 +273,8 @@ class PredicateSuite extends SparkFunSuite with ExpressionEvalHelper {
+   }
+ 
+   test("BinaryComparison: null test") {
+-    val normalInt = Literal(1)
++    // Use -1 (default value for codegen) which can trigger some weird bugs, e.g. SPARK-14757
++    val normalInt = Literal(-1)
+     val nullInt = Literal.create(null, IntegerType)
+ 
+     def nullTest(op: (Expression, Expression) => Expression): Unit = {
+-- 
+1.7.9.5
+

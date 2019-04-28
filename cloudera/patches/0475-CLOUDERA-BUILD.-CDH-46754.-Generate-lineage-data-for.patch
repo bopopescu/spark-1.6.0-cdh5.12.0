@@ -1,0 +1,1199 @@
+From 5c60bd5eaa04e543528c0b18022a297d3635ab4a Mon Sep 17 00:00:00 2001
+From: Salil Surendran <salilsurendran@cloudera.com>
+Date: Wed, 8 Feb 2017 22:10:47 -0800
+Subject: [PATCH 475/517] CLOUDERA-BUILD. CDH-46754. Generate lineage data for
+ Spark SQL applications
+
+Addition of the lineage project which will house the lineage code responsible for parsing and outputting the lineage data to the navigator json file.
+Lineage of Spark applications using Spark SQL queries will be outputted to the lineage log directory. For each spark sql query that has inputs or outputs for eg. from hive, parquet file, json file etc., the tables or files from where the data was read and to where it was written, the columns read, data source type of the inputs/outputs will be written out as lineage data.
+---
+ assembly/pom.xml                                   |    5 +
+ lineage/pom.xml                                    |  120 +++++++++++
+ .../spark/lineage/ClouderaNavigatorListener.scala  |  147 ++++++++++++++
+ .../cloudera/spark/lineage/LineageElement.scala    |   47 +++++
+ .../spark/sql/query/analysis/QueryAnalysis.scala   |  212 ++++++++++++++++++++
+ .../spark/lineage/LineageElementSuite.scala        |   96 +++++++++
+ .../query/analysis/FileQueryAnalysisSuite.scala    |  100 +++++++++
+ .../query/analysis/HiveQueryAnalysisSuite.scala    |  139 +++++++++++++
+ .../spark/sql/query/analysis/ParquetHDFSTest.scala |   64 ++++++
+ .../spark/sql/query/analysis/TestUtils.scala       |   72 +++++++
+ pom.xml                                            |    1 +
+ project/SparkBuild.scala                           |   20 +-
+ .../spark/sql/hive/HiveMetastoreCatalog.scala      |    7 +-
+ 13 files changed, 1026 insertions(+), 4 deletions(-)
+ create mode 100644 lineage/pom.xml
+ create mode 100644 lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+ create mode 100644 lineage/src/main/scala/com/cloudera/spark/lineage/LineageElement.scala
+ create mode 100644 lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+ create mode 100644 lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala
+ create mode 100644 lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala
+ create mode 100644 lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+ create mode 100644 lineage/src/test/scala/org/apache/spark/sql/query/analysis/ParquetHDFSTest.scala
+ create mode 100644 lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
+
+diff --git a/assembly/pom.xml b/assembly/pom.xml
+index 60eb571..7ff8319 100644
+--- a/assembly/pom.xml
++++ b/assembly/pom.xml
+@@ -99,6 +99,11 @@
+       <artifactId>spark-avro_${scala.binary.version}</artifactId>
+       <version>${spark-avro.version}</version>
+     </dependency>
++    <dependency>
++      <groupId>com.cloudera.spark</groupId>
++      <artifactId>spark-lineage_${scala.binary.version}</artifactId>
++      <version>${project.version}</version>
++    </dependency>
+   </dependencies>
+ 
+   <build>
+diff --git a/lineage/pom.xml b/lineage/pom.xml
+new file mode 100644
+index 0000000..ca929c4
+--- /dev/null
++++ b/lineage/pom.xml
+@@ -0,0 +1,120 @@
++<?xml version="1.0" encoding="UTF-8"?>
++
++<!--
++  ~ Licensed to the Apache Software Foundation (ASF) under one or more
++  ~ contributor license agreements.  See the NOTICE file distributed with
++  ~ this work for additional information regarding copyright ownership.
++  ~ The ASF licenses this file to You under the Apache License, Version 2.0
++  ~ (the "License"); you may not use this file except in compliance with
++  ~ the License.  You may obtain a copy of the License at
++  ~
++  ~    http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License.
++  -->
++
++<project xmlns="http://maven.apache.org/POM/4.0.0"
++         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
++  <parent>
++    <artifactId>spark-parent_2.10</artifactId>
++    <groupId>org.apache.spark</groupId>
++    <version>1.6.0-cdh5.11.0-SNAPSHOT</version>
++    <relativePath>../pom.xml</relativePath>
++  </parent>
++  <properties>
++    <sbt.project.name>lineage</sbt.project.name>
++  </properties>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>com.cloudera.spark</groupId>
++  <name>Cloudera Spark Project Lineage</name>
++  <artifactId>spark-lineage_2.10</artifactId>
++  <packaging>jar</packaging>
++  <dependencies>
++
++    <dependency>
++      <groupId>org.apache.hadoop</groupId>
++      <artifactId>hadoop-common</artifactId>
++      <version>${cdh.hadoop.version}</version>
++      <type>test-jar</type>
++      <scope>test</scope>
++      <exclusions>
++        <exclusion>
++          <groupId>javax.servlet.jsp</groupId>
++          <artifactId>jsp-api</artifactId>
++        </exclusion>
++        <exclusion>
++          <groupId>javax.servlet</groupId>
++          <artifactId>servlet-api</artifactId>
++        </exclusion>
++      </exclusions>
++    </dependency>
++    <dependency>
++      <groupId>org.apache.hadoop</groupId>
++      <artifactId>hadoop-common</artifactId>
++    </dependency>
++    <dependency>
++      <groupId>org.apache.hadoop</groupId>
++      <artifactId>hadoop-hdfs</artifactId>
++      <version>${cdh.hadoop.version}</version>
++      <type>test-jar</type>
++      <scope>test</scope>
++      <exclusions>
++        <exclusion>
++          <groupId>javax.servlet.jsp</groupId>
++          <artifactId>jsp-api</artifactId>
++        </exclusion>
++        <exclusion>
++          <groupId>javax.servlet</groupId>
++          <artifactId>servlet-api</artifactId>
++        </exclusion>
++      </exclusions>
++    </dependency>
++    <dependency>
++      <groupId>org.apache.spark</groupId>
++      <artifactId>spark-catalyst_${scala.binary.version}</artifactId>
++      <version>${project.version}</version>
++      <type>test-jar</type>
++      <scope>test</scope>
++    </dependency>
++    <dependency>
++      <groupId>org.apache.spark</groupId>
++      <artifactId>spark-core_${scala.binary.version}</artifactId>
++      <version>${project.version}</version>
++      <type>test-jar</type>
++      <scope>test</scope>
++    </dependency>
++    <dependency>
++      <groupId>org.apache.spark</groupId>
++      <artifactId>spark-hive_${scala.binary.version}</artifactId>
++      <version>${project.version}</version>
++    </dependency>
++    <dependency>
++      <groupId>org.apache.spark</groupId>
++      <artifactId>spark-hive_${scala.binary.version}</artifactId>
++      <version>${project.version}</version>
++      <type>test-jar</type>
++      <scope>test</scope>
++    </dependency>
++    <dependency>
++      <groupId>org.apache.spark</groupId>
++      <artifactId>spark-sql_${scala.binary.version}</artifactId>
++      <version>${project.version}</version>
++    </dependency>
++    <dependency>
++      <groupId>org.apache.spark</groupId>
++      <artifactId>spark-sql_${scala.binary.version}</artifactId>
++      <version>${project.version}</version>
++      <type>test-jar</type>
++      <scope>test</scope>
++    </dependency>
++  </dependencies>
++  <build>
++    <outputDirectory>target/scala-${scala.binary.version}/classes</outputDirectory>
++    <testOutputDirectory>target/scala-${scala.binary.version}/test-classes</testOutputDirectory>
++  </build>
++</project>
+diff --git a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+new file mode 100644
+index 0000000..34f74c9
+--- /dev/null
++++ b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+@@ -0,0 +1,147 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.cloudera.spark.lineage
++
++import java.io.{File, FileNotFoundException, FileOutputStream, OutputStreamWriter}
++import java.nio.charset.StandardCharsets
++import java.nio.file.{Files, Paths}
++
++import com.fasterxml.jackson.annotation.JsonInclude.Include
++import com.fasterxml.jackson.databind.ObjectMapper
++import com.fasterxml.jackson.module.scala.DefaultScalaModule
++import org.apache.spark.{Logging, SparkContext}
++import org.apache.spark.scheduler.{SparkListener, SparkListenerApplicationEnd}
++import org.apache.spark.sql.execution.QueryExecution
++import org.apache.spark.sql.query.analysis.{DataSourceType, QueryAnalysis, QueryDetails}
++import org.apache.spark.sql.util.QueryExecutionListener
++
++/**
++ * The Listener that is responsible for listening to SQL queries and outputting the lineage
++ * metadata to the lineage folder.
++ */
++private[lineage] class ClouderaNavigatorListener
++    extends SparkListener
++    with QueryExecutionListener
++    with Logging {
++
++  private val mapper = new ObjectMapper()
++    .registerModule(DefaultScalaModule)
++    .setSerializationInclusion(Include.NON_NULL)
++    .setSerializationInclusion(Include.NON_EMPTY)
++  private val SPARK_LINEAGE_DIR_PROPERTY: String = "spark.lineage.log.dir"
++  private val DEFAULT_SPARK_LINEAGE_DIR: String = "/var/log/spark/lineage"
++
++  override def onFailure(
++      funcName: String,
++      qe: QueryExecution,
++      exception: Exception,
++      extraParams: Map[String, String]): Unit = {}
++
++  override def onSuccess(
++      funcName: String,
++      qe: QueryExecution,
++      durationNs: Long,
++      extraParams: Map[String, String]): Unit = writeQueryMetadata(qe, durationNs, extraParams)
++
++  override def onApplicationEnd(applicationEnd: SparkListenerApplicationEnd): Unit = {
++    val sc = SparkContext.getOrCreate()
++    if (checkLineageEnabled(sc)) {
++      val lineageElement = getNewLineageElement(sc)
++      lineageElement.ended = true
++      writeToLineageFile(lineageElement, sc)
++    }
++  }
++
++  private def writeQueryMetadata(
++      qe: QueryExecution,
++      durationNs: Long,
++      extraParams: Map[String, String]): Unit = {
++    val sc = SparkContext.getOrCreate()
++    if (checkLineageEnabled(sc)) {
++      val lineageElement = getNewLineageElement(sc)
++      lineageElement.yarnApplicationId = sc.applicationId
++      lineageElement.duration = durationNs / 1000000
++      lineageElement.user = sc.sparkUser
++
++      val inputMetaData = QueryAnalysis.getInputMetadata(qe)
++      QueryAnalysis
++        .convertToQueryDetails(inputMetaData)
++        .map(addHiveMetastoreLocation(_, qe))
++        .foreach(lineageElement.addInput(_))
++
++      QueryAnalysis
++        .getOutputMetaData(qe, extraParams)
++        .map(addHiveMetastoreLocation(_, qe))
++        .foreach(lineageElement.addOutput(_))
++
++      if (lineageElement.inputs.size > 0 || lineageElement.outputs.size > 0) {
++        writeToLineageFile(lineageElement, sc)
++      }
++    }
++  }
++
++  private def getNewLineageElement(sc: SparkContext): LineageElement = {
++    val lineageElement = new LineageElement()
++    lineageElement.applicationID =
++      sc.getConf.getOption("spark.lineage.app.name").getOrElse(sc.applicationId)
++    lineageElement.timestamp = System.currentTimeMillis()
++    lineageElement
++  }
++
++  private def addHiveMetastoreLocation(
++      queryDetails: QueryDetails,
++      qe: QueryExecution): QueryDetails = {
++    if (queryDetails.dataSourceType == DataSourceType.HIVE) {
++      queryDetails.hiveMetastoreLocation = qe.sqlContext.getConf("hive.metastore.uris")
++    }
++    queryDetails
++  }
++
++  private def checkLineageEnabled(sc: SparkContext): Boolean = {
++    val dir = sc.getConf.get(SPARK_LINEAGE_DIR_PROPERTY, DEFAULT_SPARK_LINEAGE_DIR)
++    val enabled = sc.getConf.getBoolean("spark.lineage.enabled", false)
++    if (enabled && !Files.exists(Paths.get(dir))) {
++      throw new FileNotFoundException(
++          s"Lineage is enabled but lineage directory $dir doesn't exist")
++    }
++    enabled
++  }
++
++  /**
++   * Write the lineage element to the file, flush and close it so that navigator can see the data
++   * immediately
++   * @param lineageElement
++   * @param sc
++   */
++  private def writeToLineageFile(lineageElement: LineageElement, sc: SparkContext): Unit =
++    synchronized {
++      val dir = sc.getConf.get(SPARK_LINEAGE_DIR_PROPERTY, DEFAULT_SPARK_LINEAGE_DIR)
++      var fileWriter: OutputStreamWriter = null
++      try {
++        fileWriter = new OutputStreamWriter(
++            new FileOutputStream(dir + File.separator + "spark_lineage_log_" + sc.applicationId
++                  + "-" + sc.startTime + ".log"), StandardCharsets.UTF_8);
++        fileWriter.append(mapper.writeValueAsString(lineageElement) + System.lineSeparator())
++      } finally {
++        if (fileWriter != null) {
++          fileWriter.flush()
++          fileWriter.close()
++        }
++      }
++    }
++}
+diff --git a/lineage/src/main/scala/com/cloudera/spark/lineage/LineageElement.scala b/lineage/src/main/scala/com/cloudera/spark/lineage/LineageElement.scala
+new file mode 100644
+index 0000000..67a3f7f
+--- /dev/null
++++ b/lineage/src/main/scala/com/cloudera/spark/lineage/LineageElement.scala
+@@ -0,0 +1,47 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package com.cloudera.spark.lineage
++
++import scala.collection.mutable.ListBuffer
++
++import org.apache.spark.sql.query.analysis.QueryDetails
++
++/**
++ * A class that is used to contain the query execution meta-data that is later on written to
++ * the lineage log files
++ */
++private[lineage] class LineageElement {
++
++  val version = "1.0"
++  var applicationID: String = _
++  var yarnApplicationId: String = _
++  var timestamp: Long = _
++  var duration: Long = _
++  var user: String = _
++  var message: String = _
++  var inputs: ListBuffer[QueryDetails] = ListBuffer[QueryDetails]()
++  var outputs: ListBuffer[QueryDetails] = ListBuffer[QueryDetails]()
++  var ended: Boolean = _
++
++  def addInput(queryDetails: QueryDetails): Unit = {
++    inputs += queryDetails
++  }
++
++  def addOutput(queryDetails: QueryDetails): Unit = {
++    outputs += queryDetails
++  }
++}
+diff --git a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+new file mode 100644
+index 0000000..c90bbc9
+--- /dev/null
++++ b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+@@ -0,0 +1,212 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.spark.sql.query.analysis
++
++import com.cloudera.spark.lineage.DataSourceType.DataSourceType
++import com.cloudera.spark.lineage.{DataSourceType, FieldDetails, QueryDetails}
++import org.apache.hadoop.fs.Path
++import org.apache.spark.SparkContext
++import org.apache.spark.sql.catalyst.TableIdentifier
++import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, NamedExpression}
++import org.apache.spark.sql.catalyst.plans.logical.{UnaryNode, _}
++import org.apache.spark.sql.execution.QueryExecution
++import org.apache.spark.sql.execution.datasources.{
++  CreateTableUsing,
++  CreateTableUsingAsSelect,
++  LogicalRelation
++}
++import org.apache.spark.sql.hive.MetastoreRelation
++import org.apache.spark.sql.sources.HadoopFsRelation
++
++import scala.collection.mutable
++import scala.collection.mutable.ListBuffer
++
++/**
++ * This class is responsible for analyzing the {@link QueryExecution} and extracting the input
++ * and output metadata
++ */
++object QueryAnalysis {
++
++  def getOutputMetaData(
++      qe: QueryExecution,
++      extraParams: Map[String, String]): Option[QueryDetails] = {
++    getTopLevelNamedExpressions(qe.optimizedPlan) match {
++      case Some(s) => getSource(qe, extraParams, s.map(_.name))
++      case None => None
++    }
++  }
++
++  private def getSource(
++      qe: QueryExecution,
++      extraParams: Map[String, String],
++      fields: List[String]): Option[QueryDetails] = {
++    extraParams.get("path") match {
++      case Some(path) =>
++        val qualifiedPath = getQualifiedFilePath(qe.sqlContext.sparkContext, path)
++        Some(QueryDetails(qualifiedPath, fields.to[ListBuffer], getDataSourceType(qualifiedPath)))
++      case None => {
++        qe.optimizedPlan match {
++          case CreateTableUsing(t, _, _, _, _, _, _) =>
++            Some(new QueryDetails(getQualifiedDBName(qe, t), fields.to[ListBuffer],
++                DataSourceType.HIVE))
++          case CreateTableUsingAsSelect(t, _, _, _, _, _, _) =>
++            Some(new QueryDetails(getQualifiedDBName(qe, t), fields.to[ListBuffer],
++                DataSourceType.HIVE))
++          case _ => None
++        }
++      }
++    }
++  }
++
++  private def getQualifiedDBName(qe: QueryExecution, tableIdentifier: TableIdentifier): String = {
++    tableIdentifier.database.getOrElse(qe.sqlContext.catalog.getCurrentDatabase) + "." +
++      tableIdentifier.table
++  }
++
++  private def getQualifiedFilePath(sparkContext: SparkContext, path: String): String = {
++    val filePath = new Path(path)
++    val fs = filePath.getFileSystem(sparkContext.hadoopConfiguration)
++    filePath.makeQualified(fs.getUri, filePath).toString
++  }
++
++  private def getDataSourceType(path: String): DataSourceType = {
++    path match {
++      case p if p.startsWith("s3") => DataSourceType.S3
++      case p if p.startsWith("hdfs") => DataSourceType.HDFS
++      case p if p.startsWith("file") => DataSourceType.LOCAL
++      case _ => DataSourceType.UNKNOWN
++    }
++  }
++
++  /**
++   * Extracts the input metadata from the @see [[QueryExecution]] object.
++   * @param qe
++   * @return
++   */
++  def getInputMetadata(qe: QueryExecution): List[FieldDetails] = {
++    getTopLevelAttributes(qe).foldLeft(List.empty[FieldDetails]) { (acc, a) =>
++      getRelation(qe.optimizedPlan, a) match {
++        case Some(rel) =>
++          rel match {
++            case LogicalRelation(_, _, Some(tableId)) =>
++              FieldDetails(Array(tableId.unquotedString), a.name, DataSourceType.HIVE) :: acc
++            case LogicalRelation(p: ParquetRelation, _, _)
++              if p.parameters.contains(ParquetRelation.METASTORE_TABLE_NAME) =>
++                FieldDetails(Array(p.parameters.get(ParquetRelation.METASTORE_TABLE_NAME).get),
++                  a.name, DataSourceType.HIVE) :: acc
++            case LogicalRelation(dfsRel: HadoopFsRelation, _, _) =>
++              val paths = dfsRel.paths
++              FieldDetails(paths, a.name, getDataSourceType(paths(0))) :: acc
++            case m: MetastoreRelation =>
++              FieldDetails(Array(m.databaseName + "." + m.tableName), a.name,
++                DataSourceType.HIVE) :: acc
++            case _ => acc
++          }
++        case None => acc
++      }
++    }
++  }
++
++  /**
++   * Converts the list of input metadata into a map of format [table -> fields read from table]
++   * @param list
++   * @return
++   */
++  def convertToQueryDetails(list: List[FieldDetails]): Iterable[QueryDetails] = {
++    val map = list.foldLeft(mutable.Map.empty[String, QueryDetails]) { (map, fieldDetails) =>
++      fieldDetails.source.foreach { s =>
++        val queryDetails = map.getOrElseUpdate(s,
++          QueryDetails(s, new ListBuffer[String], fieldDetails.sourceType))
++        queryDetails.fields.append(fieldDetails.field)
++      }
++      map
++    }
++    map.values
++  }
++
++  private def getTopLevelAttributes(qe: QueryExecution): List[AttributeReference] = {
++    getTopLevelAttributes(qe.optimizedPlan).getOrElse(List.empty)
++  }
++
++  /**
++   * Extract the {@link AttributeReference}s from the {@link LogicalPlan} that will be written out
++   * when the plan is executed. These are the first element of either {@link Project} or
++   * {@link LogicalRelation}
++   */
++  private def getTopLevelAttributes(plan: LogicalPlan): Option[List[AttributeReference]] = {
++    getTopLevelNamedExpressions(plan).map(getAttributesReferences)
++  }
++
++  private def getTopLevelNamedExpressions(plan: LogicalPlan): Option[List[NamedExpression]] = {
++    plan.collectFirst {
++      case p @ Project(_, _) => p.projectList.toList
++      case Join(left, right, _, _) => {
++        val leftTop = getTopLevelNamedExpressions(left).getOrElse(List.empty)
++        val rightTop = getTopLevelNamedExpressions(right).getOrElse(List.empty)
++        leftTop ::: rightTop
++      }
++      case l: LogicalRelation => l.output.toList
++      case m: MetastoreRelation => m.attributes.toList
++    }
++  }
++
++  /**
++   * Given a sequence of NamedExpressions which could contain AttributeReferences as well as
++   * Aliases return back a list of AttributeReferences
++   */
++  private def getAttributesReferences(
++      seqExpression: Seq[NamedExpression]): List[AttributeReference] = {
++    seqExpression.foldLeft(List.empty[AttributeReference]) { (acc, node) =>
++        node match {
++          case ar: AttributeReference => ar :: acc
++          case Alias(child: AttributeReference, _) => child :: acc
++          case _ => acc
++      }
++    }
++  }
++
++  /**
++   * Extract the logical or metastore relation associated with this particular attribute.
++   * Essentially given an attribute like a column from a hive table or a column from a json file
++   * it will return back the relation representing the hive table or json file
++   *
++   * @param plan - The root of the plan from where to begin the analysis
++   * @param attr - The attribute to dereference
++   * @return An Option representing a LeafNode
++   */
++  private def getRelation(plan: LogicalPlan, attr: AttributeReference): Option[LeafNode] = {
++    plan match {
++      case r: LogicalRelation =>
++        if (getAttributesReferences(r.output).exists(a => a.sameRef(attr))) {
++          Some(r)
++        } else {
++          None
++        }
++      case m: MetastoreRelation => Some(m)
++      case p @ Project(_, _) =>
++        if (getAttributesReferences(p.projectList).exists(a => a.sameRef(attr))) {
++          getRelation(p.child, attr)
++        } else {
++          None
++        }
++      case binaryNode: BinaryNode => getRelation(binaryNode.children(0), attr).orElse(
++          getRelation(binaryNode.children(1), attr))
++      case unaryNode: UnaryNode => getRelation(unaryNode.children(0), attr)
++      case _ => None
++    }
++  }
++}
+diff --git a/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala b/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala
+new file mode 100644
+index 0000000..a34d01f
+--- /dev/null
++++ b/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala
+@@ -0,0 +1,96 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.cloudera.spark.lineage
++
++import java.util.HashMap
++
++import com.fasterxml.jackson.annotation.JsonInclude.Include
++import com.fasterxml.jackson.databind.ObjectMapper
++import com.fasterxml.jackson.module.scala.DefaultScalaModule
++import org.apache.spark.sql.query.analysis.{DataSourceFormat, DataSourceType, QueryDetails}
++
++import scala.collection.mutable.ListBuffer
++// scalastyle:off
++import org.scalatest.FunSuite
++
++class LineageElementSuite extends FunSuite {
++  // scalastyle:on
++
++  test("Test the LineageElement is serialzied and deserialized into json properly") {
++    val mySparkApp = "MySparkApp"
++    val myExecutionId: String = "MyExecutionID"
++    val timestamp: Long = 1234567890
++    val duration: Long = 1000
++    val user: String = "Myself"
++    val inputTable: String = "MyTable"
++    val col1: String = "MyCol1"
++    val col2: String = "MyCol2"
++    val inputTable2: String = "MyTable2"
++    val col3: String = "MyCol12"
++    val col4: String = "MyCol22"
++    val outputFile: String = "MyOutputFile"
++    val outputCol1: String = "MyOutputCol1"
++    val outputCol2: String = "MyOutputCol2"
++
++    val lineageElement = new LineageElement()
++    lineageElement.applicationID = mySparkApp
++    lineageElement.timestamp = timestamp
++    lineageElement.duration = duration
++    lineageElement.user = user
++    lineageElement.addInput(new QueryDetails(inputTable, List(col1, col2).to[ListBuffer],
++        DataSourceType.HIVE, DataSourceFormat.PARQUET))
++    lineageElement.addInput(new QueryDetails(inputTable2, List(col3, col4).to[ListBuffer],
++        DataSourceType.HIVE, DataSourceFormat.AVRO))
++    lineageElement
++      .addOutput(new QueryDetails(outputFile, List(outputCol1, outputCol2).to[ListBuffer],
++          DataSourceType.HDFS, DataSourceFormat.JSON))
++
++    val mapper = new ObjectMapper()
++      .registerModule(DefaultScalaModule)
++      .setSerializationInclusion(Include.NON_NULL)
++      .setSerializationInclusion(Include.NON_EMPTY)
++    val map =
++      mapper.readValue(mapper.writeValueAsString(lineageElement), classOf[HashMap[String, Any]])
++    assert(map.get("applicationID") === mySparkApp)
++    assert(map.get("timestamp") === timestamp)
++    assert(map.get("user") === user)
++    assert(map.get("duration") === duration)
++    assert(map.get("ended") === false)
++
++    val inputList: List[Map[String, Any]] = map.get("inputs").asInstanceOf[List[Map[String, Any]]]
++    assert(inputList.size === 2)
++    assertMapElements(inputList(0), inputTable, Seq(col1, col2), "HIVE", "PARQUET")
++    assertMapElements(inputList(1), inputTable2, Seq(col3, col4), "HIVE", "AVRO")
++    val outputList: List[Map[String, Any]] = map.get("outputs").asInstanceOf[List[Map[String, Any]]]
++    assertMapElements(outputList(0), outputFile, Seq(outputCol1, outputCol2), "HDFS", "JSON")
++  }
++
++  private def assertMapElements(
++      elem: Map[String, Any],
++      source: String,
++      cols: Seq[String],
++      dataSourceType: String,
++      dataSourceFormat: String) {
++    assert(elem.get("source").get === source)
++    val fields: List[String] = elem.get("fields").get.asInstanceOf[List[String]]
++    assert(fields.size === 2)
++    assert(fields.forall(cols.contains(_)))
++    assert(elem.get("dataSourceType").get === dataSourceType)
++    assert(elem.get("dataSourceFormat").get === dataSourceFormat)
++  }
++}
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala
+new file mode 100644
+index 0000000..96a776f
+--- /dev/null
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala
+@@ -0,0 +1,100 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.spark.sql.query.analysis
++
++import org.apache.spark.SparkFunSuite
++import org.apache.spark.sql.execution.datasources.parquet.ParquetTest
++import org.apache.spark.sql.query.analysis.DataSourceType.DataSourceType
++import org.apache.spark.sql.query.analysis.TestUtils._
++import org.apache.spark.sql.test.SharedSQLContext
++
++/**
++ * Tests that reading and writing to the local and HDFS file systems produces the desired lineage.
++ */
++class FileQueryAnalysisSuite
++    extends SparkFunSuite
++    with ParquetHDFSTest
++    with ParquetTest
++    with SharedSQLContext {
++
++  test("Local file works") {
++    testSimpleQuery(withParquetFile, DataSourceType.LOCAL)
++  }
++
++  test("Multiple local files works") {
++    testMultipleFiles(withParquetFile, DataSourceType.LOCAL)
++  }
++
++  test("HDFS file works") {
++    testSimpleQuery(withParquetHDFSFile, DataSourceType.HDFS)
++  }
++
++  test("Multiple HDFS files works") {
++    testMultipleFiles(withParquetHDFSFile, DataSourceType.HDFS)
++  }
++
++  def testSimpleQuery(
++      fileFunc: (Seq[Customer]) => (String => Unit) => Unit,
++      dataSourceType: DataSourceType): Unit = {
++    sqlContext.listenerManager.register(TestQeListener)
++    fileFunc((1 to 4).map(i => Customer(i, i.toString))) { parquetFile =>
++      val df = sqlContext.read.load(parquetFile).select("id", "name")
++      df.write.save(parquetFile + "_output")
++      val (qe, extraParams) = TestQeListener.getAndClear()
++      val inputMetadata = QueryAnalysis.getInputMetadata(qe)
++      assert(inputMetadata.length === 2)
++      assertHDFSFieldExists(inputMetadata, Array(parquetFile), "id", dataSourceType)
++      assertHDFSFieldExists(inputMetadata, Array(parquetFile), "name", dataSourceType)
++      val outputMetadata = QueryAnalysis.getOutputMetaData(df.queryExecution, extraParams)
++      assert(outputMetadata.isDefined)
++      assert(outputMetadata.get.fields.forall(Seq("id", "name").contains(_)))
++      assert(outputMetadata.get.dataSourceType === dataSourceType)
++      assert(outputMetadata.get.source === getScheme(dataSourceType) + parquetFile + "_output")
++    }
++  }
++
++  def testMultipleFiles(
++      fileFunc: (Seq[Customer]) => (String => Unit) => Unit,
++      dataSourceType: DataSourceType): Unit = {
++    sqlContext.listenerManager.register(TestQeListener)
++    fileFunc((1 to 4).map(i => Customer(i, i.toString))) { parquetFile: String =>
++      fileFunc((1 to 4).map(i => Customer(i, i.toString))) { parquetFile2: String =>
++        fileFunc((1 to 4).map(i => Customer(i, i.toString))) { parquetFile3 =>
++          val parquetFiles = Array(parquetFile, parquetFile2, parquetFile3)
++          val df = sqlContext.read.load(parquetFiles: _*).select("id", "name")
++          df.write.save(parquetFile + "_output")
++          val (qe, extraParams) = TestQeListener.getAndClear()
++          val inputMetadata = QueryAnalysis.getInputMetadata(qe)
++          assert(inputMetadata.length === 2)
++          assertHDFSFieldExists(inputMetadata, parquetFiles, "id", dataSourceType)
++          assertHDFSFieldExists(inputMetadata, parquetFiles, "name", dataSourceType)
++          val outputMetadata = QueryAnalysis.getOutputMetaData(df.queryExecution, extraParams)
++          assert(outputMetadata.isDefined)
++          assert(outputMetadata.get.fields.forall(Seq("id", "name").contains(_)))
++          assert(outputMetadata.get.dataSourceType === dataSourceType)
++          assert(outputMetadata.get.source === getScheme(dataSourceType) + parquetFile + "_output")
++        }
++      }
++    }
++  }
++
++  override def afterAll(): Unit = {
++    sqlContext.listenerManager.clear()
++    sqlContext.sparkContext.stop()
++  }
++}
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+new file mode 100644
+index 0000000..0580e7c
+--- /dev/null
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+@@ -0,0 +1,139 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.spark.sql.query.analysis
++
++import java.io.File
++
++import com.cloudera.spark.lineage.{DataSourceFormat, DataSourceType, FieldDetails}
++import org.apache.spark.sql.QueryTest
++import org.apache.spark.sql.hive.test.TestHive._
++import org.apache.spark.sql.hive.test.TestHiveSingleton
++import org.scalatest.BeforeAndAfterAll
++
++/**
++ * Tests that check that reading and writing to Hive tables produce the desired lineage data
++ */
++class HiveQueryAnalysisSuite extends QueryTest with TestHiveSingleton with BeforeAndAfterAll {
++
++  protected override def beforeAll(): Unit = {
++    super.beforeAll()
++    hiveContext.listenerManager.register(TestQeListener)
++    val testDataDirectory = "target" + File.separator + "query-analysis" + File.separator
++    val testTables = Seq("test_table_1", "test_table_2").map(s => TestTable(s,
++      s"""
++         |CREATE EXTERNAL TABLE $s (
++         |  code STRING,
++         |  description STRING,
++         |  total_emp INT,
++         |  salary INT)
++         |  ROW FORMAT DELIMITED FIELDS TERMINATED BY ","
++         |  STORED AS TEXTFILE LOCATION "${new File(testDataDirectory, s).getCanonicalPath}"
++      """.stripMargin.cmd))
++    testTables.foreach(registerTestTable)
++  }
++
++  test("QueryAnalysis.getInputMetadata returns back InputMetadata for simple queries") {
++    val df = sqlContext.sql("select code, description, salary from test_table_1")
++    val inputMetadata = QueryAnalysis.getInputMetadata(df.queryExecution)
++    assert(inputMetadata.length === 3)
++    assertHiveFieldExists(inputMetadata, "test_table_1", "code")
++    assertHiveFieldExists(inputMetadata, "test_table_1", "description")
++    assertHiveFieldExists(inputMetadata, "test_table_1", "salary")
++  }
++
++  test("QueryAnalysis.getInputMetadata return back InputMetadata for complex joins") {
++    var df2 = sqlContext.sql(
++        "select code, sal from (select o.code as code,c.description as desc," +
++          "c.salary as sal from test_table_1 c join test_table_2 o on (c.code = o.code)"
++          + " where c.salary > 170000 sort by sal)t1 limit 3")
++    df2 = df2.filter(df2("sal") > 100000)
++    df2.write.saveAsTable("mytable")
++    val (qe, extraParams) = TestQeListener.getAndClear()
++    val inputMetadata = QueryAnalysis.getInputMetadata(qe)
++    assert(inputMetadata.length === 2)
++    assertHiveFieldExists(inputMetadata, "test_table_1", "salary")
++    assertHiveFieldExists(inputMetadata, "test_table_2", "code")
++    val outputMetadata = QueryAnalysis.getOutputMetaData(qe, extraParams)
++    assert(outputMetadata.isDefined)
++    assert(outputMetadata.get.fields.forall(Seq("code", "sal").contains(_)))
++    assert(outputMetadata.get.dataSourceType === DataSourceType.HIVE)
++    assert(outputMetadata.get.source === "default.mytable")
++  }
++
++  test("QueryAnalysis.getInputMetadata returns back InputMetadata for * queries") {
++    val df = sqlContext.sql("select * from test_table_1")
++    val inputMetadata = QueryAnalysis.getInputMetadata(df.queryExecution)
++    assert(inputMetadata.length === 4)
++    assertHiveFieldExists(inputMetadata, "test_table_1", "code")
++    assertHiveFieldExists(inputMetadata, "test_table_1", "description")
++    assertHiveFieldExists(inputMetadata, "test_table_1", "salary")
++    assertHiveFieldExists(inputMetadata, "test_table_1", "total_emp")
++  }
++
++  test("There is fully qualified table name in OutputMetadata") {
++    val df = hiveContext.sql("select * from test_table_1")
++    withTempDatabase { db =>
++      activateDatabase(db) {
++        df.write.saveAsTable("mytable")
++        val (qe, extraParams) = TestQeListener.getAndClear()
++        val inputMetadata = QueryAnalysis.getInputMetadata(df.queryExecution)
++        assert(inputMetadata.length === 4)
++        assertHiveFieldExists(inputMetadata, "test_table_1", "code")
++        assertHiveFieldExists(inputMetadata, "test_table_1", "description")
++        assertHiveFieldExists(inputMetadata, "test_table_1", "salary")
++        assertHiveFieldExists(inputMetadata, "test_table_1", "total_emp")
++        val outputMetadata = QueryAnalysis.getOutputMetaData(qe, extraParams)
++        assert(outputMetadata.isDefined)
++        assert(outputMetadata.get.fields.forall(Seq("code", "description", "salary",
++              "total_emp").contains(_)))
++        assert(outputMetadata.get.dataSourceType === DataSourceType.HIVE)
++        assert(outputMetadata.get.source === db + ".mytable")
++      }
++    }
++  }
++
++  test("CDH-50079 : a hive table registered as a temp table is listed correctly") {
++    withParquetHDFSFile((1 to 4).map(i => Customer(i, i.toString))) { prq =>
++      sqlContext.read.parquet(prq).registerTempTable("customers")
++      sqlContext
++        .sql("select test_table_1.code, customers.name from test_table_1 join customers where " +
++          "test_table_1.code = customers.id and test_table_1.description = 'Tom Cruise'")
++        .write.saveAsTable("myowntable")
++      val (qe, extraParams) = TestQeListener.getAndClear()
++      val inputMetadata = QueryAnalysis.getInputMetadata(qe)
++      assert(inputMetadata.length === 2)
++      assertHiveFieldExists(inputMetadata, "test_table_1", "code")
++      assertHDFSFieldExists(inputMetadata, Array(prq), "name", DataSourceType.HDFS)
++      val outputMetadata = QueryAnalysis.getOutputMetaData(qe, extraParams)
++      assert(outputMetadata.isDefined)
++      assert(outputMetadata.get.source === "default.myowntable")
++      assert(outputMetadata.get.dataSourceType === DataSourceType.HIVE)
++    }
++  }
++
++  implicit class SqlCmd(sql: String) {
++    def cmd: () => Unit = { () =>
++      new QueryExecution(sql).stringResult(): Unit
++    }
++  }
++
++  override def afterAll(): Unit = {
++    hiveContext.listenerManager.clear()
++    hiveContext.sparkContext.stop()
++  }
++}
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/ParquetHDFSTest.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/ParquetHDFSTest.scala
+new file mode 100644
+index 0000000..dda4e8b
+--- /dev/null
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/ParquetHDFSTest.scala
+@@ -0,0 +1,64 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.spark.sql.query.analysis
++
++import java.util.UUID
++
++import org.apache.hadoop.conf.Configuration
++import org.apache.hadoop.fs.{FileUtil, Path}
++import org.apache.hadoop.hdfs.MiniDFSCluster
++import org.apache.spark.sql.SQLContext
++import org.apache.spark.util.Utils
++
++import scala.reflect.ClassTag
++import scala.reflect.runtime.universe.TypeTag
++
++/**
++ * Base class for Query analysis testing
++ */
++trait ParquetHDFSTest {
++
++  case class Customer(id: Int, name: String) extends Product
++
++  private def createHDFSCluster: MiniDFSCluster = {
++    val baseDir = Utils.createTempDir().getCanonicalFile
++    FileUtil.fullyDelete(baseDir)
++    val conf = new Configuration()
++    conf.set(MiniDFSCluster.HDFS_MINIDFS_BASEDIR, baseDir.getAbsolutePath())
++    new MiniDFSCluster.Builder(conf).build()
++  }
++
++  protected def withHDFSFile(f: String => Unit): Unit = {
++    val hdfs = createHDFSCluster.getFileSystem
++    val path = hdfs.makeQualified(new Path("hdfs_" + UUID.randomUUID()))
++    try {
++      f(path.toString)
++    } finally {
++      hdfs.delete(path, true)
++    }
++  }
++
++  protected def withParquetHDFSFile[T <: Product: ClassTag: TypeTag](data: Seq[T])(
++      f: String => Unit): Unit = {
++    withHDFSFile { hdfsFile =>
++      sqlContext.createDataFrame(data).write.parquet(hdfsFile)
++      f(hdfsFile)
++    }
++  }
++
++  protected def sqlContext: SQLContext
++}
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
+new file mode 100644
+index 0000000..068d3d4
+--- /dev/null
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
+@@ -0,0 +1,72 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.spark.sql.query.analysis
++
++import org.apache.spark.sql.execution.QueryExecution
++import org.apache.spark.sql.query.analysis.DataSourceType.DataSourceType
++import org.apache.spark.sql.util.QueryExecutionListener
++
++object TestQeListener extends QueryExecutionListener {
++  private var qe: QueryExecution = _
++  private var extraParams: Map[String, String] = _
++
++  override def onSuccess(
++      funcName: String,
++      qe: QueryExecution,
++      durationNs: Long,
++      extraParams: Map[String, String]): Unit = {
++    this.qe = qe
++    this.extraParams = extraParams
++  }
++
++  override def onFailure(
++      funcName: String,
++      qe: QueryExecution,
++      exception: Exception,
++      extraParams: Map[String, String]): Unit = {}
++
++  def getAndClear(): (QueryExecution, Map[String, String]) = {
++    val rValues = (qe, extraParams)
++    qe = null
++    extraParams = null
++    rValues
++  }
++}
++
++object TestUtils {
++  def assertHiveFieldExists(
++      inputMetadata: List[FieldDetails],
++      table: String,
++      column: String): Unit = {
++    assert(inputMetadata.contains(FieldDetails(Array("default." + table), column,
++      DataSourceType.HIVE, DataSourceFormat.UNKNOWN)))
++  }
++
++  def assertHDFSFieldExists(
++      inputMetadata: List[FieldDetails],
++      parquetFiles: Array[String],
++      column: String,
++      dataSourceType: DataSourceType): Unit = {
++    assert(inputMetadata.contains(FieldDetails(parquetFiles.map(getScheme(dataSourceType) + _),
++      column, dataSourceType, DataSourceFormat.UNKNOWN)))
++  }
++
++  def getScheme(dataSourceType: DataSourceType): String = {
++    if (dataSourceType == DataSourceType.LOCAL) "file:" else ""
++  }
++}
+diff --git a/pom.xml b/pom.xml
+index 02b2488..ee120b5 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -114,6 +114,7 @@
+     <module>repl</module>
+     <module>launcher</module>
+     <module>external/kafka</module>
++    <module>lineage</module>
+     <!-- Disabled in CDH
+     <module>external/kafka-assembly</module>
+     -->
+diff --git a/project/SparkBuild.scala b/project/SparkBuild.scala
+index afbf93c..c88120a 100644
+--- a/project/SparkBuild.scala
++++ b/project/SparkBuild.scala
+@@ -34,7 +34,7 @@ object BuildCommons {
+ 
+   private val buildLocation = file(".").getAbsoluteFile.getParentFile
+ 
+-  val allProjects@Seq(bagel, catalyst, core, graphx, hive, hiveThriftServer, mllib, repl,
++  val sparkProjects@Seq(bagel, catalyst, core, graphx, hive, hiveThriftServer, mllib, repl,
+     sql, networkCommon, networkShuffle, streaming, streamingFlumeSink, streamingFlume, streamingKafka,
+     streamingMqtt, streamingTwitter, streamingZeromq, launcher, unsafe, testTags) =
+     Seq("bagel", "catalyst", "core", "graphx", "hive", "hive-thriftserver", "mllib", "repl",
+@@ -42,6 +42,9 @@ object BuildCommons {
+       "streaming-flume", "streaming-kafka", "streaming-mqtt", "streaming-twitter",
+       "streaming-zeromq", "launcher", "unsafe", "test-tags").map(ProjectRef(buildLocation, _))
+ 
++  val lineage = ProjectRef(buildLocation, "lineage")
++  val allProjects = sparkProjects :+ lineage
++
+   val optionallyEnabledProjects@Seq(yarn, java8Tests, sparkGangliaLgpl,
+     streamingKinesisAsl, dockerIntegrationTests) =
+     Seq("yarn", "java8-tests", "ganglia-lgpl", "streaming-kinesis-asl",
+@@ -250,6 +253,9 @@ object SparkBuild extends PomBuild {
+   /* Spark SQL Core console settings */
+   enable(SQL.settings)(sql)
+ 
++  /* Lineage Test Dependencies */
++  enable(LineageTestDependencies.settings)(lineage)
++
+   /* Hive console settings */
+   enable(Hive.settings)(hive)
+ 
+@@ -383,6 +389,18 @@ object SQL {
+   )
+ }
+ 
++object LineageTestDependencies {
++  lazy val settings = Seq(
++    libraryDependencies ++= Seq("org.apache.hadoop" % "hadoop-hdfs" % "2.6.0-cdh5.11.0-SNAPSHOT" %
++      "test" classifier "tests" excludeAll(
++      ExclusionRule(organization = "javax.servlet", name = "servlet-api"),
++      ExclusionRule(organization = "javax.servlet.jsp", name = "jsp-api")
++      ), "org.apache.hadoop" % "hadoop-common" % "2.6.0-cdh5.11.0-SNAPSHOT" %
++      "test" classifier "tests"
++    )
++  )
++}
++
+ object Hive {
+ 
+   lazy val settings = Seq(
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
+index 03720c9..c4a3764 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
+@@ -184,7 +184,8 @@ private[hive] class HiveMetastoreCatalog(val client: ClientInterface, hive: Hive
+             table.properties("spark.sql.sources.provider"),
+             options)
+ 
+-        LogicalRelation(resolvedRelation.relation)
++        LogicalRelation(resolvedRelation.relation, None, Some(TableIdentifier(in.name,
++          Some(in.database))))
+       }
+     }
+ 
+@@ -456,7 +457,7 @@ private[hive] class HiveMetastoreCatalog(val client: ClientInterface, hive: Hive
+         partitionSpecInMetastore: Option[PartitionSpec]): Option[LogicalRelation] = {
+       cachedDataSourceTables.getIfPresent(tableIdentifier) match {
+         case null => None // Cache miss
+-        case logical @ LogicalRelation(parquetRelation: ParquetRelation, _) =>
++        case logical @ LogicalRelation(parquetRelation: ParquetRelation, _, _) =>
+           // If we have the same paths, same schema, and same partition spec,
+           // we will use the cached Parquet Relation.
+           val useCached =
+@@ -738,7 +739,7 @@ private[hive] case class InsertIntoHiveTable(
+   }
+ }
+ 
+-private[hive] case class MetastoreRelation
++private[sql] case class MetastoreRelation
+     (databaseName: String, tableName: String, alias: Option[String])
+     (val table: HiveTable)
+     (@transient private val sqlContext: SQLContext)
+-- 
+1.7.9.5
+

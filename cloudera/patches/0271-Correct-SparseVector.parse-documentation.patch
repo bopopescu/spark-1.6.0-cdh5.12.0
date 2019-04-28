@@ -1,0 +1,34 @@
+From 9c055759cadafe936431b554b2aa749abb902f8b Mon Sep 17 00:00:00 2001
+From: Miles Yucht <miles@databricks.com>
+Date: Tue, 16 Feb 2016 13:01:21 +0000
+Subject: [PATCH 271/517] Correct SparseVector.parse documentation
+
+There's a small typo in the SparseVector.parse docstring (which says that it returns a DenseVector rather than a SparseVector), which seems to be incorrect.
+
+Author: Miles Yucht <miles@databricks.com>
+
+Closes #11213 from mgyucht/fix-sparsevector-docs.
+
+(cherry picked from commit 827ed1c06785692d14857bd41f1fd94a0853874a)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit d95089190d714e3e95579ada84ac42d463f824b5)
+---
+ python/pyspark/mllib/linalg/__init__.py |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/python/pyspark/mllib/linalg/__init__.py b/python/pyspark/mllib/linalg/__init__.py
+index d87b7eb..b525d26 100644
+--- a/python/pyspark/mllib/linalg/__init__.py
++++ b/python/pyspark/mllib/linalg/__init__.py
+@@ -556,7 +556,7 @@ class SparseVector(Vector):
+     @staticmethod
+     def parse(s):
+         """
+-        Parse string representation back into the DenseVector.
++        Parse string representation back into the SparseVector.
+ 
+         >>> SparseVector.parse(' (4, [0,1 ],[ 4.0,5.0] )')
+         SparseVector(4, {0: 4.0, 1: 5.0})
+-- 
+1.7.9.5
+

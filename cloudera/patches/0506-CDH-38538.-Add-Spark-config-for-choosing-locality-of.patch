@@ -1,0 +1,211 @@
+From fb8cf397c32b87ad990621e0e86b448f2e1c459a Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Wed, 3 May 2017 16:00:48 -0700
+Subject: [PATCH 506/517] CDH-38538. Add Spark config for choosing locality of
+ the YARN AM.
+
+Two options are added that allow the user to control where to launch
+the YARN AM (one for client mode, one for cluster mode). The code
+is basically a Scala translation of the code added in MAPREDUCE-6871.
+---
+ .../org/apache/spark/deploy/yarn/Client.scala      |  102 +++++++++++++++-----
+ .../org/apache/spark/deploy/yarn/ClientSuite.scala |   49 ++++++++++
+ 2 files changed, 129 insertions(+), 22 deletions(-)
+
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
+index d81818e..95c792c 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
+@@ -22,6 +22,7 @@ import java.io.{ByteArrayInputStream, DataInputStream, File, FileOutputStream, I
+ import java.net.{InetAddress, UnknownHostException, URI}
+ import java.nio.ByteBuffer
+ import java.util.{Properties, UUID}
++import java.util.regex.Pattern
+ import java.util.zip.{ZipEntry, ZipOutputStream}
+ 
+ import scala.collection.JavaConverters._
+@@ -226,30 +227,18 @@ private[spark] class Client(
+     capability.setMemory(args.amMemory + amMemoryOverhead)
+     capability.setVirtualCores(args.amCores)
+ 
+-    if (sparkConf.contains("spark.yarn.am.nodeLabelExpression")) {
+-      try {
+-        val amRequest = Records.newRecord(classOf[ResourceRequest])
+-        amRequest.setResourceName(ResourceRequest.ANY)
+-        amRequest.setPriority(Priority.newInstance(0))
+-        amRequest.setCapability(capability)
+-        amRequest.setNumContainers(1)
+-        val amLabelExpression = sparkConf.get("spark.yarn.am.nodeLabelExpression")
+-        val method = amRequest.getClass.getMethod("setNodeLabelExpression", classOf[String])
+-        method.invoke(amRequest, amLabelExpression)
+-
+-        val setResourceRequestMethod =
+-          appContext.getClass.getMethod("setAMContainerResourceRequest", classOf[ResourceRequest])
+-        setResourceRequestMethod.invoke(appContext, amRequest)
+-      } catch {
+-        case e: NoSuchMethodException =>
+-          logWarning("Ignoring spark.yarn.am.nodeLabelExpression because the version " +
+-            "of YARN does not support it")
+-          appContext.setResource(capability)
+-      }
+-    } else {
+-      appContext.setResource(capability)
++    val anyRequest = createAMResourceRequest(ResourceRequest.ANY, capability)
++    val localizedRequests = getAMLocalityRequests(sparkConf, capability, isClusterMode)
++    if (localizedRequests.nonEmpty) {
++      anyRequest.setRelaxLocality(false)
+     }
++    val amRequests = Seq(anyRequest) ++ localizedRequests
+ 
++    sparkConf.getOption("spark.yarn.am.nodeLabelExpression").foreach { nodeLabel =>
++      amRequests.foreach { req => req.setNodeLabelExpression(nodeLabel) }
++    }
++
++    appContext.setAMContainerResourceRequests(amRequests.asJava)
+     appContext
+   }
+ 
+@@ -1108,6 +1097,13 @@ object Client extends Logging {
+   // in YARN ApplicationReports, which can be used for filtering when querying YARN.
+   val CONF_SPARK_YARN_APPLICATION_TAGS = "spark.yarn.tags"
+ 
++  // Comma-separated list of strings defining the locality for the Spark client-mode AM.
++  val CONF_SPARK_YARN_AM_LOCALITY = "spark.yarn.am.locality"
++
++  // Comma-separated list of strings defining the locality for the Spark cluster-mode AM
++  // (a.k.a. the driver).
++  val CONF_SPARK_YARN_DRIVER_LOCALITY = "spark.yarn.driver.locality"
++
+   // Staging directory is private! -> rwx--------
+   val STAGING_DIR_PERMISSION: FsPermission =
+     FsPermission.createImmutable(Integer.parseInt("700", 8).toShort)
+@@ -1421,4 +1417,66 @@ object Client extends Logging {
+     components.mkString(Path.SEPARATOR)
+   }
+ 
++  private[yarn] def getAMLocalityRequests(
++      conf: SparkConf,
++      capability: Resource,
++      isDriver: Boolean): Seq[ResourceRequest] = {
++    val RACK_GROUP = "rack"
++    val NODE_IF_RACK_GROUP = "node1"
++    val NODE_IF_NO_RACK_GROUP = "node2"
++
++    // Matches any of the following patterns with capturing groups:
++    //   /rack
++    //   /rack/node
++    //   node (assumes /default-rack)
++    //
++    // The groups can be retrieved using the RACK_GROUP, NODE_IF_RACK_GROUP,
++    // and/or NODE_IF_NO_RACK_GROUP group keys.
++    val RACK_NODE_PATTERN =
++      Pattern.compile(
++        String.format("(?<%s>[^/]+?)|(?<%s>/[^/]+?)(?:/(?<%s>[^/]+?))?",
++        NODE_IF_NO_RACK_GROUP, RACK_GROUP, NODE_IF_RACK_GROUP))
++
++    val rackRequests = new HashMap[String, ResourceRequest]()
++
++    val confKey = if (isDriver) CONF_SPARK_YARN_DRIVER_LOCALITY else CONF_SPARK_YARN_AM_LOCALITY
++    val nodeRequests = conf.getOption(confKey).toSeq
++      .flatMap { s => s.split(",").map(_.trim()).filter(_.nonEmpty) }
++      .flatMap { locality =>
++        val matcher = RACK_NODE_PATTERN.matcher(locality)
++        if (!matcher.matches()) {
++          throw new IllegalArgumentException(s"Invalid locality pattern: $locality")
++        }
++
++        val (rackName, nodeName) = Option(matcher.group(RACK_GROUP)) match {
++          case Some(rack) =>
++            (rack, matcher.group(NODE_IF_RACK_GROUP))
++
++          case _ =>
++            ("/default-rack", matcher.group(NODE_IF_NO_RACK_GROUP))
++        }
++
++        val rackRequest = rackRequests.getOrElseUpdate(rackName,
++          createAMResourceRequest(rackName, capability))
++
++        Option(nodeName).map { name =>
++          rackRequest.setRelaxLocality(false)
++          createAMResourceRequest(name, capability)
++        }
++      }
++
++    rackRequests.values.toSeq ++ nodeRequests
++  }
++
++  /** Create an AM resource request for the given locality. */
++  private def createAMResourceRequest(resource: String, capability: Resource): ResourceRequest = {
++    val request = Records.newRecord(classOf[ResourceRequest])
++    request.setPriority(Priority.newInstance(0))
++    request.setResourceName(resource)
++    request.setCapability(capability)
++    request.setNumContainers(1)
++    request.setRelaxLocality(true)
++    request
++  }
++
+ }
+diff --git a/yarn/src/test/scala/org/apache/spark/deploy/yarn/ClientSuite.scala b/yarn/src/test/scala/org/apache/spark/deploy/yarn/ClientSuite.scala
+index a505a6a..64221d5 100644
+--- a/yarn/src/test/scala/org/apache/spark/deploy/yarn/ClientSuite.scala
++++ b/yarn/src/test/scala/org/apache/spark/deploy/yarn/ClientSuite.scala
+@@ -249,6 +249,55 @@ class ClientSuite extends SparkFunSuite with Matchers with BeforeAndAfterAll {
+ 
+   }
+ 
++  test("am locality config parsing") {
++    import Client._
++    val capability = mock(classOf[Resource])
++    val rackOnly = getAMLocalityRequests(
++      new SparkConf(false).set(CONF_SPARK_YARN_AM_LOCALITY, "/rack"),
++      capability,
++      false)
++    assert(rackOnly.size === 1)
++    assert(rackOnly.head.getResourceName() === "/rack")
++
++    val nodeOnly = getAMLocalityRequests(
++      new SparkConf(false).set(CONF_SPARK_YARN_AM_LOCALITY, "node"),
++      capability,
++      false)
++    assert(nodeOnly.size === 2)
++    assert(nodeOnly.head.getResourceName() === "/default-rack")
++    assert(!nodeOnly.head.getRelaxLocality())
++    assert(nodeOnly.last.getResourceName() === "node")
++
++    val nodeAndRack = getAMLocalityRequests(
++      new SparkConf(false).set(CONF_SPARK_YARN_DRIVER_LOCALITY, "/rack/node"),
++      capability,
++      true)
++    assert(nodeAndRack.size === 2)
++    assert(nodeAndRack.head.getResourceName() === "/rack")
++    assert(!nodeAndRack.head.getRelaxLocality())
++    assert(nodeAndRack.last.getResourceName() === "node")
++
++    val mismatchedConfig = getAMLocalityRequests(
++      new SparkConf(false).set(CONF_SPARK_YARN_DRIVER_LOCALITY, "/rack/node"),
++      capability,
++      false)
++    assert(mismatchedConfig.isEmpty)
++
++    val multiConfigs = getAMLocalityRequests(
++      new SparkConf(false).set(CONF_SPARK_YARN_DRIVER_LOCALITY, "/rack/node,/rack2,node2"),
++      capability,
++      true)
++    val resources = multiConfigs.map(_.getResourceName()).toSet
++    assert(resources === Set("/default-rack", "/rack", "/rack2", "node", "node2"))
++
++    intercept[IllegalArgumentException] {
++      getAMLocalityRequests(
++        new SparkConf(false).set(CONF_SPARK_YARN_DRIVER_LOCALITY, "/rack/node/this_is_not_allowed"),
++        capability,
++        true)
++    }
++  }
++
+   object Fixtures {
+ 
+     val knownDefYarnAppCP: Seq[String] =
+-- 
+1.7.9.5
+

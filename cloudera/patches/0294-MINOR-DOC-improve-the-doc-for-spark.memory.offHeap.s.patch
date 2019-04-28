@@ -1,0 +1,39 @@
+From 1c492ffb828e9062887c5d1e3379c0fce0849075 Mon Sep 17 00:00:00 2001
+From: CodingCat <zhunansjtu@gmail.com>
+Date: Mon, 7 Mar 2016 12:07:50 -0800
+Subject: [PATCH 294/517] [MINOR][DOC] improve the doc for
+ "spark.memory.offHeap.size"
+
+The description of "spark.memory.offHeap.size" in the current document does not clearly state that memory is counted with bytes....
+
+This PR contains a small fix for this tiny issue
+
+document fix
+
+Author: CodingCat <zhunansjtu@gmail.com>
+
+Closes #11561 from CodingCat/master.
+
+(cherry picked from commit a3ec50a4bc867aec7c0796457c4442c14d1bcc2c)
+Signed-off-by: Shixiong Zhu <shixiong@databricks.com>
+(cherry picked from commit cf4e62ec276ab96afa4f0b81d216e0dad2231b9f)
+---
+ docs/configuration.md |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 06844dc..7827759 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -807,7 +807,7 @@ Apart from these, the following properties are also available, and may be useful
+   <td><code>spark.memory.offHeap.size</code></td>
+   <td>0</td>
+   <td>
+-    The absolute amount of memory which can be used for off-heap allocation.
++    The absolute amount of memory in bytes which can be used for off-heap allocation.
+     This setting has no impact on heap memory usage, so if your executors' total memory consumption must fit within some hard limit then be sure to shrink your JVM heap size accordingly.
+     This must be set to a positive value when <code>spark.memory.offHeap.enabled=true</code>.
+   </td>
+-- 
+1.7.9.5
+

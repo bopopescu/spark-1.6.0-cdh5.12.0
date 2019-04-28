@@ -1,0 +1,44 @@
+From 8f95c797809f960bdc20f0a920e3e4ead0247877 Mon Sep 17 00:00:00 2001
+From: =^_^= <maxmoroz@gmail.com>
+Date: Wed, 3 Aug 2016 04:18:28 -0700
+Subject: [PATCH 412/517] [SPARK-16831][PYTHON] Fixed bug in
+ CrossValidator.avgMetrics
+
+avgMetrics was summed, not averaged, across folds
+
+Author: =^_^= <maxmoroz@gmail.com>
+
+Closes #14456 from pkch/pkch-patch-1.
+
+(cherry picked from commit 639df046a250873c26446a037cb832ab28cb5272)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 92ee6fbf5d5096245d9f1a84cd3a8e66062dd945)
+---
+ python/pyspark/ml/tuning.py |    4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/python/pyspark/ml/tuning.py b/python/pyspark/ml/tuning.py
+index 705ee53..8f2cd62 100644
+--- a/python/pyspark/ml/tuning.py
++++ b/python/pyspark/ml/tuning.py
+@@ -108,6 +108,8 @@ class CrossValidator(Estimator):
+     >>> evaluator = BinaryClassificationEvaluator()
+     >>> cv = CrossValidator(estimator=lr, estimatorParamMaps=grid, evaluator=evaluator)
+     >>> cvModel = cv.fit(dataset)
++    >>> cvModel.avgMetrics[0]
++    0.5
+     >>> evaluator.evaluate(cvModel.transform(dataset))
+     0.8333...
+ 
+@@ -239,7 +241,7 @@ class CrossValidator(Estimator):
+                 model = est.fit(train, epm[j])
+                 # TODO: duplicate evaluator to take extra params from input
+                 metric = eva.evaluate(model.transform(validation, epm[j]))
+-                metrics[j] += metric
++                metrics[j] += metric/nFolds
+ 
+         if eva.isLargerBetter():
+             bestIndex = np.argmax(metrics)
+-- 
+1.7.9.5
+

@@ -1,0 +1,34 @@
+From 7ec51297f0801de94b885f6327253014b3a6ce1b Mon Sep 17 00:00:00 2001
+From: Yuhao Yang <hhbyyh@gmail.com>
+Date: Wed, 3 Feb 2016 21:19:44 -0800
+Subject: [PATCH 270/517] [ML][DOC] fix wrong api link in ml onevsrest
+
+minor fix for api link in ml onevsrest
+
+Author: Yuhao Yang <hhbyyh@gmail.com>
+
+Closes #11068 from hhbyyh/onevsrestDoc.
+
+(cherry picked from commit c2c956bcd1a75fd01868ee9ad2939a6d3de52bc2)
+Signed-off-by: Xiangrui Meng <meng@databricks.com>
+(cherry picked from commit 2f390d3066297466d98e17a78c5433f37f70cc95)
+---
+ docs/ml-classification-regression.md |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docs/ml-classification-regression.md b/docs/ml-classification-regression.md
+index d63438b..9df2929 100644
+--- a/docs/ml-classification-regression.md
++++ b/docs/ml-classification-regression.md
+@@ -289,7 +289,7 @@ The example below demonstrates how to load the
+ <div class="codetabs">
+ <div data-lang="scala" markdown="1">
+ 
+-Refer to the [Scala API docs](api/scala/index.html#org.apache.spark.ml.classifier.OneVsRest) for more details.
++Refer to the [Scala API docs](api/scala/index.html#org.apache.spark.ml.classification.OneVsRest) for more details.
+ 
+ {% include_example scala/org/apache/spark/examples/ml/OneVsRestExample.scala %}
+ </div>
+-- 
+1.7.9.5
+

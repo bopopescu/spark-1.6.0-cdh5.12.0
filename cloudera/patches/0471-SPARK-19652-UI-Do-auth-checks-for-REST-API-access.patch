@@ -1,0 +1,425 @@
+From a0b575581cf0b37adf3b7214f3ea1c75a8c19c4b Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Wed, 22 Feb 2017 13:19:31 -0800
+Subject: [PATCH 471/517] [SPARK-19652][UI] Do auth checks for REST API
+ access.
+
+The REST API has a security filter that performs auth checks
+based on the UI root's security manager. That works fine when
+the UI root is the app's UI, but not when it's the history server.
+
+In the SHS case, all users would be allowed to see all applications
+through the REST API, even if the UI itself wouldn't be available
+to them.
+
+This change adds auth checks for each app access through the API
+too, so that only authorized users can see the app's data.
+
+The change also modifies the existing security filter to use
+`HttpServletRequest.getRemoteUser()`, which is used in other
+places. That is not necessarily the same as the principal's
+name; for example, when using Hadoop's SPNEGO auth filter,
+the remote user strips the realm information, which then matches
+the user name registered as the owner of the application.
+
+I also renamed the UIRootFromServletContext trait to a more generic
+name since I'm using it to store more context information now.
+
+Tested manually with an authentication filter enabled.
+
+Author: Marcelo Vanzin <vanzin@cloudera.com>
+
+Closes #17019 from vanzin/SPARK-19652_2.1.
+
+(cherry picked from commit 21afc4534f90e063330ad31033aa178b37ef8340)
+
+Cloudera ID: CDH-50507
+---
+ .../main/scala/org/apache/spark/TestUtils.scala    |    6 +-
+ .../spark/status/api/v1/ApiRootResource.scala      |   74 ++++++++++++--------
+ .../spark/status/api/v1/SecurityFilter.scala       |    6 +-
+ .../scala/org/apache/spark/ui/JettyUtils.scala     |    4 +-
+ .../spark/deploy/history/HistoryServerSuite.scala  |   62 +++++++++++++++-
+ project/MimaExcludes.scala                         |    6 +-
+ 6 files changed, 118 insertions(+), 40 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/TestUtils.scala b/core/src/main/scala/org/apache/spark/TestUtils.scala
+index 7fed461..a76395b 100644
+--- a/core/src/main/scala/org/apache/spark/TestUtils.scala
++++ b/core/src/main/scala/org/apache/spark/TestUtils.scala
+@@ -188,9 +188,13 @@ private[spark] object TestUtils {
+   /**
+    * Returns the response code from an HTTP(S) URL.
+    */
+-  def httpResponseCode(url: URL, method: String = "GET"): Int = {
++  def httpResponseCode(
++      url: URL,
++      method: String = "GET",
++      headers: Seq[(String, String)] = Nil): Int = {
+     val connection = url.openConnection().asInstanceOf[HttpURLConnection]
+     connection.setRequestMethod(method)
++    headers.foreach { case (k, v) => connection.setRequestProperty(k, v) }
+ 
+     // Disable cert and host name validation for HTTPS tests.
+     if (connection.isInstanceOf[HttpsURLConnection]) {
+diff --git a/core/src/main/scala/org/apache/spark/status/api/v1/ApiRootResource.scala b/core/src/main/scala/org/apache/spark/status/api/v1/ApiRootResource.scala
+index 50b6ba6..84ed041 100644
+--- a/core/src/main/scala/org/apache/spark/status/api/v1/ApiRootResource.scala
++++ b/core/src/main/scala/org/apache/spark/status/api/v1/ApiRootResource.scala
+@@ -18,6 +18,7 @@ package org.apache.spark.status.api.v1
+ 
+ import java.util.zip.ZipOutputStream
+ import javax.servlet.ServletContext
++import javax.servlet.http.HttpServletRequest
+ import javax.ws.rs._
+ import javax.ws.rs.core.{Context, Response}
+ 
+@@ -40,7 +41,7 @@ import org.apache.spark.ui.SparkUI
+  * HistoryServerSuite.
+  */
+ @Path("/v1")
+-private[v1] class ApiRootResource extends UIRootFromServletContext {
++private[v1] class ApiRootResource extends ApiRequestContext {
+ 
+   @Path("applications")
+   def getApplicationList(): ApplicationListResource = {
+@@ -56,21 +57,21 @@ private[v1] class ApiRootResource extends UIRootFromServletContext {
+   def getJobs(
+       @PathParam("appId") appId: String,
+       @PathParam("attemptId") attemptId: String): AllJobsResource = {
+-    uiRoot.withSparkUI(appId, Some(attemptId)) { ui =>
++    withSparkUI(appId, Some(attemptId)) { ui =>
+       new AllJobsResource(ui)
+     }
+   }
+ 
+   @Path("applications/{appId}/jobs")
+   def getJobs(@PathParam("appId") appId: String): AllJobsResource = {
+-    uiRoot.withSparkUI(appId, None) { ui =>
++    withSparkUI(appId, None) { ui =>
+       new AllJobsResource(ui)
+     }
+   }
+ 
+   @Path("applications/{appId}/jobs/{jobId: \\d+}")
+   def getJob(@PathParam("appId") appId: String): OneJobResource = {
+-    uiRoot.withSparkUI(appId, None) { ui =>
++    withSparkUI(appId, None) { ui =>
+       new OneJobResource(ui)
+     }
+   }
+@@ -79,14 +80,14 @@ private[v1] class ApiRootResource extends UIRootFromServletContext {
+   def getJob(
+       @PathParam("appId") appId: String,
+       @PathParam("attemptId") attemptId: String): OneJobResource = {
+-    uiRoot.withSparkUI(appId, Some(attemptId)) { ui =>
++    withSparkUI(appId, Some(attemptId)) { ui =>
+       new OneJobResource(ui)
+     }
+   }
+ 
+   @Path("applications/{appId}/executors")
+   def getExecutors(@PathParam("appId") appId: String): ExecutorListResource = {
+-    uiRoot.withSparkUI(appId, None) { ui =>
++    withSparkUI(appId, None) { ui =>
+       new ExecutorListResource(ui)
+     }
+   }
+@@ -95,15 +96,14 @@ private[v1] class ApiRootResource extends UIRootFromServletContext {
+   def getExecutors(
+       @PathParam("appId") appId: String,
+       @PathParam("attemptId") attemptId: String): ExecutorListResource = {
+-    uiRoot.withSparkUI(appId, Some(attemptId)) { ui =>
++    withSparkUI(appId, Some(attemptId)) { ui =>
+       new ExecutorListResource(ui)
+     }
+   }
+ 
+-
+   @Path("applications/{appId}/stages")
+   def getStages(@PathParam("appId") appId: String): AllStagesResource = {
+-    uiRoot.withSparkUI(appId, None) { ui =>
++    withSparkUI(appId, None) { ui =>
+       new AllStagesResource(ui)
+     }
+   }
+@@ -112,14 +112,14 @@ private[v1] class ApiRootResource extends UIRootFromServletContext {
+   def getStages(
+       @PathParam("appId") appId: String,
+       @PathParam("attemptId") attemptId: String): AllStagesResource = {
+-    uiRoot.withSparkUI(appId, Some(attemptId)) { ui =>
++    withSparkUI(appId, Some(attemptId)) { ui =>
+       new AllStagesResource(ui)
+     }
+   }
+ 
+   @Path("applications/{appId}/stages/{stageId: \\d+}")
+   def getStage(@PathParam("appId") appId: String): OneStageResource = {
+-    uiRoot.withSparkUI(appId, None) { ui =>
++    withSparkUI(appId, None) { ui =>
+       new OneStageResource(ui)
+     }
+   }
+@@ -128,14 +128,14 @@ private[v1] class ApiRootResource extends UIRootFromServletContext {
+   def getStage(
+       @PathParam("appId") appId: String,
+       @PathParam("attemptId") attemptId: String): OneStageResource = {
+-    uiRoot.withSparkUI(appId, Some(attemptId)) { ui =>
++    withSparkUI(appId, Some(attemptId)) { ui =>
+       new OneStageResource(ui)
+     }
+   }
+ 
+   @Path("applications/{appId}/storage/rdd")
+   def getRdds(@PathParam("appId") appId: String): AllRDDResource = {
+-    uiRoot.withSparkUI(appId, None) { ui =>
++    withSparkUI(appId, None) { ui =>
+       new AllRDDResource(ui)
+     }
+   }
+@@ -144,14 +144,14 @@ private[v1] class ApiRootResource extends UIRootFromServletContext {
+   def getRdds(
+       @PathParam("appId") appId: String,
+       @PathParam("attemptId") attemptId: String): AllRDDResource = {
+-    uiRoot.withSparkUI(appId, Some(attemptId)) { ui =>
++    withSparkUI(appId, Some(attemptId)) { ui =>
+       new AllRDDResource(ui)
+     }
+   }
+ 
+   @Path("applications/{appId}/storage/rdd/{rddId: \\d+}")
+   def getRdd(@PathParam("appId") appId: String): OneRDDResource = {
+-    uiRoot.withSparkUI(appId, None) { ui =>
++    withSparkUI(appId, None) { ui =>
+       new OneRDDResource(ui)
+     }
+   }
+@@ -160,7 +160,7 @@ private[v1] class ApiRootResource extends UIRootFromServletContext {
+   def getRdd(
+       @PathParam("appId") appId: String,
+       @PathParam("attemptId") attemptId: String): OneRDDResource = {
+-    uiRoot.withSparkUI(appId, Some(attemptId)) { ui =>
++    withSparkUI(appId, Some(attemptId)) { ui =>
+       new OneRDDResource(ui)
+     }
+   }
+@@ -216,19 +216,6 @@ private[spark] trait UIRoot {
+       .status(Response.Status.SERVICE_UNAVAILABLE)
+       .build()
+   }
+-
+-  /**
+-   * Get the spark UI with the given appID, and apply a function
+-   * to it.  If there is no such app, throw an appropriate exception
+-   */
+-  def withSparkUI[T](appId: String, attemptId: Option[String])(f: SparkUI => T): T = {
+-    val appKey = attemptId.map(appId + "/" + _).getOrElse(appId)
+-    getSparkUI(appKey) match {
+-      case Some(ui) =>
+-        f(ui)
+-      case None => throw new NotFoundException("no such app: " + appId)
+-    }
+-  }
+   def securityManager: SecurityManager
+ }
+ 
+@@ -245,13 +232,38 @@ private[v1] object UIRootFromServletContext {
+   }
+ }
+ 
+-private[v1] trait UIRootFromServletContext {
++private[v1] trait ApiRequestContext {
++  @Context
++  protected var servletContext: ServletContext = _
++
+   @Context
+-  var servletContext: ServletContext = _
++  protected var httpRequest: HttpServletRequest = _
+ 
+   def uiRoot: UIRoot = UIRootFromServletContext.getUiRoot(servletContext)
++
++
++  /**
++   * Get the spark UI with the given appID, and apply a function
++   * to it.  If there is no such app, throw an appropriate exception
++   */
++  def withSparkUI[T](appId: String, attemptId: Option[String])(f: SparkUI => T): T = {
++    val appKey = attemptId.map(appId + "/" + _).getOrElse(appId)
++    uiRoot.getSparkUI(appKey) match {
++      case Some(ui) =>
++        val user = httpRequest.getRemoteUser()
++        if (!ui.securityManager.checkUIViewPermissions(user)) {
++          throw new ForbiddenException(raw"""user "$user" is not authorized""")
++        }
++        f(ui)
++      case None => throw new NotFoundException("no such app: " + appId)
++    }
++  }
++
+ }
+ 
++private[v1] class ForbiddenException(msg: String) extends WebApplicationException(
++  Response.status(Response.Status.FORBIDDEN).entity(msg).build())
++
+ private[v1] class NotFoundException(msg: String) extends WebApplicationException(
+   new NoSuchElementException(msg),
+     Response
+diff --git a/core/src/main/scala/org/apache/spark/status/api/v1/SecurityFilter.scala b/core/src/main/scala/org/apache/spark/status/api/v1/SecurityFilter.scala
+index 95fbd96..b15f136 100644
+--- a/core/src/main/scala/org/apache/spark/status/api/v1/SecurityFilter.scala
++++ b/core/src/main/scala/org/apache/spark/status/api/v1/SecurityFilter.scala
+@@ -21,16 +21,16 @@ import javax.ws.rs.core.Response
+ 
+ import com.sun.jersey.spi.container.{ContainerRequest, ContainerRequestFilter}
+ 
+-private[v1] class SecurityFilter extends ContainerRequestFilter with UIRootFromServletContext {
++private[v1] class SecurityFilter extends ContainerRequestFilter with ApiRequestContext {
+   def filter(req: ContainerRequest): ContainerRequest = {
+-    val user = Option(req.getUserPrincipal).map { _.getName }.orNull
++    val user = httpRequest.getRemoteUser()
+     if (uiRoot.securityManager.checkUIViewPermissions(user)) {
+       req
+     } else {
+       throw new WebApplicationException(
+         Response
+           .status(Response.Status.FORBIDDEN)
+-          .entity(raw"""user "$user"is not authorized""")
++          .entity(raw"""user "$user" is not authorized""")
+           .build()
+       )
+     }
+diff --git a/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala b/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala
+index c56f795..d88a1e6 100644
+--- a/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala
++++ b/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala
+@@ -90,9 +90,9 @@ private[spark] object JettyUtils extends Logging {
+             response.getWriter.println(servletParams.extractFn(result))
+             // scalastyle:on println
+           } else {
+-            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED)
++            response.setStatus(HttpServletResponse.SC_FORBIDDEN)
+             response.setHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+-            response.sendError(HttpServletResponse.SC_UNAUTHORIZED,
++            response.sendError(HttpServletResponse.SC_FORBIDDEN,
+               "User is not authorized to access this page.")
+           }
+         } catch {
+diff --git a/core/src/test/scala/org/apache/spark/deploy/history/HistoryServerSuite.scala b/core/src/test/scala/org/apache/spark/deploy/history/HistoryServerSuite.scala
+index a0ed001..94c47fe 100644
+--- a/core/src/test/scala/org/apache/spark/deploy/history/HistoryServerSuite.scala
++++ b/core/src/test/scala/org/apache/spark/deploy/history/HistoryServerSuite.scala
+@@ -19,7 +19,8 @@ package org.apache.spark.deploy.history
+ import java.io.{File, FileInputStream, FileWriter, InputStream, IOException}
+ import java.net.{HttpURLConnection, URL}
+ import java.util.zip.ZipInputStream
+-import javax.servlet.http.{HttpServletRequest, HttpServletResponse}
++import javax.servlet._
++import javax.servlet.http.{HttpServletRequest, HttpServletRequestWrapper, HttpServletResponse}
+ 
+ import scala.concurrent.duration._
+ import scala.language.postfixOps
+@@ -65,11 +66,12 @@ class HistoryServerSuite extends SparkFunSuite with BeforeAndAfter with Matchers
+   private var server: HistoryServer = null
+   private var port: Int = -1
+ 
+-  def init(): Unit = {
++  def init(extraConf: (String, String)*): Unit = {
+     val conf = new SparkConf()
+       .set("spark.history.fs.logDirectory", logDir.getAbsolutePath)
+       .set("spark.history.fs.update.interval", "0")
+       .set("spark.testing", "true")
++    conf.setAll(extraConf)
+     provider = new FsHistoryProvider(conf)
+     provider.checkForLogs()
+     val securityManager = new SecurityManager(conf)
+@@ -478,6 +480,39 @@ class HistoryServerSuite extends SparkFunSuite with BeforeAndAfter with Matchers
+ 
+   }
+ 
++  test("ui and api authorization checks") {
++    val appId = "local-1422981759269"
++    val owner = "irashid"
++    val admin = "root"
++    val other = "alice"
++
++    stop()
++    init(
++      "spark.ui.filters" -> classOf[FakeAuthFilter].getName(),
++      "spark.history.ui.acls.enable" -> "true",
++      "spark.history.ui.admin.acls" -> admin)
++
++    val tests = Seq(
++      (owner, HttpServletResponse.SC_OK),
++      (admin, HttpServletResponse.SC_OK),
++      (other, HttpServletResponse.SC_FORBIDDEN),
++      // When the remote user is null, the code behaves as if auth were disabled.
++      (null, HttpServletResponse.SC_OK))
++
++    val port = server.boundPort
++    val testUrls = Seq(
++      s"http://localhost:$port/api/v1/applications/$appId/jobs",
++      s"http://localhost:$port/history/$appId/jobs/")
++
++    tests.foreach { case (user, expectedCode) =>
++      testUrls.foreach { url =>
++        val headers = if (user != null) Seq(FakeAuthFilter.FAKE_HTTP_USER -> user) else Nil
++        val sc = TestUtils.httpResponseCode(new URL(url), headers = headers)
++        assert(sc === expectedCode, s"Unexpected status code $sc for $url (user = $user)")
++      }
++    }
++  }
++
+   def getContentAndCode(path: String, port: Int = port): (Int, Option[String], Option[String]) = {
+     HistoryServerSuite.getContentAndCode(new URL(s"http://localhost:$port/api/v1/$path"))
+   }
+@@ -559,3 +594,26 @@ object HistoryServerSuite {
+     }
+   }
+ }
++
++/**
++ * A filter used for auth tests; sets the request's user to the value of the "HTTP_USER" header.
++ */
++class FakeAuthFilter extends Filter {
++
++  override def destroy(): Unit = { }
++
++  override def init(config: FilterConfig): Unit = { }
++
++  override def doFilter(req: ServletRequest, res: ServletResponse, chain: FilterChain): Unit = {
++    val hreq = req.asInstanceOf[HttpServletRequest]
++    val wrapped = new HttpServletRequestWrapper(hreq) {
++      override def getRemoteUser(): String = hreq.getHeader(FakeAuthFilter.FAKE_HTTP_USER)
++    }
++    chain.doFilter(wrapped, res)
++  }
++
++}
++
++object FakeAuthFilter {
++  val FAKE_HTTP_USER = "HTTP_USER"
++}
+diff --git a/project/MimaExcludes.scala b/project/MimaExcludes.scala
+index 71d5a61..349251b 100644
+--- a/project/MimaExcludes.scala
++++ b/project/MimaExcludes.scala
+@@ -173,11 +173,15 @@ object MimaExcludes {
+       ) ++ Seq(
+         // SPARK-12149 Added new fields to ExecutorSummary
+         ProblemFilters.exclude[MissingMethodProblem]("org.apache.spark.status.api.v1.ExecutorSummary.this")
++      ) ++ Seq(
++        // [SPARK-19652][UI] Do auth checks for REST API access.
++        ProblemFilters.exclude[DirectMissingMethodProblem]("org.apache.spark.deploy.history.HistoryServer.withSparkUI"),
++        ProblemFilters.exclude[IncompatibleTemplateDefProblem]("org.apache.spark.status.api.v1.UIRootFromServletContext")
+       ) ++
+       // SPARK-11314: YARN backend moved to yarn sub-module and MiMA complains even though it's a
+       // private class.
+       MimaBuild.excludeSparkClass("scheduler.cluster.YarnSchedulerBackend$YarnSchedulerEndpoint")
+-      
++
+     case v if v.startsWith("1.5") =>
+       Seq(
+         MimaBuild.excludeSparkPackage("network"),
+-- 
+1.7.9.5
+

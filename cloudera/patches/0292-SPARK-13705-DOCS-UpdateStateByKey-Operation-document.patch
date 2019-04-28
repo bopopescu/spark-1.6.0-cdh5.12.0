@@ -1,0 +1,43 @@
+From 5748d74bb5b95875f72641ada3b3dac7a8300203 Mon Sep 17 00:00:00 2001
+From: rmishra <rmishra@pivotal.io>
+Date: Mon, 7 Mar 2016 09:55:49 +0000
+Subject: [PATCH 292/517] [SPARK-13705][DOCS] UpdateStateByKey Operation
+ documentation incorrectly refers to
+ StatefulNetworkWordCount
+
+## What changes were proposed in this pull request?
+The reference to StatefulNetworkWordCount.scala from updateStatesByKey documentation should be removed, till there is a example for updateStatesByKey.
+
+## How was this patch tested?
+Have tested the new documentation with jekyll build.
+
+Author: rmishra <rmishra@pivotal.io>
+
+Closes #11545 from rishitesh/SPARK-13705.
+
+(cherry picked from commit 4b13896ebf7cecf9d50514a62165b612ee18124a)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 18ef2f25e4463c2679feaf3bcb7155f340bbc059)
+---
+ docs/streaming-programming-guide.md |    5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/docs/streaming-programming-guide.md b/docs/streaming-programming-guide.md
+index 1edc0fe..113d09e 100644
+--- a/docs/streaming-programming-guide.md
++++ b/docs/streaming-programming-guide.md
+@@ -872,10 +872,7 @@ val runningCounts = pairs.updateStateByKey[Int](updateFunction _)
+ {% endhighlight %}
+ 
+ The update function will be called for each word, with `newValues` having a sequence of 1's (from
+-the `(word, 1)` pairs) and the `runningCount` having the previous count. For the complete
+-Scala code, take a look at the example
+-[StatefulNetworkWordCount.scala]({{site.SPARK_GITHUB_URL}}/blob/master/examples/src/main/scala/org/apache
+-/spark/examples/streaming/StatefulNetworkWordCount.scala).
++the `(word, 1)` pairs) and the `runningCount` having the previous count.
+ 
+ </div>
+ <div data-lang="java" markdown="1">
+-- 
+1.7.9.5
+

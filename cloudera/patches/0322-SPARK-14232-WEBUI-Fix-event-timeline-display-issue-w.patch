@@ -1,0 +1,56 @@
+From 90a6ba5c9811fc3066174731e9633fa1669724a0 Mon Sep 17 00:00:00 2001
+From: Carson Wang <carson.wang@intel.com>
+Date: Tue, 29 Mar 2016 11:07:58 -0700
+Subject: [PATCH 322/517] [SPARK-14232][WEBUI] Fix event timeline display
+ issue when an executor is removed with a multiple
+ line reason.
+
+## What changes were proposed in this pull request?
+The event timeline doesn't show on job page if an executor is removed with a multiple line reason. This PR replaces all new line characters in the reason string with spaces.
+
+![timelineerror](https://cloud.githubusercontent.com/assets/9278199/14100211/5fd4cd30-f5be-11e5-9cea-f32651a4cd62.jpg)
+
+## How was this patch tested?
+Verified on the Web UI.
+
+Author: Carson Wang <carson.wang@intel.com>
+
+Closes #12029 from carsonwang/eventTimeline.
+
+(cherry picked from commit 15c0b0006b3d04434b505210df541aeb28a51de8)
+Signed-off-by: Andrew Or <andrew@databricks.com>
+(cherry picked from commit 84ad2544f900e264a6a0bb32e317d11b77c75487)
+---
+ .../org/apache/spark/ui/jobs/AllJobsPage.scala     |    2 +-
+ .../scala/org/apache/spark/ui/jobs/JobPage.scala   |    2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/ui/jobs/AllJobsPage.scala b/core/src/main/scala/org/apache/spark/ui/jobs/AllJobsPage.scala
+index e65ab2c..47d6c36 100644
+--- a/core/src/main/scala/org/apache/spark/ui/jobs/AllJobsPage.scala
++++ b/core/src/main/scala/org/apache/spark/ui/jobs/AllJobsPage.scala
+@@ -143,7 +143,7 @@ private[ui] class AllJobsPage(parent: JobsTab) extends WebUIPage("") {
+                |    'Removed at ${UIUtils.formatDate(new Date(event.finishTime.get))}' +
+                |    '${
+                         if (event.finishReason.isDefined) {
+-                          s"""<br>Reason: ${event.finishReason.get}"""
++                          s"""<br>Reason: ${event.finishReason.get.replace("\n", " ")}"""
+                         } else {
+                           ""
+                         }
+diff --git a/core/src/main/scala/org/apache/spark/ui/jobs/JobPage.scala b/core/src/main/scala/org/apache/spark/ui/jobs/JobPage.scala
+index 2cad0a7..6a35f0e 100644
+--- a/core/src/main/scala/org/apache/spark/ui/jobs/JobPage.scala
++++ b/core/src/main/scala/org/apache/spark/ui/jobs/JobPage.scala
+@@ -123,7 +123,7 @@ private[ui] class JobPage(parent: JobsTab) extends WebUIPage("job") {
+                |    'Removed at ${UIUtils.formatDate(new Date(event.finishTime.get))}' +
+                |    '${
+                         if (event.finishReason.isDefined) {
+-                          s"""<br>Reason: ${event.finishReason.get}"""
++                          s"""<br>Reason: ${event.finishReason.get.replace("\n", " ")}"""
+                         } else {
+                           ""
+                         }
+-- 
+1.7.9.5
+

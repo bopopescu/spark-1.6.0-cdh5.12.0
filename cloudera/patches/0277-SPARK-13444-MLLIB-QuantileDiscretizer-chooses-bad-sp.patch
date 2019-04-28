@@ -1,0 +1,90 @@
+From e12021232e9e1b45a32b8f7b059092645beadf68 Mon Sep 17 00:00:00 2001
+From: Oliver Pierson <ocp@gatech.edu>
+Date: Thu, 25 Feb 2016 13:24:46 +0000
+Subject: [PATCH 277/517] [SPARK-13444][MLLIB] QuantileDiscretizer chooses bad
+ splits on large DataFrames
+
+Change line 113 of QuantileDiscretizer.scala to
+
+`val requiredSamples = math.max(numBins * numBins, 10000.0)`
+
+so that `requiredSamples` is a `Double`.  This will fix the division in line 114 which currently results in zero if `requiredSamples < dataset.count`
+
+Manual tests.  I was having a problems using QuantileDiscretizer with my a dataset and after making this change QuantileDiscretizer behaves as expected.
+
+Author: Oliver Pierson <ocp@gatech.edu>
+Author: Oliver Pierson <opierson@umd.edu>
+
+Closes #11319 from oliverpierson/SPARK-13444.
+
+(cherry picked from commit 6f8e835c68dff6fcf97326dc617132a41ff9d043)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit cb869a143d338985c3d99ef388dd78b1e3d90a73)
+---
+ .../spark/ml/feature/QuantileDiscretizer.scala     |   11 +++++++++--
+ .../ml/feature/QuantileDiscretizerSuite.scala      |   20 ++++++++++++++++++++
+ 2 files changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/ml/feature/QuantileDiscretizer.scala b/mllib/src/main/scala/org/apache/spark/ml/feature/QuantileDiscretizer.scala
+index 7bf67c6..cd5085a 100644
+--- a/mllib/src/main/scala/org/apache/spark/ml/feature/QuantileDiscretizer.scala
++++ b/mllib/src/main/scala/org/apache/spark/ml/feature/QuantileDiscretizer.scala
+@@ -97,6 +97,13 @@ final class QuantileDiscretizer(override val uid: String)
+ 
+ @Since("1.6.0")
+ object QuantileDiscretizer extends DefaultParamsReadable[QuantileDiscretizer] with Logging {
++
++  /**
++   * Minimum number of samples required for finding splits, regardless of number of bins.  If
++   * the dataset has fewer rows than this value, the entire dataset will be used.
++   */
++  private[spark] val minSamplesRequired: Int = 10000
++
+   /**
+    * Sampling from the given dataset to collect quantile statistics.
+    */
+@@ -104,8 +111,8 @@ object QuantileDiscretizer extends DefaultParamsReadable[QuantileDiscretizer] wi
+     val totalSamples = dataset.count()
+     require(totalSamples > 0,
+       "QuantileDiscretizer requires non-empty input dataset but was given an empty input.")
+-    val requiredSamples = math.max(numBins * numBins, 10000)
+-    val fraction = math.min(requiredSamples / dataset.count(), 1.0)
++    val requiredSamples = math.max(numBins * numBins, minSamplesRequired)
++    val fraction = math.min(requiredSamples.toDouble / dataset.count(), 1.0)
+     dataset.sample(withReplacement = false, fraction, new XORShiftRandom().nextInt()).collect()
+   }
+ 
+diff --git a/mllib/src/test/scala/org/apache/spark/ml/feature/QuantileDiscretizerSuite.scala b/mllib/src/test/scala/org/apache/spark/ml/feature/QuantileDiscretizerSuite.scala
+index 3a4f6d2..32bfa43 100644
+--- a/mllib/src/test/scala/org/apache/spark/ml/feature/QuantileDiscretizerSuite.scala
++++ b/mllib/src/test/scala/org/apache/spark/ml/feature/QuantileDiscretizerSuite.scala
+@@ -71,6 +71,26 @@ class QuantileDiscretizerSuite
+     }
+   }
+ 
++  test("Test splits on dataset larger than minSamplesRequired") {
++    val sqlCtx = SQLContext.getOrCreate(sc)
++    import sqlCtx.implicits._
++
++    val datasetSize = QuantileDiscretizer.minSamplesRequired + 1
++    val numBuckets = 5
++    val df = sc.parallelize((1.0 to datasetSize by 1.0).map(Tuple1.apply)).toDF("input")
++    val discretizer = new QuantileDiscretizer()
++      .setInputCol("input")
++      .setOutputCol("result")
++      .setNumBuckets(numBuckets)
++      .setSeed(1)
++
++    val result = discretizer.fit(df).transform(df)
++    val observedNumBuckets = result.select("result").distinct.count
++
++    assert(observedNumBuckets === numBuckets,
++      "Observed number of buckets does not equal expected number of buckets.")
++  }
++
+   test("read/write") {
+     val t = new QuantileDiscretizer()
+       .setInputCol("myInputCol")
+-- 
+1.7.9.5
+

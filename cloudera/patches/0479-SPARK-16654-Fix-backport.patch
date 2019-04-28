@@ -1,0 +1,33 @@
+From f555863b5729fc0cd303a9d07d54dc22c6ec1ab3 Mon Sep 17 00:00:00 2001
+From: Imran Rashid <irashid@cloudera.com>
+Date: Wed, 22 Feb 2017 16:52:07 -0800
+Subject: [PATCH 479/517] [SPARK-16654] Fix backport.
+
+---
+ .../java/org/apache/spark/JavaSparkListener.java   |   12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/core/src/main/java/org/apache/spark/JavaSparkListener.java b/core/src/main/java/org/apache/spark/JavaSparkListener.java
+index 23bc9a2..2a92d18 100644
+--- a/core/src/main/java/org/apache/spark/JavaSparkListener.java
++++ b/core/src/main/java/org/apache/spark/JavaSparkListener.java
+@@ -85,4 +85,16 @@ public class JavaSparkListener implements SparkListener {
+   @Override
+   public void onOtherEvent(SparkListenerEvent event) { }
+ 
++  @Override
++  public void onExecutorBlacklisted(SparkListenerExecutorBlacklisted executorBlacklisted) { }
++
++  @Override
++  public void onExecutorUnblacklisted(SparkListenerExecutorUnblacklisted executorUnblacklisted) { }
++
++  @Override
++  public void onNodeBlacklisted(SparkListenerNodeBlacklisted nodeBlacklisted) { }
++
++  @Override
++  public void onNodeUnblacklisted(SparkListenerNodeUnblacklisted nodeUnblacklisted) { }
++
+ }
+-- 
+1.7.9.5
+

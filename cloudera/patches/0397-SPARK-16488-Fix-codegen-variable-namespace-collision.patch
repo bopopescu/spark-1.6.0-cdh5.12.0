@@ -1,0 +1,78 @@
+From 89f186e911eb057a9f6dbc453614dd1076159881 Mon Sep 17 00:00:00 2001
+From: Sameer Agarwal <sameer@databricks.com>
+Date: Mon, 11 Jul 2016 20:26:01 -0700
+Subject: [PATCH 397/517] [SPARK-16488] Fix codegen variable namespace
+ collision in pmod and partitionBy
+
+This patch fixes a variable namespace collision bug in pmod and partitionBy
+
+Regression test for one possible occurrence. A more general fix in `ExpressionEvalHelper.checkEvaluation` will be in a subsequent PR.
+
+Author: Sameer Agarwal <sameer@databricks.com>
+
+Closes #14144 from sameeragarwal/codegen-bug.
+
+(cherry picked from commit 9cc74f95edb6e4f56151966139cd0dc24e377949)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit 689261465ad1dd443ebf764ad837243418b986ef)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit d1c992fea3e5999a3494c398f5040d6102f30aff)
+---
+ .../sql/catalyst/expressions/arithmetic.scala      |   25 ++++++++++----------
+ 1 file changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/arithmetic.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/arithmetic.scala
+index 61a17fd..cfae285 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/arithmetic.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/arithmetic.scala
+@@ -445,34 +445,35 @@ case class Pmod(left: Expression, right: Expression) extends BinaryArithmetic {
+ 
+   override def genCode(ctx: CodeGenContext, ev: GeneratedExpressionCode): String = {
+     nullSafeCodeGen(ctx, ev, (eval1, eval2) => {
++      val remainder = ctx.freshName("remainder")
+       dataType match {
+         case dt: DecimalType =>
+           val decimalAdd = "$plus"
+           s"""
+-            ${ctx.javaType(dataType)} r = $eval1.remainder($eval2);
+-            if (r.compare(new org.apache.spark.sql.types.Decimal().set(0)) < 0) {
+-              ${ev.value} = (r.$decimalAdd($eval2)).remainder($eval2);
++            ${ctx.javaType(dataType)} $remainder = $eval1.remainder($eval2);
++            if ($remainder.compare(new org.apache.spark.sql.types.Decimal().set(0)) < 0) {
++              ${ev.value} = ($remainder.$decimalAdd($eval2)).remainder($eval2);
+             } else {
+-              ${ev.value} = r;
++              ${ev.value} = $remainder;
+             }
+           """
+         // byte and short are casted into int when add, minus, times or divide
+         case ByteType | ShortType =>
+           s"""
+-            ${ctx.javaType(dataType)} r = (${ctx.javaType(dataType)})($eval1 % $eval2);
+-            if (r < 0) {
+-              ${ev.value} = (${ctx.javaType(dataType)})((r + $eval2) % $eval2);
++            ${ctx.javaType(dataType)} $remainder = (${ctx.javaType(dataType)})($eval1 % $eval2);
++            if ($remainder < 0) {
++              ${ev.value} = (${ctx.javaType(dataType)})(($remainder + $eval2) % $eval2);
+             } else {
+-              ${ev.value} = r;
++              ${ev.value} = $remainder;
+             }
+           """
+         case _ =>
+           s"""
+-            ${ctx.javaType(dataType)} r = $eval1 % $eval2;
+-            if (r < 0) {
+-              ${ev.value} = (r + $eval2) % $eval2;
++            ${ctx.javaType(dataType)} $remainder = $eval1 % $eval2;
++            if ($remainder < 0) {
++              ${ev.value} = ($remainder + $eval2) % $eval2;
+             } else {
+-              ${ev.value} = r;
++              ${ev.value} = $remainder;
+             }
+           """
+       }
+-- 
+1.7.9.5
+

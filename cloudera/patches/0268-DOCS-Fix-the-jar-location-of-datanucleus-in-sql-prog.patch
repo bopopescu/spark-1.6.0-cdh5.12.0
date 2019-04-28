@@ -1,0 +1,35 @@
+From 8a900a5bc611fa535c974b477bc77a246494e6bb Mon Sep 17 00:00:00 2001
+From: Takeshi YAMAMURO <linguin.m.s@gmail.com>
+Date: Mon, 1 Feb 2016 12:02:06 -0800
+Subject: [PATCH 268/517] [DOCS] Fix the jar location of datanucleus in
+ sql-programming-guid.md
+
+ISTM `lib` is better because `datanucleus` jars are located in `lib` for release builds.
+
+Author: Takeshi YAMAMURO <linguin.m.s@gmail.com>
+
+Closes #10901 from maropu/DocFix.
+
+(cherry picked from commit da9146c91a33577ff81378ca7e7c38a4b1917876)
+Signed-off-by: Michael Armbrust <michael@databricks.com>
+(cherry picked from commit 215d5d8845b6e52d75522e1c0766d324d11e4d42)
+---
+ docs/sql-programming-guide.md |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docs/sql-programming-guide.md b/docs/sql-programming-guide.md
+index bd1585f..d2c2491 100644
+--- a/docs/sql-programming-guide.md
++++ b/docs/sql-programming-guide.md
+@@ -1695,7 +1695,7 @@ on all of the worker nodes, as they will need access to the Hive serialization a
+ 
+ Configuration of Hive is done by placing your `hive-site.xml`, `core-site.xml` (for security configuration),
+  `hdfs-site.xml` (for HDFS configuration) file in `conf/`. Please note when running
+-the query on a YARN cluster (`cluster` mode), the `datanucleus` jars under the `lib_managed/jars` directory
++the query on a YARN cluster (`cluster` mode), the `datanucleus` jars under the `lib` directory
+ and `hive-site.xml` under `conf/` directory need to be available on the driver and all executors launched by the
+ YARN cluster. The convenient way to do this is adding them through the `--jars` option and `--file` option of the
+ `spark-submit` command.
+-- 
+1.7.9.5
+

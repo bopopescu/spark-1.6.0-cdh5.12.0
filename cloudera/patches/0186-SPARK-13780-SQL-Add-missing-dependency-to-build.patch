@@ -1,0 +1,36 @@
+From 03d7787530ac837db924fb8c1a4e6ba2e26ca6e2 Mon Sep 17 00:00:00 2001
+From: Misha Dmitriev <misha@cloudera.com>
+Date: Wed, 13 Apr 2016 16:17:15 -0700
+Subject: [PATCH 186/517] [SPARK-13780][SQL] Add missing dependency to build.
+
+This is needed to avoid odd compiler errors when building just the
+sql package with maven, because of odd interactions between scalac
+and shaded classes.
+
+Author: Marcelo Vanzin <vanzin@cloudera.com>
+
+Closes #11640 from vanzin/SPARK-13780.
+
+(cherry picked from commit 99b7187c2dce4c73829b9b32de80b02a053763cc)
+---
+ sql/core/pom.xml |    4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/sql/core/pom.xml b/sql/core/pom.xml
+index 7e1e72e..53dc5c4 100644
+--- a/sql/core/pom.xml
++++ b/sql/core/pom.xml
+@@ -73,6 +73,10 @@
+       <artifactId>parquet-hadoop</artifactId>
+     </dependency>
+     <dependency>
++      <groupId>org.eclipse.jetty</groupId>
++      <artifactId>jetty-servlet</artifactId>
++    </dependency>
++    <dependency>
+       <groupId>com.fasterxml.jackson.core</groupId>
+       <artifactId>jackson-databind</artifactId>
+       <version>${fasterxml.jackson.version}</version>
+-- 
+1.7.9.5
+

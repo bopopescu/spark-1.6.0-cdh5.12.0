@@ -1,0 +1,116 @@
+From fcbb0de1addb7f9995d6ac364b4cdcc21e3834c3 Mon Sep 17 00:00:00 2001
+From: hyukjinkwon <gurwls223@gmail.com>
+Date: Thu, 21 Apr 2016 11:32:27 +0100
+Subject: [PATCH 338/517] [SPARK-14787][SQL] Upgrade Joda-Time library from
+ 2.9 to 2.9.3
+
+## What changes were proposed in this pull request?
+https://issues.apache.org/jira/browse/SPARK-14787
+
+The possible problems are described in the JIRA above. Please refer this if you are wondering the purpose of this PR.
+
+This PR upgrades Joda-Time library from 2.9 to 2.9.3.
+
+## How was this patch tested?
+
+`sbt scalastyle` and Jenkins tests in this PR.
+
+closes #11847
+
+Author: hyukjinkwon <gurwls223@gmail.com>
+
+Closes #12552 from HyukjinKwon/SPARK-14787.
+
+(cherry picked from commit ec2a276022568944e19a51d4d39305710cdc7c0f)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit c3ed9504d4b323106b44b03ac69c425f7aae8d3d)
+---
+ dev/deps/spark-deps-hadoop-1   |    2 +-
+ dev/deps/spark-deps-hadoop-2.2 |    2 +-
+ dev/deps/spark-deps-hadoop-2.3 |    2 +-
+ dev/deps/spark-deps-hadoop-2.4 |    2 +-
+ dev/deps/spark-deps-hadoop-2.6 |    2 +-
+ pom.xml                        |    2 +-
+ 6 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/dev/deps/spark-deps-hadoop-1 b/dev/deps/spark-deps-hadoop-1
+index c6de27d..a0530c0 100644
+--- a/dev/deps/spark-deps-hadoop-1
++++ b/dev/deps/spark-deps-hadoop-1
+@@ -90,7 +90,7 @@ jettison-1.1.jar
+ jetty-all-7.6.0.v20120127.jar
+ jline-2.10.5.jar
+ jline-2.12.jar
+-joda-time-2.9.jar
++joda-time-2.9.3.jar
+ jodd-core-3.5.2.jar
+ jpam-1.1.jar
+ json-20090211.jar
+diff --git a/dev/deps/spark-deps-hadoop-2.2 b/dev/deps/spark-deps-hadoop-2.2
+index 078046e..53cde0c 100644
+--- a/dev/deps/spark-deps-hadoop-2.2
++++ b/dev/deps/spark-deps-hadoop-2.2
+@@ -119,7 +119,7 @@ jetty-all-7.6.0.v20120127.jar
+ jetty-util-6.1.26.jar
+ jline-2.10.5.jar
+ jline-2.12.jar
+-joda-time-2.9.jar
++joda-time-2.9.3.jar
+ jodd-core-3.5.2.jar
+ jpam-1.1.jar
+ json-20090211.jar
+diff --git a/dev/deps/spark-deps-hadoop-2.3 b/dev/deps/spark-deps-hadoop-2.3
+index 36ebd9a..a1fe5b7 100644
+--- a/dev/deps/spark-deps-hadoop-2.3
++++ b/dev/deps/spark-deps-hadoop-2.3
+@@ -110,7 +110,7 @@ jetty-all-7.6.0.v20120127.jar
+ jetty-util-6.1.26.jar
+ jline-2.10.5.jar
+ jline-2.12.jar
+-joda-time-2.9.jar
++joda-time-2.9.3.jar
+ jodd-core-3.5.2.jar
+ jpam-1.1.jar
+ json-20090211.jar
+diff --git a/dev/deps/spark-deps-hadoop-2.4 b/dev/deps/spark-deps-hadoop-2.4
+index 7b83385..cdfc42b 100644
+--- a/dev/deps/spark-deps-hadoop-2.4
++++ b/dev/deps/spark-deps-hadoop-2.4
+@@ -111,7 +111,7 @@ jetty-all-7.6.0.v20120127.jar
+ jetty-util-6.1.26.jar
+ jline-2.10.5.jar
+ jline-2.12.jar
+-joda-time-2.9.jar
++joda-time-2.9.3.jar
+ jodd-core-3.5.2.jar
+ jpam-1.1.jar
+ json-20090211.jar
+diff --git a/dev/deps/spark-deps-hadoop-2.6 b/dev/deps/spark-deps-hadoop-2.6
+index d430195..5118702 100644
+--- a/dev/deps/spark-deps-hadoop-2.6
++++ b/dev/deps/spark-deps-hadoop-2.6
+@@ -117,7 +117,7 @@ jetty-all-7.6.0.v20120127.jar
+ jetty-util-6.1.26.jar
+ jline-2.10.5.jar
+ jline-2.12.jar
+-joda-time-2.9.jar
++joda-time-2.9.3.jar
+ jodd-core-3.5.2.jar
+ jpam-1.1.jar
+ json-20090211.jar
+diff --git a/pom.xml b/pom.xml
+index 4afc0f7..208e915 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -184,7 +184,7 @@
+     <datanucleus-core.version>3.2.10</datanucleus-core.version>
+     <janino.version>2.7.8</janino.version>
+     <jersey.version>1.9</jersey.version>
+-    <joda.version>2.9</joda.version>
++    <joda.version>2.9.3</joda.version>
+     <jodd.version>3.5.2</jodd.version>
+     <jsr305.version>1.3.9</jsr305.version>
+     <libthrift.version>${cdh.thrift.version}</libthrift.version>
+-- 
+1.7.9.5
+

@@ -1,0 +1,92 @@
+From d62133937cae643de5214ada9358fb3c5226f1e1 Mon Sep 17 00:00:00 2001
+From: Josh Rosen <joshrosen@databricks.com>
+Date: Sat, 6 Aug 2016 19:29:19 -0700
+Subject: [PATCH 414/517] [SPARK-16925] Master should call schedule() after
+ all executor exit events, not only failures
+
+This patch fixes a bug in Spark's standalone Master which could cause applications to hang if tasks cause executors to exit with zero exit codes.
+
+As an example of the bug, run
+
+```
+sc.parallelize(1 to 1, 1).foreachPartition { _ => System.exit(0) }
+```
+
+on a standalone cluster which has a single Spark application. This will cause all executors to die but those executors won't be replaced unless another Spark application or worker joins or leaves the cluster (or if an executor exits with a non-zero exit code). This behavior is caused by a bug in how the Master handles the `ExecutorStateChanged` event: the current implementation calls `schedule()` only if the executor exited with a non-zero exit code, so a task which causes a JVM to unexpectedly exit "cleanly" will skip the `schedule()` call.
+
+This patch addresses this by modifying the `ExecutorStateChanged` to always unconditionally call `schedule()`. This should be safe because it should always be safe to call `schedule()`; adding extra `schedule()` calls can only affect performance and should not introduce correctness bugs.
+
+I added a regression test in `DistributedSuite`.
+
+Author: Josh Rosen <joshrosen@databricks.com>
+
+Closes #14510 from JoshRosen/SPARK-16925.
+
+(cherry picked from commit 4f5f9b670e1f1783f43feb22490613e72dcff852)
+Signed-off-by: Josh Rosen <joshrosen@databricks.com>
+(cherry picked from commit c1628866af85a8888dbcf793653f9ae59253a484)
+---
+ .../org/apache/spark/deploy/master/Master.scala    |   17 +++++++----------
+ .../scala/org/apache/spark/DistributedSuite.scala  |   15 +++++++++++++++
+ 2 files changed, 22 insertions(+), 10 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/deploy/master/Master.scala b/core/src/main/scala/org/apache/spark/deploy/master/Master.scala
+index b106e5f..e96b97a 100644
+--- a/core/src/main/scala/org/apache/spark/deploy/master/Master.scala
++++ b/core/src/main/scala/org/apache/spark/deploy/master/Master.scala
+@@ -284,19 +284,16 @@ private[deploy] class Master(
+ 
+             val normalExit = exitStatus == Some(0)
+             // Only retry certain number of times so we don't go into an infinite loop.
+-            if (!normalExit) {
+-              if (appInfo.incrementRetryCount() < ApplicationState.MAX_NUM_RETRY) {
+-                schedule()
+-              } else {
+-                val execs = appInfo.executors.values
+-                if (!execs.exists(_.state == ExecutorState.RUNNING)) {
+-                  logError(s"Application ${appInfo.desc.name} with ID ${appInfo.id} failed " +
+-                    s"${appInfo.retryCount} times; removing it")
+-                  removeApplication(appInfo, ApplicationState.FAILED)
+-                }
++            if (!normalExit && appInfo.incrementRetryCount() >= ApplicationState.MAX_NUM_RETRY) {
++              val execs = appInfo.executors.values
++              if (!execs.exists(_.state == ExecutorState.RUNNING)) {
++                logError(s"Application ${appInfo.desc.name} with ID ${appInfo.id} failed " +
++                  s"${appInfo.retryCount} times; removing it")
++                removeApplication(appInfo, ApplicationState.FAILED)
+               }
+             }
+           }
++          schedule()
+         }
+         case None =>
+           logWarning(s"Got status update for unknown executor $appId/$execId")
+diff --git a/core/src/test/scala/org/apache/spark/DistributedSuite.scala b/core/src/test/scala/org/apache/spark/DistributedSuite.scala
+index 99052ff..9c1efc6 100644
+--- a/core/src/test/scala/org/apache/spark/DistributedSuite.scala
++++ b/core/src/test/scala/org/apache/spark/DistributedSuite.scala
+@@ -135,6 +135,21 @@ class DistributedSuite extends SparkFunSuite with Matchers with LocalSparkContex
+     }
+   }
+ 
++  test("repeatedly failing task that crashes JVM with a zero exit code (SPARK-16925)") {
++    // Ensures that if a task which causes the JVM to exit with a zero exit code will cause the
++    // Spark job to eventually fail.
++    sc = new SparkContext(clusterUrl, "test")
++    failAfter(Span(100000, Millis)) {
++      val thrown = intercept[SparkException] {
++        sc.parallelize(1 to 1, 1).foreachPartition { _ => System.exit(0) }
++      }
++      assert(thrown.getClass === classOf[SparkException])
++      assert(thrown.getMessage.contains("failed 4 times"))
++    }
++    // Check that the cluster is still usable:
++    sc.parallelize(1 to 10).count()
++  }
++
+   test("caching") {
+     sc = new SparkContext(clusterUrl, "test")
+     val data = sc.parallelize(1 to 1000, 10).cache()
+-- 
+1.7.9.5
+

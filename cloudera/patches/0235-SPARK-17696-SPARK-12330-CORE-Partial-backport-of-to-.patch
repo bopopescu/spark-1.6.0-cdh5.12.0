@@ -1,0 +1,71 @@
+From 2684acc14b626204add4a1f1605c48649993b802 Mon Sep 17 00:00:00 2001
+From: Charles Allen <charles@allen-net.com>
+Date: Wed, 28 Sep 2016 14:39:50 -0700
+Subject: [PATCH 235/517] [SPARK-17696][SPARK-12330][CORE] Partial backport of
+ to branch-1.6.
+
+From the original commit message:
+
+This PR also fixes a regression caused by [SPARK-10987] whereby submitting a shutdown causes a race between the local shutdown procedure and the notification of the scheduler driver disconnection. If the scheduler driver disconnection wins the race, the coarse executor incorrectly exits with status 1 (instead of the proper status 0)
+
+Author: Charles Allen <charlesallen-net.com>
+
+(cherry picked from commit 2eaeafe8a2aa31be9b230b8d53d3baccd32535b1)
+
+Author: Charles Allen <charles@allen-net.com>
+
+Closes #15270 from vanzin/SPARK-17696.
+
+(cherry picked from commit b999fa43ea0b509341ac2e130cc3787e5f8a75e5)
+---
+ .../executor/CoarseGrainedExecutorBackend.scala    |    8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala b/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
+index a1477b0..873c5a4 100644
+--- a/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
++++ b/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
+@@ -19,6 +19,7 @@ package org.apache.spark.executor
+ 
+ import java.net.URL
+ import java.nio.ByteBuffer
++import java.util.concurrent.atomic.AtomicBoolean
+ 
+ import scala.collection.mutable
+ import scala.util.{Failure, Success}
+@@ -42,6 +43,7 @@ private[spark] class CoarseGrainedExecutorBackend(
+     env: SparkEnv)
+   extends ThreadSafeRpcEndpoint with ExecutorBackend with Logging {
+ 
++  private[this] val stopping = new AtomicBoolean(false)
+   var executor: Executor = null
+   @volatile var driver: Option[RpcEndpointRef] = None
+ 
+@@ -102,19 +104,23 @@ private[spark] class CoarseGrainedExecutorBackend(
+       }
+ 
+     case StopExecutor =>
++      stopping.set(true)
+       logInfo("Driver commanded a shutdown")
+       // Cannot shutdown here because an ack may need to be sent back to the caller. So send
+       // a message to self to actually do the shutdown.
+       self.send(Shutdown)
+ 
+     case Shutdown =>
++      stopping.set(true)
+       executor.stop()
+       stop()
+       rpcEnv.shutdown()
+   }
+ 
+   override def onDisconnected(remoteAddress: RpcAddress): Unit = {
+-    if (driver.exists(_.address == remoteAddress)) {
++    if (stopping.get()) {
++      logInfo(s"Driver from $remoteAddress disconnected during shutdown")
++    } else if (driver.exists(_.address == remoteAddress)) {
+       logError(s"Driver $remoteAddress disassociated! Shutting down.")
+       exitExecutor()
+     } else {
+-- 
+1.7.9.5
+

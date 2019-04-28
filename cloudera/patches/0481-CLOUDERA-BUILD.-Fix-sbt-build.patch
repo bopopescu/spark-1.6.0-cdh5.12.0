@@ -1,0 +1,25 @@
+From 1c365d5685597175301aa37b59bafe1c885dc6fe Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Wed, 22 Feb 2017 17:38:47 -0800
+Subject: [PATCH 481/517] CLOUDERA-BUILD. Fix sbt build.
+
+---
+ project/MimaExcludes.scala |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/project/MimaExcludes.scala b/project/MimaExcludes.scala
+index 349251b..3c538dd 100644
+--- a/project/MimaExcludes.scala
++++ b/project/MimaExcludes.scala
+@@ -175,7 +175,7 @@ object MimaExcludes {
+         ProblemFilters.exclude[MissingMethodProblem]("org.apache.spark.status.api.v1.ExecutorSummary.this")
+       ) ++ Seq(
+         // [SPARK-19652][UI] Do auth checks for REST API access.
+-        ProblemFilters.exclude[DirectMissingMethodProblem]("org.apache.spark.deploy.history.HistoryServer.withSparkUI"),
++        ProblemFilters.exclude[MissingMethodProblem]("org.apache.spark.deploy.history.HistoryServer.withSparkUI"),
+         ProblemFilters.exclude[IncompatibleTemplateDefProblem]("org.apache.spark.status.api.v1.UIRootFromServletContext")
+       ) ++
+       // SPARK-11314: YARN backend moved to yarn sub-module and MiMA complains even though it's a
+-- 
+1.7.9.5
+

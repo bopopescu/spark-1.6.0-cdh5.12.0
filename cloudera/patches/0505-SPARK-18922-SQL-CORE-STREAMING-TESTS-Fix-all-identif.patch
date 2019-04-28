@@ -1,0 +1,797 @@
+From f8cf3584cc3f03b3c7ac7f68988df8d2f405bc11 Mon Sep 17 00:00:00 2001
+From: hyukjinkwon <gurwls223@gmail.com>
+Date: Tue, 10 Jan 2017 13:19:21 +0000
+Subject: [PATCH 505/517] [SPARK-18922][SQL][CORE][STREAMING][TESTS] Fix all
+ identified tests failed due to path and
+ resource-not-closed problems on Windows
+
+This PR proposes to fix all the test failures identified by testing with AppVeyor.
+
+**Scala - aborted tests**
+
+```
+WindowQuerySuite:
+  Exception encountered when attempting to run a suite with class name: org.apache.spark.sql.hive.execution.WindowQuerySuite *** ABORTED *** (156 milliseconds)
+   org.apache.spark.sql.AnalysisException: LOAD DATA input path does not exist: C:projectssparksqlhive   argetscala-2.11   est-classesdatafilespart_tiny.txt;
+
+OrcSourceSuite:
+ Exception encountered when attempting to run a suite with class name: org.apache.spark.sql.hive.orc.OrcSourceSuite *** ABORTED *** (62 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ParquetMetastoreSuite:
+ Exception encountered when attempting to run a suite with class name: org.apache.spark.sql.hive.ParquetMetastoreSuite *** ABORTED *** (4 seconds, 703 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ParquetSourceSuite:
+ Exception encountered when attempting to run a suite with class name: org.apache.spark.sql.hive.ParquetSourceSuite *** ABORTED *** (3 seconds, 907 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark  arget mpspark-581a6575-454f-4f21-a516-a07f95266143;
+
+KafkaRDDSuite:
+ Exception encountered when attempting to run a suite with class name: org.apache.spark.streaming.kafka.KafkaRDDSuite *** ABORTED *** (5 seconds, 212 milliseconds)
+   java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-4722304d-213e-4296-b556-951df1a46807
+
+DirectKafkaStreamSuite:
+ Exception encountered when attempting to run a suite with class name: org.apache.spark.streaming.kafka.DirectKafkaStreamSuite *** ABORTED *** (7 seconds, 127 milliseconds)
+   java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-d0d3eba7-4215-4e10-b40e-bb797e89338e
+   at org.apache.spark.util.Utils$.deleteRecursively(Utils.scala:1010)
+
+ReliableKafkaStreamSuite
+ Exception encountered when attempting to run a suite with class name: org.apache.spark.streaming.kafka.ReliableKafkaStreamSuite *** ABORTED *** (5 seconds, 498 milliseconds)
+   java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-d33e45a0-287e-4bed-acae-ca809a89d888
+
+KafkaStreamSuite:
+ Exception encountered when attempting to run a suite with class name: org.apache.spark.streaming.kafka.KafkaStreamSuite *** ABORTED *** (2 seconds, 892 milliseconds)
+   java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-59c9d169-5a56-4519-9ef0-cefdbd3f2e6c
+
+KafkaClusterSuite:
+ Exception encountered when attempting to run a suite with class name: org.apache.spark.streaming.kafka.KafkaClusterSuite *** ABORTED *** (1 second, 690 milliseconds)
+   java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-3ef402b0-8689-4a60-85ae-e41e274f179d
+
+DirectKafkaStreamSuite:
+ Exception encountered when attempting to run a suite with class name: org.apache.spark.streaming.kafka010.DirectKafkaStreamSuite *** ABORTED *** (59 seconds, 626 milliseconds)
+   java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-426107da-68cf-4d94-b0d6-1f428f1c53f6
+
+KafkaRDDSuite:
+Exception encountered when attempting to run a suite with class name: org.apache.spark.streaming.kafka010.KafkaRDDSuite *** ABORTED *** (2 minutes, 6 seconds)
+   java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-b9ce7929-5dae-46ab-a0c4-9ef6f58fbc2
+```
+
+**Java - failed tests**
+
+```
+Test org.apache.spark.streaming.kafka.JavaKafkaRDDSuite.testKafkaRDD failed: java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-1cee32f4-4390-4321-82c9-e8616b3f0fb0, took 9.61 sec
+
+Test org.apache.spark.streaming.kafka.JavaKafkaStreamSuite.testKafkaStream failed: java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-f42695dd-242e-4b07-847c-f299b8e4676e, took 11.797 sec
+
+Test org.apache.spark.streaming.kafka.JavaDirectKafkaStreamSuite.testKafkaStream failed: java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-85c0d062-78cf-459c-a2dd-7973572101ce, took 1.581 sec
+
+Test org.apache.spark.streaming.kafka010.JavaKafkaRDDSuite.testKafkaRDD failed: java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-49eb6b5c-8366-47a6-83f2-80c443c48280, took 17.895 sec
+
+org.apache.spark.streaming.kafka010.JavaDirectKafkaStreamSuite.testKafkaStream failed: java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-898cf826-d636-4b1c-a61a-c12a364c02e7, took 8.858 sec
+```
+
+**Scala - failed tests**
+
+```
+PartitionProviderCompatibilitySuite:
+ - insert overwrite partition of new datasource table overwrites just partition *** FAILED *** (828 milliseconds)
+   java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-bb6337b9-4f99-45ab-ad2c-a787ab965c09
+
+ - SPARK-18635 special chars in partition values - partition management true *** FAILED *** (5 seconds, 360 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - SPARK-18635 special chars in partition values - partition management false *** FAILED *** (141 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+```
+
+```
+UtilsSuite:
+ - reading offset bytes of a file (compressed) *** FAILED *** (0 milliseconds)
+   java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-ecb2b7d5-db8b-43a7-b268-1bf242b5a491
+
+ - reading offset bytes across multiple files (compressed) *** FAILED *** (0 milliseconds)
+   java.io.IOException: Failed to delete: C:\projects\spark\target\tmp\spark-25cc47a8-1faa-4da5-8862-cf174df63ce0
+```
+
+```
+StatisticsSuite:
+ - MetastoreRelations fallback to HDFS for size estimation *** FAILED *** (110 milliseconds)
+   org.apache.spark.sql.catalyst.analysis.NoSuchTableException: Table or view 'csv_table' not found in database 'default';
+```
+
+```
+SQLQuerySuite:
+ - permanent UDTF *** FAILED *** (125 milliseconds)
+   org.apache.spark.sql.AnalysisException: Undefined function: 'udtf_count_temp'. This function is neither a registered temporary function nor a permanent function registered in the database 'default'.; line 1 pos 24
+
+ - describe functions - user defined functions *** FAILED *** (125 milliseconds)
+   org.apache.spark.sql.AnalysisException: Undefined function: 'udtf_count'. This function is neither a registered temporary function nor a permanent function registered in the database 'default'.; line 1 pos 7
+
+ - CTAS without serde with location *** FAILED *** (16 milliseconds)
+   java.lang.IllegalArgumentException: java.net.URISyntaxException: Relative path in absolute URI: file:C:projectsspark%09arget%09mpspark-ed673d73-edfc-404e-829e-2e2b9725d94e/c1
+
+ - derived from Hive query file: drop_database_removes_partition_dirs.q *** FAILED *** (47 milliseconds)
+   java.lang.IllegalArgumentException: java.net.URISyntaxException: Relative path in absolute URI: file:C:projectsspark%09arget%09mpspark-d2ddf08e-699e-45be-9ebd-3dfe619680fe/drop_database_removes_partition_dirs_table
+
+ - derived from Hive query file: drop_table_removes_partition_dirs.q *** FAILED *** (0 milliseconds)
+   java.lang.IllegalArgumentException: java.net.URISyntaxException: Relative path in absolute URI: file:C:projectsspark%09arget%09mpspark-d2ddf08e-699e-45be-9ebd-3dfe619680fe/drop_table_removes_partition_dirs_table2
+
+ - SPARK-17796 Support wildcard character in filename for LOAD DATA LOCAL INPATH *** FAILED *** (109 milliseconds)
+   java.nio.file.InvalidPathException: Illegal char <:> at index 2: /C:/projects/spark/sql/hive/projectsspark	arget	mpspark-1a122f8c-dfb3-46c4-bab1-f30764baee0e/*part-r*
+```
+
+```
+HiveDDLSuite:
+ - drop external tables in default database *** FAILED *** (16 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - add/drop partitions - external table *** FAILED *** (16 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - create/drop database - location without pre-created directory *** FAILED *** (16 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - create/drop database - location with pre-created directory *** FAILED *** (32 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - drop database containing tables - CASCADE *** FAILED *** (94 milliseconds)
+   CatalogDatabase(db1,,file:/C:/projects/spark/target/tmp/warehouse-d0665ee0-1e39-4805-b471-0b764f7838be/db1.db,Map()) did not equal CatalogDatabase(db1,,file:C:/projects/spark/target/tmp/warehouse-d0665ee0-1e39-4805-b471-0b764f7838be\db1.db,Map()) (HiveDDLSuite.scala:675)
+
+ - drop an empty database - CASCADE *** FAILED *** (63 milliseconds)
+   CatalogDatabase(db1,,file:/C:/projects/spark/target/tmp/warehouse-d0665ee0-1e39-4805-b471-0b764f7838be/db1.db,Map()) did not equal CatalogDatabase(db1,,file:C:/projects/spark/target/tmp/warehouse-d0665ee0-1e39-4805-b471-0b764f7838be\db1.db,Map()) (HiveDDLSuite.scala:675)
+
+ - drop database containing tables - RESTRICT *** FAILED *** (47 milliseconds)
+   CatalogDatabase(db1,,file:/C:/projects/spark/target/tmp/warehouse-d0665ee0-1e39-4805-b471-0b764f7838be/db1.db,Map()) did not equal CatalogDatabase(db1,,file:C:/projects/spark/target/tmp/warehouse-d0665ee0-1e39-4805-b471-0b764f7838be\db1.db,Map()) (HiveDDLSuite.scala:675)
+
+ - drop an empty database - RESTRICT *** FAILED *** (47 milliseconds)
+   CatalogDatabase(db1,,file:/C:/projects/spark/target/tmp/warehouse-d0665ee0-1e39-4805-b471-0b764f7838be/db1.db,Map()) did not equal CatalogDatabase(db1,,file:C:/projects/spark/target/tmp/warehouse-d0665ee0-1e39-4805-b471-0b764f7838be\db1.db,Map()) (HiveDDLSuite.scala:675)
+
+ - CREATE TABLE LIKE an external data source table *** FAILED *** (140 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark	arget	mpspark-c5eba16d-07ae-4186-95bb-21c5811cf888;
+
+ - CREATE TABLE LIKE an external Hive serde table *** FAILED *** (16 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - desc table for data source table - no user-defined schema *** FAILED *** (125 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark	arget	mpspark-e8bf5bf5-721a-4cbe-9d6	at scala.collection.immutable.List.foreach(List.scala:381)d-5543a8301c1d;
+```
+
+```
+MetastoreDataSourcesSuite
+ - CTAS: persisted bucketed data source table *** FAILED *** (16 milliseconds)
+   java.lang.IllegalArgumentException: Can not create a Path from an empty string
+```
+
+```
+ShowCreateTableSuite:
+ - simple external hive table *** FAILED *** (0 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+```
+
+```
+PartitionedTablePerfStatsSuite:
+ - hive table: partitioned pruned table reports only selected files *** FAILED *** (313 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - datasource table: partitioned pruned table reports only selected files *** FAILED *** (219 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark	arget	mpspark-311f45f8-d064-4023-a4bb-e28235bff64d;
+
+ - hive table: lazy partition pruning reads only necessary partition data *** FAILED *** (203 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - datasource table: lazy partition pruning reads only necessary partition data *** FAILED *** (187 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark	arget	mpspark-fde874ca-66bd-4d0b-a40f-a043b65bf957;
+
+ - hive table: lazy partition pruning with file status caching enabled *** FAILED *** (188 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - datasource table: lazy partition pruning with file status caching enabled *** FAILED *** (187 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark	arget	mpspark-e6d20183-dd68-4145-acbe-4a509849accd;
+
+ - hive table: file status caching respects refresh table and refreshByPath *** FAILED *** (172 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - datasource table: file status caching respects refresh table and refreshByPath *** FAILED *** (203 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark	arget	mpspark-8b2c9651-2adf-4d58-874f-659007e21463;
+
+ - hive table: file status cache respects size limit *** FAILED *** (219 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - datasource table: file status cache respects size limit *** FAILED *** (171 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark	arget	mpspark-7835ab57-cb48-4d2c-bb1d-b46d5a4c47e4;
+
+ - datasource table: table setup does not scan filesystem *** FAILED *** (266 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark	arget	mpspark-20598d76-c004-42a7-8061-6c56f0eda5e2;
+
+ - hive table: table setup does not scan filesystem *** FAILED *** (266 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - hive table: num hive client calls does not scale with partition count *** FAILED *** (2 seconds, 281 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - datasource table: num hive client calls does not scale with partition count *** FAILED *** (2 seconds, 422 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark	arget	mpspark-4cfed321-4d1d-4b48-8d34-5c169afff383;
+
+ - hive table: files read and cached when filesource partition management is off *** FAILED *** (234 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+
+ - datasource table: all partition data cached in memory when partition management is off *** FAILED *** (203 milliseconds)
+   org.apache.spark.sql.AnalysisException: Path does not exist: file:/C:projectsspark	arget	mpspark-4bcc0398-15c9-4f6a-811e-12d40f3eec12;
+
+ - SPARK-18700: table loaded only once even when resolved concurrently *** FAILED *** (1 second, 266 milliseconds)
+   org.apache.spark.sql.AnalysisException: org.apache.hadoop.hive.ql.metadata.HiveException: MetaException(message:java.lang.IllegalArgumentException: Can not create a Path from an empty string);
+```
+
+```
+HiveSparkSubmitSuite:
+ - temporary Hive UDF: define a UDF and use it *** FAILED *** (2 seconds, 94 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - permanent Hive UDF: define a UDF and use it *** FAILED *** (281 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - permanent Hive UDF: use a already defined permanent function *** FAILED *** (718 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - SPARK-8368: includes jars passed in through --jars *** FAILED *** (3 seconds, 521 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - SPARK-8020: set sql conf in spark conf *** FAILED *** (0 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - SPARK-8489: MissingRequirementError during reflection *** FAILED *** (94 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - SPARK-9757 Persist Parquet relation with decimal column *** FAILED *** (16 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - SPARK-11009 fix wrong result of Window function in cluster mode *** FAILED *** (16 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - SPARK-14244 fix window partition size attribute binding failure *** FAILED *** (78 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - set spark.sql.warehouse.dir *** FAILED *** (16 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - set hive.metastore.warehouse.dir *** FAILED *** (15 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - SPARK-16901: set javax.jdo.option.ConnectionURL *** FAILED *** (16 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+
+ - SPARK-18360: default table path of tables in default database should depend on the location of default database *** FAILED *** (15 milliseconds)
+   java.io.IOException: Cannot run program "./bin/spark-submit" (in directory "C:\projects\spark"): CreateProcess error=2, The system cannot find the file specified
+```
+
+```
+UtilsSuite:
+ - resolveURIs with multiple paths *** FAILED *** (0 milliseconds)
+   ".../jar3,file:/C:/pi.py[%23]py.pi,file:/C:/path%..." did not equal ".../jar3,file:/C:/pi.py[#]py.pi,file:/C:/path%..." (UtilsSuite.scala:468)
+```
+
+```
+CheckpointSuite:
+ - recovery with file input stream *** FAILED *** (10 seconds, 205 milliseconds)
+   The code passed to eventually never returned normally. Attempted 660 times over 10.014272499999999 seconds. Last failure message: Unexpected internal error near index 1
+   \
+    ^. (CheckpointSuite.scala:680)
+```
+
+Manually via AppVeyor as below:
+
+**Scala - aborted tests**
+
+```
+WindowQuerySuite - all passed
+OrcSourceSuite:
+- SPARK-18220: read Hive orc table with varchar column *** FAILED *** (4 seconds, 417 milliseconds)
+  org.apache.spark.sql.execution.QueryExecutionException: FAILED: Execution Error, return code -101 from org.apache.hadoop.hive.ql.exec.mr.MapRedTask. org.apache.hadoop.io.nativeio.NativeIO$Windows.access0(Ljava/lang/String;I)Z
+  at org.apache.spark.sql.hive.client.HiveClientImpl$$anonfun$runHive$1.apply(HiveClientImpl.scala:625)
+ParquetMetastoreSuite - all passed
+ParquetSourceSuite - all passed
+KafkaRDDSuite - all passed
+DirectKafkaStreamSuite - all passed
+ReliableKafkaStreamSuite - all passed
+KafkaStreamSuite - all passed
+KafkaClusterSuite - all passed
+DirectKafkaStreamSuite - all passed
+KafkaRDDSuite - all passed
+```
+
+**Java - failed tests**
+
+```
+org.apache.spark.streaming.kafka.JavaKafkaRDDSuite - all passed
+org.apache.spark.streaming.kafka.JavaDirectKafkaStreamSuite - all passed
+org.apache.spark.streaming.kafka.JavaKafkaStreamSuite - all passed
+org.apache.spark.streaming.kafka010.JavaDirectKafkaStreamSuite - all passed
+org.apache.spark.streaming.kafka010.JavaKafkaRDDSuite - all passed
+```
+
+**Scala - failed tests**
+
+```
+PartitionProviderCompatibilitySuite:
+- insert overwrite partition of new datasource table overwrites just partition (1 second, 953 milliseconds)
+- SPARK-18635 special chars in partition values - partition management true (6 seconds, 31 milliseconds)
+- SPARK-18635 special chars in partition values - partition management false (4 seconds, 578 milliseconds)
+```
+
+```
+UtilsSuite:
+- reading offset bytes of a file (compressed) (203 milliseconds)
+- reading offset bytes across multiple files (compressed) (0 milliseconds)
+```
+
+```
+StatisticsSuite:
+- MetastoreRelations fallback to HDFS for size estimation (94 milliseconds)
+```
+
+```
+SQLQuerySuite:
+ - permanent UDTF (407 milliseconds)
+ - describe functions - user defined functions (441 milliseconds)
+ - CTAS without serde with location (2 seconds, 831 milliseconds)
+ - derived from Hive query file: drop_database_removes_partition_dirs.q (734 milliseconds)
+ - derived from Hive query file: drop_table_removes_partition_dirs.q (563 milliseconds)
+ - SPARK-17796 Support wildcard character in filename for LOAD DATA LOCAL INPATH (453 milliseconds)
+```
+
+```
+HiveDDLSuite:
+ - drop external tables in default database (3 seconds, 5 milliseconds)
+ - add/drop partitions - external table (2 seconds, 750 milliseconds)
+ - create/drop database - location without pre-created directory (500 milliseconds)
+ - create/drop database - location with pre-created directory (407 milliseconds)
+ - drop database containing tables - CASCADE (453 milliseconds)
+ - drop an empty database - CASCADE (375 milliseconds)
+ - drop database containing tables - RESTRICT (328 milliseconds)
+ - drop an empty database - RESTRICT (391 milliseconds)
+ - CREATE TABLE LIKE an external data source table (953 milliseconds)
+ - CREATE TABLE LIKE an external Hive serde table (3 seconds, 782 milliseconds)
+ - desc table for data source table - no user-defined schema (1 second, 150 milliseconds)
+```
+
+```
+MetastoreDataSourcesSuite
+ - CTAS: persisted bucketed data source table (875 milliseconds)
+```
+
+```
+ShowCreateTableSuite:
+ - simple external hive table (78 milliseconds)
+```
+
+```
+PartitionedTablePerfStatsSuite:
+ - hive table: partitioned pruned table reports only selected files (1 second, 109 milliseconds)
+- datasource table: partitioned pruned table reports only selected files (860 milliseconds)
+ - hive table: lazy partition pruning reads only necessary partition data (859 milliseconds)
+ - datasource table: lazy partition pruning reads only necessary partition data (1 second, 219 milliseconds)
+ - hive table: lazy partition pruning with file status caching enabled (875 milliseconds)
+ - datasource table: lazy partition pruning with file status caching enabled (890 milliseconds)
+ - hive table: file status caching respects refresh table and refreshByPath (922 milliseconds)
+ - datasource table: file status caching respects refresh table and refreshByPath (640 milliseconds)
+ - hive table: file status cache respects size limit (469 milliseconds)
+ - datasource table: file status cache respects size limit (453 milliseconds)
+ - datasource table: table setup does not scan filesystem (328 milliseconds)
+ - hive table: table setup does not scan filesystem (313 milliseconds)
+ - hive table: num hive client calls does not scale with partition count (5 seconds, 431 milliseconds)
+ - datasource table: num hive client calls does not scale with partition count (4 seconds, 79 milliseconds)
+ - hive table: files read and cached when filesource partition management is off (656 milliseconds)
+ - datasource table: all partition data cached in memory when partition management is off (484 milliseconds)
+ - SPARK-18700: table loaded only once even when resolved concurrently (2 seconds, 578 milliseconds)
+```
+
+```
+HiveSparkSubmitSuite:
+ - temporary Hive UDF: define a UDF and use it (1 second, 745 milliseconds)
+ - permanent Hive UDF: define a UDF and use it (406 milliseconds)
+ - permanent Hive UDF: use a already defined permanent function (375 milliseconds)
+ - SPARK-8368: includes jars passed in through --jars (391 milliseconds)
+ - SPARK-8020: set sql conf in spark conf (156 milliseconds)
+ - SPARK-8489: MissingRequirementError during reflection (187 milliseconds)
+ - SPARK-9757 Persist Parquet relation with decimal column (157 milliseconds)
+ - SPARK-11009 fix wrong result of Window function in cluster mode (156 milliseconds)
+ - SPARK-14244 fix window partition size attribute binding failure (156 milliseconds)
+ - set spark.sql.warehouse.dir (172 milliseconds)
+ - set hive.metastore.warehouse.dir (156 milliseconds)
+ - SPARK-16901: set javax.jdo.option.ConnectionURL (157 milliseconds)
+ - SPARK-18360: default table path of tables in default database should depend on the location of default database (172 milliseconds)
+```
+
+```
+UtilsSuite:
+ - resolveURIs with multiple paths (0 milliseconds)
+```
+
+```
+CheckpointSuite:
+ - recovery with file input stream (4 seconds, 452 milliseconds)
+```
+
+Note: after resolving the aborted tests, there is a test failure identified as below:
+
+```
+OrcSourceSuite:
+- SPARK-18220: read Hive orc table with varchar column *** FAILED *** (4 seconds, 417 milliseconds)
+  org.apache.spark.sql.execution.QueryExecutionException: FAILED: Execution Error, return code -101 from org.apache.hadoop.hive.ql.exec.mr.MapRedTask. org.apache.hadoop.io.nativeio.NativeIO$Windows.access0(Ljava/lang/String;I)Z
+  at org.apache.spark.sql.hive.client.HiveClientImpl$$anonfun$runHive$1.apply(HiveClientImpl.scala:625)
+```
+
+This does not look due to this problem so this PR does not fix it here.
+
+Author: hyukjinkwon <gurwls223@gmail.com>
+
+Closes #16451 from HyukjinKwon/all-path-resource-fixes.
+
+(cherry picked from commit 4e27578faa67c7a71a9b938aafbaf79bdbf36831)
+---
+ .../scala/org/apache/spark/util/UtilsSuite.scala   |    2 +-
+ .../spark/streaming/kafka/KafkaTestUtils.scala     |   32 +++++++++++++++++---
+ .../streaming/kafka/DirectKafkaStreamSuite.scala   |    7 +----
+ .../streaming/kafka/ReliableKafkaStreamSuite.scala |    2 +-
+ .../org/apache/spark/sql/hive/test/TestHive.scala  |    2 +-
+ .../spark/sql/hive/HiveSparkSubmitSuite.scala      |    8 ++++-
+ .../apache/spark/sql/hive/orc/OrcSourceSuite.scala |    6 ++--
+ .../org/apache/spark/sql/hive/parquetSuites.scala  |   26 ++++++++--------
+ .../receiver/ReceiverSupervisorImpl.scala          |    6 ++++
+ .../apache/spark/streaming/CheckpointSuite.scala   |   17 ++++++++---
+ 10 files changed, 73 insertions(+), 35 deletions(-)
+
+diff --git a/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala b/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
+index 02bcfe9..bf7affb 100644
+--- a/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
++++ b/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
+@@ -415,7 +415,7 @@ class UtilsSuite extends SparkFunSuite with ResetSystemProperties with Logging {
+       s"hdfs:/jar1,file:/jar2,file:$cwd/jar3,file:$cwd/jar4#jar5,file:$cwd/path%20to/jar6")
+     if (Utils.isWindows) {
+       assertResolves("""hdfs:/jar1,file:/jar2,jar3,C:\pi.py#py.pi,C:\path to\jar4""",
+-        s"hdfs:/jar1,file:/jar2,file:$cwd/jar3,file:/C:/pi.py#py.pi,file:/C:/path%20to/jar4")
++        s"hdfs:/jar1,file:/jar2,file:$cwd/jar3,file:/C:/pi.py%23py.pi,file:/C:/path%20to/jar4")
+     }
+   }
+ 
+diff --git a/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaTestUtils.scala b/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaTestUtils.scala
+index acd7fab..277c4a1 100644
+--- a/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaTestUtils.scala
++++ b/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaTestUtils.scala
+@@ -17,7 +17,7 @@
+ 
+ package org.apache.spark.streaming.kafka
+ 
+-import java.io.File
++import java.io.{File, IOException}
+ import java.lang.{Integer => JInt}
+ import java.net.InetSocketAddress
+ import java.util.concurrent.TimeoutException
+@@ -135,10 +135,21 @@ private[kafka] class KafkaTestUtils extends Logging {
+ 
+     if (server != null) {
+       server.shutdown()
++      server.awaitShutdown()
+       server = null
+     }
+ 
+-    brokerConf.logDirs.foreach { f => Utils.deleteRecursively(new File(f)) }
++    // On Windows, `logDirs` is left open even after Kafka server above is completely shut down
++    // in some cases. It leads to test failures on Windows if the directory deletion failure
++    // throws an exception.
++    brokerConf.logDirs.foreach { f =>
++      try {
++        Utils.deleteRecursively(new File(f))
++      } catch {
++        case e: IOException if Utils.isWindows =>
++          logWarning(e.getMessage)
++      }
++    }
+ 
+     if (zkUtils != null) {
+       zkUtils.close()
+@@ -263,8 +274,21 @@ private[kafka] class KafkaTestUtils extends Logging {
+ 
+     def shutdown() {
+       factory.shutdown()
+-      Utils.deleteRecursively(snapshotDir)
+-      Utils.deleteRecursively(logDir)
++      // The directories are not closed even if the ZooKeeper server is shut down.
++      // Please see ZOOKEEPER-1844, which is fixed in 3.4.6+. It leads to test failures
++      // on Windows if the directory deletion failure throws an exception.
++      try {
++        Utils.deleteRecursively(snapshotDir)
++      } catch {
++        case e: IOException if Utils.isWindows =>
++          logWarning(e.getMessage)
++      }
++      try {
++        Utils.deleteRecursively(logDir)
++      } catch {
++        case e: IOException if Utils.isWindows =>
++          logWarning(e.getMessage)
++      }
+     }
+   }
+ }
+diff --git a/external/kafka/src/test/scala/org/apache/spark/streaming/kafka/DirectKafkaStreamSuite.scala b/external/kafka/src/test/scala/org/apache/spark/streaming/kafka/DirectKafkaStreamSuite.scala
+index feea0ae..6119b7b 100644
+--- a/external/kafka/src/test/scala/org/apache/spark/streaming/kafka/DirectKafkaStreamSuite.scala
++++ b/external/kafka/src/test/scala/org/apache/spark/streaming/kafka/DirectKafkaStreamSuite.scala
+@@ -51,7 +51,6 @@ class DirectKafkaStreamSuite
+     .setMaster("local[4]")
+     .setAppName(this.getClass.getSimpleName)
+ 
+-  private var sc: SparkContext = _
+   private var ssc: StreamingContext = _
+   private var testDir: File = _
+ 
+@@ -71,11 +70,7 @@ class DirectKafkaStreamSuite
+ 
+   after {
+     if (ssc != null) {
+-      ssc.stop()
+-      sc = null
+-    }
+-    if (sc != null) {
+-      sc.stop()
++      ssc.stop(stopSparkContext = true)
+     }
+     if (testDir != null) {
+       Utils.deleteRecursively(testDir)
+diff --git a/external/kafka/src/test/scala/org/apache/spark/streaming/kafka/ReliableKafkaStreamSuite.scala b/external/kafka/src/test/scala/org/apache/spark/streaming/kafka/ReliableKafkaStreamSuite.scala
+index 0f3e49f..88bc9b5 100644
+--- a/external/kafka/src/test/scala/org/apache/spark/streaming/kafka/ReliableKafkaStreamSuite.scala
++++ b/external/kafka/src/test/scala/org/apache/spark/streaming/kafka/ReliableKafkaStreamSuite.scala
+@@ -80,7 +80,7 @@ class ReliableKafkaStreamSuite extends SparkFunSuite
+ 
+   after {
+     if (ssc != null) {
+-      ssc.stop()
++      ssc.stop(stopSparkContext = true)
+       ssc = null
+     }
+   }
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/test/TestHive.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/test/TestHive.scala
+index 24b4065..5d45c75 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/test/TestHive.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/test/TestHive.scala
+@@ -102,7 +102,7 @@ class TestHiveContext(sc: SparkContext) extends HiveContext(sc) {
+   val testTempDir = Utils.createTempDir()
+ 
+   // For some hive test case which contain ${system:test.tmp.dir}
+-  System.setProperty("test.tmp.dir", testTempDir.getCanonicalPath)
++  System.setProperty("test.tmp.dir", Utils.createTempDir().toURI.getPath)
+ 
+   /** The location of the compiled hive distribution */
+   lazy val hiveHome = envVarToFile("HIVE_HOME")
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveSparkSubmitSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveSparkSubmitSuite.scala
+index 9296219..705fa41 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveSparkSubmitSuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveSparkSubmitSuite.scala
+@@ -132,7 +132,13 @@ class HiveSparkSubmitSuite
+   private def runSparkSubmit(args: Seq[String]): Unit = {
+     val sparkHome = sys.props.getOrElse("spark.test.home", fail("spark.test.home is not set!"))
+     val history = ArrayBuffer.empty[String]
+-    val commands = Seq("./bin/spark-submit") ++ args
++    val sparkSubmit = if (Utils.isWindows) {
++      // On Windows, `ProcessBuilder.directory` does not change the current working directory.
++      new File("..\\..\\bin\\spark-submit.cmd").getAbsolutePath
++    } else {
++      "./bin/spark-submit"
++    }
++    val commands = Seq(sparkSubmit) ++ args
+     val commandLine = commands.mkString("'", "' '", "'")
+ 
+     val builder = new ProcessBuilder(commands: _*).directory(new File(sparkHome))
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/orc/OrcSourceSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/orc/OrcSourceSuite.scala
+index 7a34cf7..05e617c 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/orc/OrcSourceSuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/orc/OrcSourceSuite.scala
+@@ -57,7 +57,7 @@ abstract class OrcSuite extends QueryTest with TestHiveSingleton with BeforeAndA
+          |  stringField STRING
+          |)
+          |STORED AS ORC
+-         |LOCATION '${orcTableAsDir.getCanonicalPath}'
++         |LOCATION '${orcTableAsDir.toURI}'
+        """.stripMargin)
+ 
+     sql(
+@@ -162,7 +162,7 @@ class OrcSourceSuite extends OrcSuite {
+       s"""CREATE TEMPORARY TABLE normal_orc_source
+          |USING org.apache.spark.sql.hive.orc
+          |OPTIONS (
+-         |  PATH '${new File(orcTableAsDir.getAbsolutePath).getCanonicalPath}'
++         |  PATH '${new File(orcTableAsDir.getAbsolutePath).toURI}'
+          |)
+        """.stripMargin)
+ 
+@@ -170,7 +170,7 @@ class OrcSourceSuite extends OrcSuite {
+       s"""CREATE TEMPORARY TABLE normal_orc_as_source
+          |USING org.apache.spark.sql.hive.orc
+          |OPTIONS (
+-         |  PATH '${new File(orcTableAsDir.getAbsolutePath).getCanonicalPath}'
++         |  PATH '${new File(orcTableAsDir.getAbsolutePath).toURI}'
+          |)
+        """.stripMargin)
+   }
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/parquetSuites.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/parquetSuites.scala
+index c3ef845..b343cf7 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/parquetSuites.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/parquetSuites.scala
+@@ -77,7 +77,7 @@ class ParquetMetastoreSuite extends ParquetPartitioningTest {
+        STORED AS
+        INPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+        OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+-      location '${partitionedTableDir.getCanonicalPath}'
++      location '${partitionedTableDir.toURI}'
+     """)
+ 
+     sql(s"""
+@@ -91,7 +91,7 @@ class ParquetMetastoreSuite extends ParquetPartitioningTest {
+        STORED AS
+        INPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+        OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+-      location '${partitionedTableDirWithKey.getCanonicalPath}'
++      location '${partitionedTableDirWithKey.toURI}'
+     """)
+ 
+     sql(s"""
+@@ -104,7 +104,7 @@ class ParquetMetastoreSuite extends ParquetPartitioningTest {
+        STORED AS
+        INPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+        OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+-      location '${new File(normalTableDir, "normal").getCanonicalPath}'
++      location '${new File(normalTableDir, "normal").toURI}'
+     """)
+ 
+     sql(s"""
+@@ -120,7 +120,7 @@ class ParquetMetastoreSuite extends ParquetPartitioningTest {
+        STORED AS
+        INPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+        OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+-      LOCATION '${partitionedTableDirWithComplexTypes.getCanonicalPath}'
++      LOCATION '${partitionedTableDirWithComplexTypes.toURI}'
+     """)
+ 
+     sql(s"""
+@@ -136,7 +136,7 @@ class ParquetMetastoreSuite extends ParquetPartitioningTest {
+        STORED AS
+        INPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+        OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+-      LOCATION '${partitionedTableDirWithKeyAndComplexTypes.getCanonicalPath}'
++      LOCATION '${partitionedTableDirWithKeyAndComplexTypes.toURI}'
+     """)
+ 
+     sql(
+@@ -549,7 +549,7 @@ class ParquetSourceSuite extends ParquetPartitioningTest {
+       create temporary table partitioned_parquet
+       USING org.apache.spark.sql.parquet
+       OPTIONS (
+-        path '${partitionedTableDir.getCanonicalPath}'
++        path '${partitionedTableDir.toURI}'
+       )
+     """)
+ 
+@@ -557,7 +557,7 @@ class ParquetSourceSuite extends ParquetPartitioningTest {
+       create temporary table partitioned_parquet_with_key
+       USING org.apache.spark.sql.parquet
+       OPTIONS (
+-        path '${partitionedTableDirWithKey.getCanonicalPath}'
++        path '${partitionedTableDirWithKey.toURI}'
+       )
+     """)
+ 
+@@ -565,7 +565,7 @@ class ParquetSourceSuite extends ParquetPartitioningTest {
+       create temporary table normal_parquet
+       USING org.apache.spark.sql.parquet
+       OPTIONS (
+-        path '${new File(partitionedTableDir, "p=1").getCanonicalPath}'
++        path '${new File(partitionedTableDir, "p=1").toURI}'
+       )
+     """)
+ 
+@@ -573,7 +573,7 @@ class ParquetSourceSuite extends ParquetPartitioningTest {
+       CREATE TEMPORARY TABLE partitioned_parquet_with_key_and_complextypes
+       USING org.apache.spark.sql.parquet
+       OPTIONS (
+-        path '${partitionedTableDirWithKeyAndComplexTypes.getCanonicalPath}'
++        path '${partitionedTableDirWithKeyAndComplexTypes.toURI}'
+       )
+     """)
+ 
+@@ -581,7 +581,7 @@ class ParquetSourceSuite extends ParquetPartitioningTest {
+       CREATE TEMPORARY TABLE partitioned_parquet_with_complextypes
+       USING org.apache.spark.sql.parquet
+       OPTIONS (
+-        path '${partitionedTableDirWithComplexTypes.getCanonicalPath}'
++        path '${partitionedTableDirWithComplexTypes.toURI}'
+       )
+     """)
+   }
+@@ -614,8 +614,6 @@ class ParquetSourceSuite extends ParquetPartitioningTest {
+ 
+   test("SPARK-8811: compatibility with array of struct in Hive") {
+     withTempPath { dir =>
+-      val path = dir.getCanonicalPath
+-
+       withTable("array_of_struct") {
+         val conf = Seq(
+           HiveContext.CONVERT_METASTORE_PARQUET.key -> "false",
+@@ -625,12 +623,12 @@ class ParquetSourceSuite extends ParquetPartitioningTest {
+         withSQLConf(conf: _*) {
+           sql(
+             s"""CREATE TABLE array_of_struct
+-               |STORED AS PARQUET LOCATION '$path'
++               |STORED AS PARQUET LOCATION '${dir.toURI}'
+                |AS SELECT '1st', '2nd', ARRAY(NAMED_STRUCT('a', 'val_a', 'b', 'val_b'))
+              """.stripMargin)
+ 
+           checkAnswer(
+-            sqlContext.read.parquet(path),
++            sqlContext.read.parquet(dir.getCanonicalPath),
+             Row("1st", "2nd", Seq(Row("val_a", "val_b"))))
+         }
+       }
+diff --git a/streaming/src/main/scala/org/apache/spark/streaming/receiver/ReceiverSupervisorImpl.scala b/streaming/src/main/scala/org/apache/spark/streaming/receiver/ReceiverSupervisorImpl.scala
+index 167f56a..5244335 100644
+--- a/streaming/src/main/scala/org/apache/spark/streaming/receiver/ReceiverSupervisorImpl.scala
++++ b/streaming/src/main/scala/org/apache/spark/streaming/receiver/ReceiverSupervisorImpl.scala
+@@ -174,6 +174,12 @@ private[streaming] class ReceiverSupervisorImpl(
+   }
+ 
+   override protected def onStop(message: String, error: Option[Throwable]) {
++    receivedBlockHandler match {
++      case handler: WriteAheadLogBasedBlockHandler =>
++        // Write ahead log should be closed.
++        handler.stop()
++      case _ =>
++    }
+     registeredBlockGenerators.foreach { _.stop() }
+     env.rpcEnv.stop(endpoint)
+   }
+diff --git a/streaming/src/test/scala/org/apache/spark/streaming/CheckpointSuite.scala b/streaming/src/test/scala/org/apache/spark/streaming/CheckpointSuite.scala
+index f5f446f..46c7df7 100644
+--- a/streaming/src/test/scala/org/apache/spark/streaming/CheckpointSuite.scala
++++ b/streaming/src/test/scala/org/apache/spark/streaming/CheckpointSuite.scala
+@@ -17,7 +17,7 @@
+ 
+ package org.apache.spark.streaming
+ 
+-import java.io.{ByteArrayInputStream, ByteArrayOutputStream, File, ObjectOutputStream}
++import java.io._
+ 
+ import scala.collection.mutable.{ArrayBuffer, SynchronizedBuffer}
+ import scala.reflect.ClassTag
+@@ -607,8 +607,9 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester {
+     def recordedFiles(ssc: StreamingContext): Seq[Int] = {
+       val fileInputDStream =
+         ssc.graph.getInputStreams().head.asInstanceOf[FileInputDStream[_, _, _]]
+-      val filenames = fileInputDStream.batchTimeToSelectedFiles.values.flatten
+-      filenames.map(_.split(File.separator).last.toInt).toSeq.sorted
++      val filenames = fileInputDStream.batchTimeToSelectedFiles.synchronized
++         { fileInputDStream.batchTimeToSelectedFiles.values.flatten }
++      filenames.map(_.split("/").last.toInt).toSeq.sorted
+     }
+ 
+     try {
+@@ -732,7 +733,15 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester {
+         assert(outputBuffer.flatten.toSet === expectedOutput.toSet)
+       }
+     } finally {
+-      Utils.deleteRecursively(testDir)
++      try {
++        // As the driver shuts down in the middle of processing and the thread above sleeps
++        // for a while, `testDir` can be not closed correctly at this point which causes the
++        // test failure on Windows.
++        Utils.deleteRecursively(testDir)
++      } catch {
++        case e: IOException if Utils.isWindows =>
++          logWarning(e.getMessage)
++      }
+     }
+   }
+ 
+-- 
+1.7.9.5
+

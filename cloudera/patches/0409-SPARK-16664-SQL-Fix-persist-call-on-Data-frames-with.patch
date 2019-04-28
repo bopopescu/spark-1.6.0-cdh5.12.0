@@ -1,0 +1,84 @@
+From 7ddf68e6fadee93eb76cfd45a910dab6e4a3f2c0 Mon Sep 17 00:00:00 2001
+From: Wesley Tang <tangmingjun@mininglamp.com>
+Date: Fri, 29 Jul 2016 13:25:33 -0700
+Subject: [PATCH 409/517] =?UTF-8?q?[SPARK-16664][SQL]=20Fix=20persist=20call?=
+ =?UTF-8?q?=20on=20Data=20frames=20with=20more=20than=20200=E2=80=A6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+## What changes were proposed in this pull request?
+
+Cherry-pick from d1d5069aa3744d46abd3889abab5f15e9067382a and fix the test case
+
+## How was this patch tested?
+
+Test updated
+
+Author: Wesley Tang <tangmingjun@mininglamp.com>
+
+Closes #14404 from breakdawn/branch-1.6.
+
+(cherry picked from commit 1b2e6f636c2a59e21451e7d12e2dec32d048bc17)
+---
+ .../columnar/GenerateColumnAccessor.scala          |    4 ++--
+ .../org/apache/spark/sql/DataFrameSuite.scala      |    8 ++++++++
+ .../columnar/InMemoryColumnarQuerySuite.scala      |    3 ++-
+ 3 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/GenerateColumnAccessor.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/GenerateColumnAccessor.scala
+index 4f6f58b..a040208 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/GenerateColumnAccessor.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/GenerateColumnAccessor.scala
+@@ -129,7 +129,7 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
+         val groupedAccessorsItr = initializeAccessors.grouped(numberOfStatementsThreshold)
+         val groupedExtractorsItr = extractors.grouped(numberOfStatementsThreshold)
+         var groupedAccessorsLength = 0
+-        groupedAccessorsItr.zipWithIndex.map { case (body, i) =>
++        groupedAccessorsItr.zipWithIndex.foreach { case (body, i) =>
+           groupedAccessorsLength += 1
+           val funcName = s"accessors$i"
+           val funcCode = s"""
+@@ -139,7 +139,7 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
+            """.stripMargin
+           ctx.addNewFunction(funcName, funcCode)
+         }
+-        groupedExtractorsItr.zipWithIndex.map { case (body, i) =>
++        groupedExtractorsItr.zipWithIndex.foreach { case (body, i) =>
+           val funcName = s"extractors$i"
+           val funcCode = s"""
+              |private void $funcName() {
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/DataFrameSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/DataFrameSuite.scala
+index 8994556..06436a1 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/DataFrameSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/DataFrameSuite.scala
+@@ -1186,4 +1186,12 @@ class DataFrameSuite extends QueryTest with SharedSQLContext {
+       Seq(1 -> "a").toDF("i", "j").filter($"i".cast(StringType) === "1"),
+       Row(1, "a"))
+   }
++
++  test("SPARK-16664: persist with more than 200 columns") {
++    val size = 201L
++    val rdd = sparkContext.makeRDD(Seq(Row.fromSeq(0L to size)))
++    val schema = (0L to size).map(i => StructField("name" + i, LongType, true))
++    val df = sqlContext.createDataFrame(rdd, StructType(schema))
++    assert(df.persist.take(1).apply(0).toSeq(100).asInstanceOf[Long] == 100)
++  }
+ }
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala
+index 4012bea..f763971 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala
+@@ -238,7 +238,8 @@ class InMemoryColumnarQuerySuite extends QueryTest with SharedSQLContext {
+     val columnTypes1 = List.fill(length1)(IntegerType)
+     val columnarIterator1 = GenerateColumnAccessor.generate(columnTypes1)
+ 
+-    val length2 = 10000
++    // SPARK-16664: the limit of janino is 8117
++    val length2 = 8117
+     val columnTypes2 = List.fill(length2)(IntegerType)
+     val columnarIterator2 = GenerateColumnAccessor.generate(columnTypes2)
+   }
+-- 
+1.7.9.5
+

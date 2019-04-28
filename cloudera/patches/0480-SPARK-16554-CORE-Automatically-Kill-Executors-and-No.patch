@@ -1,0 +1,711 @@
+From 0e71a3aea33cab535bec6828c87c14f19518fde2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jos=C3=A9=20Hiram=20Soltren?= <jose@cloudera.com>
+Date: Thu, 9 Feb 2017 12:49:31 -0600
+Subject: [PATCH 480/517] [SPARK-16554][CORE] Automatically Kill Executors and
+ Nodes when they are Blacklisted
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+In SPARK-8425, we introduced a mechanism for blacklisting executors and nodes (hosts). After a certain number of failures, these resources would be "blacklisted" and no further work would be assigned to them for some period of time.
+
+In some scenarios, it is better to fail fast, and to simply kill these unreliable resources. This changes proposes to do so by having the BlacklistTracker kill unreliable resources when they would otherwise be "blacklisted".
+
+In order to be thread safe, this code depends on the CoarseGrainedSchedulerBackend sending a message to the driver backend in order to do the actual killing. This also helps to prevent a race which would permit work to begin on a resource (executor or node), between the time the resource is marked for killing and the time at which it is finally killed.
+
+./dev/run-tests
+Ran https://github.com/jsoltren/jose-utils/blob/master/blacklist/test-blacklist.sh, and checked logs to see executors and nodes being killed.
+
+Testing can likely be improved here; suggestions welcome.
+
+Author: José Hiram Soltren <jose@cloudera.com>
+
+Closes #16650 from jsoltren/SPARK-16554-submit.
+
+(cherry picked from commit 6287c94f08200d548df5cc0a401b73b84f9968c4)
+---
+ .../apache/spark/ExecutorAllocationClient.scala    |   28 ++++++-
+ .../main/scala/org/apache/spark/SparkContext.scala |   28 ++++++-
+ .../apache/spark/scheduler/BlacklistTracker.scala  |   34 ++++++++-
+ .../apache/spark/scheduler/TaskSchedulerImpl.scala |    6 +-
+ .../cluster/CoarseGrainedClusterMessage.scala      |    3 +
+ .../cluster/CoarseGrainedSchedulerBackend.scala    |   68 +++++++++++------
+ .../spark/ExecutorAllocationManagerSuite.scala     |   69 ++++++++++++++++++
+ .../deploy/StandaloneDynamicAllocationSuite.scala  |   69 ++++++++++++++++--
+ .../spark/scheduler/BlacklistTrackerSuite.scala    |   77 +++++++++++++++++++-
+ .../spark/scheduler/TaskSetManagerSuite.scala      |    2 +-
+ docs/configuration.md                              |    9 +++
+ 11 files changed, 352 insertions(+), 41 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/ExecutorAllocationClient.scala b/core/src/main/scala/org/apache/spark/ExecutorAllocationClient.scala
+index 842bfdb..8757c03 100644
+--- a/core/src/main/scala/org/apache/spark/ExecutorAllocationClient.scala
++++ b/core/src/main/scala/org/apache/spark/ExecutorAllocationClient.scala
+@@ -50,13 +50,35 @@ private[spark] trait ExecutorAllocationClient {
+ 
+   /**
+    * Request that the cluster manager kill the specified executors.
+-   * @return whether the request is acknowledged by the cluster manager.
++   *
++   * When asking the executor to be replaced, the executor loss is considered a failure, and
++   * killed tasks that are running on the executor will count towards the failure limits. If no
++   * replacement is being requested, then the tasks will not count towards the limit.
++   *
++   * @param executorIds identifiers of executors to kill
++   * @param replace whether to replace the killed executors with new ones, default false
++   * @param force whether to force kill busy executors, default false
++   * @return the ids of the executors acknowledged by the cluster manager to be removed.
+    */
+-  def killExecutors(executorIds: Seq[String]): Boolean
++  private[spark] def killExecutors(
++    executorIds: Seq[String],
++    replace: Boolean = false,
++    force: Boolean = false): Seq[String]
+ 
+   /**
++   * Request that the cluster manager kill every executor on the specified host.
++   * Results in a call to killExecutors for each executor on the host, with the replace
++   * and force arguments set to true.
++   * @return whether the request is acknowledged by the cluster manager.
++   */
++  private[spark] def killExecutorsOnHost(host: String): Boolean
++
++    /**
+    * Request that the cluster manager kill the specified executor.
+    * @return whether the request is acknowledged by the cluster manager.
+    */
+-  def killExecutor(executorId: String): Boolean = killExecutors(Seq(executorId))
++  def killExecutor(executorId: String): Boolean = {
++    val killedExecutors = killExecutors(Seq(executorId))
++    killedExecutors.nonEmpty && killedExecutors(0).equals(executorId)
++  }
+ }
+diff --git a/core/src/main/scala/org/apache/spark/SparkContext.scala b/core/src/main/scala/org/apache/spark/SparkContext.scala
+index 7d5af13..dbc5e4a 100644
+--- a/core/src/main/scala/org/apache/spark/SparkContext.scala
++++ b/core/src/main/scala/org/apache/spark/SparkContext.scala
+@@ -1463,10 +1463,10 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
+    * @return whether the request is received.
+    */
+   @DeveloperApi
+-  override def killExecutors(executorIds: Seq[String]): Boolean = {
++  def killExecutors(executorIds: Seq[String]): Boolean = {
+     schedulerBackend match {
+       case b: CoarseGrainedSchedulerBackend =>
+-        b.killExecutors(executorIds, replace = false, force = true)
++        b.killExecutors(executorIds, replace = false, force = true).nonEmpty
+       case _ =>
+         logWarning("Killing executors is only supported in coarse-grained mode")
+         false
+@@ -1504,7 +1504,29 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
+   private[spark] def killAndReplaceExecutor(executorId: String): Boolean = {
+     schedulerBackend match {
+       case b: CoarseGrainedSchedulerBackend =>
+-        b.killExecutors(Seq(executorId), replace = true, force = true)
++        b.killExecutors(Seq(executorId), replace = true, force = true).nonEmpty
++      case _ =>
++        logWarning("Killing executors is only supported in coarse-grained mode")
++        false
++    }
++  }
++
++  private[spark] def killExecutors(
++      executorIds: Seq[String],
++      replace: Boolean,
++      force: Boolean): Seq[String] = {
++    schedulerBackend match {
++      case b: CoarseGrainedSchedulerBackend =>
++        b.killExecutors(executorIds, replace, force)
++      case _ =>
++        logWarning("Killing executors is only supported in coarse-grained mode")
++        Seq()
++    }
++  }
++  private[spark] def killExecutorsOnHost(host: String): Boolean = {
++    schedulerBackend match {
++      case b: CoarseGrainedSchedulerBackend =>
++        b.killExecutorsOnHost(host)
+       case _ =>
+         logWarning("Killing executors is only supported in coarse-grained mode")
+         false
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/BlacklistTracker.scala b/core/src/main/scala/org/apache/spark/scheduler/BlacklistTracker.scala
+index 31d226d..c0e58aa 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/BlacklistTracker.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/BlacklistTracker.scala
+@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicReference
+ 
+ import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
+ 
+-import org.apache.spark.{Logging, SparkConf, SparkContext}
++import org.apache.spark.{ExecutorAllocationClient, Logging, SparkConf, SparkContext}
+ import org.apache.spark.util.{Clock, SystemClock, Utils}
+ 
+ /**
+@@ -48,15 +48,17 @@ import org.apache.spark.util.{Clock, SystemClock, Utils}
+ private[scheduler] class BlacklistTracker (
+     private val listenerBus: LiveListenerBus,
+     conf: SparkConf,
++    allocationClient: Option[ExecutorAllocationClient],
+     clock: Clock = new SystemClock()) extends Logging {
+ 
+-  def this(sc: SparkContext) = {
+-    this(sc.listenerBus, sc.conf)
++  def this(sc: SparkContext, allocationClient: Option[ExecutorAllocationClient]) = {
++    this(sc.listenerBus, sc.conf, allocationClient)
+   }
+ 
+   BlacklistTracker.validateBlacklistConfs(conf)
+   private val MAX_FAILURES_PER_EXEC = conf.getInt(BlacklistConfs.MAX_FAILURES_PER_EXEC, 2)
+   private val MAX_FAILED_EXEC_PER_NODE = conf.getInt(BlacklistConfs.MAX_FAILED_EXEC_PER_NODE, 2)
++  private val BLACKLIST_KILL_ENABLED = conf.getBoolean(BlacklistConfs.BLACKLIST_KILL_ENABLED, false)
+   val BLACKLIST_TIMEOUT_MILLIS = BlacklistTracker.getBlacklistTimeout(conf)
+ 
+   /**
+@@ -171,6 +173,17 @@ private[scheduler] class BlacklistTracker (
+         listenerBus.post(SparkListenerExecutorBlacklisted(now, exec, newTotal))
+         executorIdToFailureList.remove(exec)
+         updateNextExpiryTime()
++        if (BLACKLIST_KILL_ENABLED) {
++          allocationClient match {
++            case Some(allocationClient) =>
++              logInfo(s"Killing blacklisted executor id $exec " +
++                s"since spark.blacklist.killBlacklistedExecutors is set.")
++              allocationClient.killExecutors(Seq(exec), true, true)
++            case None =>
++              logWarning(s"Not attempting to kill blacklisted executor id $exec " +
++                s"since allocation client is not defined.")
++          }
++        }
+ 
+         // In addition to blacklisting the executor, we also update the data for failures on the
+         // node, and potentially put the entire node into a blacklist as well.
+@@ -182,6 +195,19 @@ private[scheduler] class BlacklistTracker (
+           nodeIdToBlacklistExpiryTime.put(node, expiryTimeForNewBlacklists)
+           listenerBus.post(SparkListenerNodeBlacklisted(now, node, blacklistedExecsOnNode.size))
+           _nodeBlacklist.set(nodeIdToBlacklistExpiryTime.keySet.toSet)
++          if (BLACKLIST_KILL_ENABLED) {
++            allocationClient match {
++              case Some(allocationClient) =>
++                logInfo(s"Killing all executors on blacklisted host $node " +
++                  s"since spark.blacklist.killBlacklistedExecutors is set.")
++                if (allocationClient.killExecutorsOnHost(node) == false) {
++                  logError(s"Killing executors on node $node failed.")
++                }
++              case None =>
++                logWarning(s"Not attempting to kill executors on blacklisted host $node " +
++                  s"since allocation client is not defined.")
++            }
++          }
+         }
+       }
+     }
+@@ -411,6 +437,8 @@ private[spark] object BlacklistConfs {
+ 
+   val BLACKLIST_TIMEOUT_CONF = "spark.blacklist.timeout"
+ 
++  val BLACKLIST_KILL_ENABLED = "spark.blacklist.killBlacklistedExecutors"
++
+   val BLACKLIST_LEGACY_TIMEOUT_CONF = "spark.scheduler.executorTaskBlacklistTime"
+ }
+ 
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala b/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala
+index c7407fb..a6fa7fe 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala
+@@ -683,7 +683,11 @@ private[spark] object TaskSchedulerImpl {
+ 
+   private def maybeCreateBlacklistTracker(sc: SparkContext): Option[BlacklistTracker] = {
+     if (BlacklistTracker.isBlacklistEnabled(sc.conf)) {
+-      Some(new BlacklistTracker(sc))
++      val executorAllocClient: Option[ExecutorAllocationClient] = sc.schedulerBackend match {
++        case b: ExecutorAllocationClient => Some(b)
++        case _ => None
++      }
++      Some(new BlacklistTracker(sc, executorAllocClient))
+     } else {
+       None
+     }
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedClusterMessage.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedClusterMessage.scala
+index 938ba95..81db4e0 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedClusterMessage.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedClusterMessage.scala
+@@ -41,6 +41,9 @@ private[spark] object CoarseGrainedClusterMessages {
+   case class KillTask(taskId: Long, executor: String, interruptThread: Boolean)
+     extends CoarseGrainedClusterMessage
+ 
++  case class KillExecutorsOnHost(host: String)
++    extends CoarseGrainedClusterMessage
++
+   sealed trait RegisterExecutorResponse
+ 
+   case class RegisteredExecutor(hostname: String) extends CoarseGrainedClusterMessage
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+index 6cfa77d..384995a 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+@@ -22,7 +22,6 @@ import java.util.concurrent.atomic.AtomicInteger
+ 
+ import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
+ import scala.concurrent.Future
+-import scala.concurrent.duration.Duration
+ 
+ import org.apache.spark.rpc._
+ import org.apache.spark.{ExecutorAllocationClient, Logging, SparkEnv, SparkException, TaskState}
+@@ -133,22 +132,35 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+             // Ignoring the task kill since the executor is not registered.
+             logWarning(s"Attempted to kill task $taskId for unknown executor $executorId.")
+         }
++
++      case KillExecutorsOnHost(host) =>
++        scheduler.getExecutorsAliveOnHost(host).foreach { exec =>
++          killExecutors(exec.toSeq, replace = true, force = true)
++        }
+     }
+ 
+     override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
+ 
+       case RegisterExecutor(executorId, executorRef, hostPort, cores, logUrls) =>
++        // If the executor's rpc env is not listening for incoming connections, `hostPort`
++        // will be null, and the client connection should be used to contact the executor.
++        val executorAddress = if (executorRef.address != null) {
++          executorRef.address
++        } else {
++          context.senderAddress
++        }
+         if (executorDataMap.contains(executorId)) {
+           executorRef.send(RegisterExecutorFailed("Duplicate executor ID: " + executorId))
+           context.reply(true)
++        } else if (scheduler.nodeBlacklist != null &&
++          scheduler.nodeBlacklist.contains(executorAddress.host)) {
++          // If the cluster manager gives us an executor on a blacklisted node (because it
++          // already started allocating those resources before we informed it of our blacklist,
++          // or if it ignored our blacklist), then we reject that executor immediately.
++          logInfo(s"Rejecting $executorId as it has been blacklisted.")
++          executorRef.send(RegisterExecutorFailed(s"Executor is blacklisted: $executorId"))
++          context.reply(true)
+         } else {
+-          // If the executor's rpc env is not listening for incoming connections, `hostPort`
+-          // will be null, and the client connection should be used to contact the executor.
+-          val executorAddress = if (executorRef.address != null) {
+-              executorRef.address
+-            } else {
+-              context.senderAddress
+-            }
+           logInfo(s"Registered executor $executorRef ($executorAddress) with ID $executorId")
+           addressToExecutorId(executorAddress) = executorId
+           totalCoreCount.addAndGet(cores)
+@@ -502,28 +514,20 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+ 
+   /**
+    * Request that the cluster manager kill the specified executors.
+-   * @return whether the kill request is acknowledged.
+-   */
+-  final override def killExecutors(executorIds: Seq[String]): Boolean = {
+-    killExecutors(executorIds, replace = false, force = false)
+-  }
+-
+-  /**
+-   * Request that the cluster manager kill the specified executors.
+    *
+    * When asking the executor to be replaced, the executor loss is considered a failure, and
+    * killed tasks that are running on the executor will count towards the failure limits. If no
+    * replacement is being requested, then the tasks will not count towards the limit.
+    *
+    * @param executorIds identifiers of executors to kill
+-   * @param replace whether to replace the killed executors with new ones
+-   * @param force whether to force kill busy executors
+-   * @return whether the kill request is acknowledged.
++   * @param replace whether to replace the killed executors with new ones, default false
++   * @param force whether to force kill busy executors, default false
++   * @return the ids of the executors acknowledged by the cluster manager to be removed.
+    */
+-  final def killExecutors(
++  final override def killExecutors(
+       executorIds: Seq[String],
+       replace: Boolean,
+-      force: Boolean): Boolean = {
++      force: Boolean): Seq[String] = {
+     logInfo(s"Requesting to kill executor(s) ${executorIds.mkString(", ")}")
+ 
+     val response = synchronized {
+@@ -558,7 +562,11 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+           _ => Future.successful(false)
+         }
+ 
+-      adjustTotalExecutors.flatMap(killExecutors)(ThreadUtils.sameThread)
++      val killResponse = adjustTotalExecutors.flatMap(killExecutors)(ThreadUtils.sameThread)
++
++      killResponse.flatMap(killSuccessful =>
++        Future.successful (if (killSuccessful) executorsToKill else Seq.empty[String])
++      )(ThreadUtils.sameThread)
+     }
+ 
+     defaultAskTimeout.awaitResult(response)
+@@ -570,6 +578,22 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+    */
+   protected def doKillExecutors(executorIds: Seq[String]): Future[Boolean] =
+     Future.successful(false)
++
++  /**
++   * Request that the cluster manager kill all executors on a given host.
++   * @return whether the kill request is acknowledged.
++   */
++  final override def killExecutorsOnHost(host: String): Boolean = {
++    logInfo(s"Requesting to kill any and all executors on host ${host}")
++    // A potential race exists if a new executor attempts to register on a host
++    // that is on the blacklist and is no no longer valid. To avoid this race,
++    // all executor registration and killing happens in the event loop. This way, either
++    // an executor will fail to register, or will be killed when all executors on a host
++    // are killed.
++    // Kill all the executors on this host in an event loop to ensure serialization.
++    driverEndpoint.send(KillExecutorsOnHost(host))
++    true
++  }
+ }
+ 
+ private[spark] object CoarseGrainedSchedulerBackend {
+diff --git a/core/src/test/scala/org/apache/spark/ExecutorAllocationManagerSuite.scala b/core/src/test/scala/org/apache/spark/ExecutorAllocationManagerSuite.scala
+index fedfbd5..0d60528 100644
+--- a/core/src/test/scala/org/apache/spark/ExecutorAllocationManagerSuite.scala
++++ b/core/src/test/scala/org/apache/spark/ExecutorAllocationManagerSuite.scala
+@@ -1039,3 +1039,72 @@ private object ExecutorAllocationManagerSuite extends PrivateMethodTester {
+     manager invokePrivate _hostToLocalTaskCount()
+   }
+ }
++//
++///**
++// * A cluster manager which wraps around the scheduler and backend for local mode. It is used for
++// * testing the dynamic allocation policy.
++// */
++//private class DummyLocalExternalClusterManager extends ExternalClusterManager {
++//
++//  def canCreate(masterURL: String): Boolean = masterURL == "myDummyLocalExternalClusterManager"
++//
++//  override def createTaskScheduler(
++//      sc: SparkContext,
++//      masterURL: String): TaskScheduler = new TaskSchedulerImpl(sc, 1, isLocal = true)
++//
++//  override def createSchedulerBackend(
++//      sc: SparkContext,
++//      masterURL: String,
++//      scheduler: TaskScheduler): SchedulerBackend = {
++//    val sb = new LocalSchedulerBackend(sc.getConf, scheduler.asInstanceOf[TaskSchedulerImpl], 1)
++//    new DummyLocalSchedulerBackend(sc, sb)
++//  }
++//
++//  override def initialize(scheduler: TaskScheduler, backend: SchedulerBackend): Unit = {
++//    val sc = scheduler.asInstanceOf[TaskSchedulerImpl]
++//    sc.initialize(backend)
++//  }
++//}
++//
++///**
++// * A scheduler backend which wraps around local scheduler backend and exposes the executor
++// * allocation client interface for testing dynamic allocation.
++// */
++//private class DummyLocalSchedulerBackend (sc: SparkContext, sb: SchedulerBackend)
++//  extends SchedulerBackend with ExecutorAllocationClient {
++//
++//  override private[spark] def getExecutorIds(): Seq[String] = sc.getExecutorIds()
++//
++//  override private[spark] def requestTotalExecutors(
++//      numExecutors: Int,
++//      localityAwareTasks: Int,
++//      hostToLocalTaskCount: Map[String, Int]): Boolean =
++//    sc.requestTotalExecutors(numExecutors, localityAwareTasks, hostToLocalTaskCount)
++//
++//  override def requestExecutors(numAdditionalExecutors: Int): Boolean =
++//    sc.requestExecutors(numAdditionalExecutors)
++//
++//  override def killExecutors(
++//      executorIds: Seq[String],
++//      replace: Boolean,
++//      force: Boolean): Seq[String] = {
++//    val response = sc.killExecutors(executorIds)
++//    if (response) {
++//      executorIds
++//    } else {
++//      Seq.empty[String]
++//    }
++//  }
++//
++//  override def start(): Unit = sb.start()
++//
++//  override def stop(): Unit = sb.stop()
++//
++//  override def reviveOffers(): Unit = sb.reviveOffers()
++//
++//  override def defaultParallelism(): Int = sb.defaultParallelism()
++//
++//  override def killExecutorsOnHost(host: String): Boolean = {
++//    false
++//  }
++//}
+diff --git a/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala b/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala
+index bc52be6..005c6cb 100644
+--- a/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala
++++ b/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala
+@@ -20,7 +20,8 @@ package org.apache.spark.deploy
+ import scala.collection.mutable
+ import scala.concurrent.duration._
+ 
+-import org.mockito.Mockito.{mock, when}
++import org.mockito.Matchers.any
++import org.mockito.Mockito.{mock, verify, when}
+ import org.scalatest.{BeforeAndAfterAll, PrivateMethodTester}
+ import org.scalatest.concurrent.Eventually._
+ 
+@@ -30,9 +31,9 @@ import org.apache.spark.deploy.master.ApplicationInfo
+ import org.apache.spark.deploy.master.Master
+ import org.apache.spark.deploy.worker.Worker
+ import org.apache.spark.rpc.{RpcAddress, RpcEndpointRef, RpcEnv}
+-import org.apache.spark.scheduler.TaskSchedulerImpl
++import org.apache.spark.scheduler.{BlacklistConfs, TaskSchedulerImpl}
+ import org.apache.spark.scheduler.cluster._
+-import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RegisterExecutor
++import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.{RegisterExecutor, RegisterExecutorFailed}
+ 
+ /**
+  * End-to-end tests for dynamic allocation in standalone mode.
+@@ -430,18 +431,64 @@ class StandaloneDynamicAllocationSuite
+     val executorIdToTaskCount = taskScheduler invokePrivate getMap()
+     executorIdToTaskCount(executors.head) = 1
+     // kill the busy executor without force; this should fail
+-    assert(!killExecutor(sc, executors.head, force = false))
++    assert(killExecutor(sc, executors.head, force = false).isEmpty)
+     apps = getApplications()
+     assert(apps.head.executors.size === 2)
+ 
+     // force kill busy executor
+-    assert(killExecutor(sc, executors.head, force = true))
++    assert(killExecutor(sc, executors.head, force = true).nonEmpty)
+     apps = getApplications()
+     // kill executor successfully
+     assert(apps.head.executors.size === 1)
+ 
+   }
+ 
++  test("kill all executors on localhost") {
++    sc = new SparkContext(appConf)
++    val appId = sc.applicationId
++    eventually(timeout(10.seconds), interval(10.millis)) {
++      val apps = getApplications()
++      assert(apps.size === 1)
++      assert(apps.head.id === appId)
++      assert(apps.head.executors.size === 2)
++      assert(apps.head.getExecutorLimit === Int.MaxValue)
++    }
++    val beforeList = getApplications().head.executors.keys.toSet
++    assert(killExecutorsOnHost(sc, "localhost").equals(true))
++
++    syncExecutors(sc)
++    val afterList = getApplications().head.executors.keys.toSet
++
++    eventually(timeout(10.seconds), interval(100.millis)) {
++      assert(beforeList.intersect(afterList).size == 0)
++    }
++  }
++
++  test("executor registration on a blacklisted host must fail") {
++    sc = new SparkContext(appConf.set(BlacklistConfs.BLACKLIST_ENABLED, "true"))
++    val endpointRef = mock(classOf[RpcEndpointRef])
++    val mockAddress = mock(classOf[RpcAddress])
++    when(endpointRef.address).thenReturn(mockAddress)
++    val message = RegisterExecutor("one", endpointRef, "blacklisted-host", 10, Map.empty)
++
++    // Get "localhost" on a blacklist.
++    val taskScheduler = mock(classOf[TaskSchedulerImpl])
++    when(taskScheduler.nodeBlacklist()).thenReturn(Set("blacklisted-host"))
++    when(taskScheduler.sc).thenReturn(sc)
++    sc.taskScheduler = taskScheduler
++
++    // Create a fresh scheduler backend to blacklist "localhost".
++    sc.schedulerBackend.stop()
++    val backend =
++      new SparkDeploySchedulerBackend(taskScheduler, sc, Array(masterRpcEnv.address.toSparkURL))
++    backend.start()
++
++    backend.driverEndpoint.ask[Boolean](message)
++    eventually(timeout(10.seconds), interval(100.millis)) {
++      verify(endpointRef).send(RegisterExecutorFailed(any()))
++    }
++  }
++
+   // ===============================
+   // | Utility methods for testing |
+   // ===============================
+@@ -494,7 +541,7 @@ class StandaloneDynamicAllocationSuite
+   }
+ 
+   /** Kill the given executor, specifying whether to force kill it. */
+-  private def killExecutor(sc: SparkContext, executorId: String, force: Boolean): Boolean = {
++  private def killExecutor(sc: SparkContext, executorId: String, force: Boolean): Seq[String] = {
+     syncExecutors(sc)
+     sc.schedulerBackend match {
+       case b: CoarseGrainedSchedulerBackend =>
+@@ -503,6 +550,16 @@ class StandaloneDynamicAllocationSuite
+     }
+   }
+ 
++  /** Kill the executors on a given host. */
++  private def killExecutorsOnHost(sc: SparkContext, host: String): Boolean = {
++    syncExecutors(sc)
++    sc.schedulerBackend match {
++      case b: CoarseGrainedSchedulerBackend =>
++        b.killExecutorsOnHost(host)
++      case _ => fail("expected coarse grained scheduler")
++    }
++  }
++
+   /**
+    * Return a list of executor IDs belonging to this application.
+    *
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/BlacklistTrackerSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/BlacklistTrackerSuite.scala
+index be4e019..16e162a 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/BlacklistTrackerSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/BlacklistTrackerSuite.scala
+@@ -17,7 +17,10 @@
+ 
+ package org.apache.spark.scheduler
+ 
+-import org.mockito.Mockito.{verify, when}
++import org.mockito.invocation.InvocationOnMock
++import org.mockito.Matchers.any
++import org.mockito.Mockito.{never, verify, when}
++import org.mockito.stubbing.Answer
+ import org.scalatest.BeforeAndAfterEach
+ import org.scalatest.mock.MockitoSugar
+ 
+@@ -42,7 +45,7 @@ class BlacklistTrackerSuite extends SparkFunSuite with BeforeAndAfterEach with M
+     clock.setTime(0)
+ 
+     listenerBusMock = mock[LiveListenerBus]
+-    blacklist = new BlacklistTracker(listenerBusMock, conf, clock)
++    blacklist = new BlacklistTracker(listenerBusMock, conf, None, clock)
+   }
+ 
+   override def afterEach(): Unit = {
+@@ -264,12 +267,14 @@ class BlacklistTrackerSuite extends SparkFunSuite with BeforeAndAfterEach with M
+     // if task failures are spaced out by more than the timeout period, the first failure is timed
+     // out, and the executor isn't blacklisted.
+     var stageId = 0
++
+     def failOneTaskInTaskSet(exec: String): Unit = {
+       val taskSetBlacklist = createTaskSetBlacklist(stageId = stageId)
+       taskSetBlacklist.updateBlacklistForFailedTask("host-" + exec, exec, 0)
+       blacklist.updateBlacklistForSuccessfulTaskSet(stageId, 0, taskSetBlacklist.execToFailures)
+       stageId += 1
+     }
++
+     failOneTaskInTaskSet(exec = "1")
+     // We have one sporadic failure on exec 2, but that's it.  Later checks ensure that we never
+     // blacklist executor 2 despite this one failure.
+@@ -422,4 +427,72 @@ class BlacklistTrackerSuite extends SparkFunSuite with BeforeAndAfterEach with M
+       conf.remove(config)
+     }
+   }
++
++  test("blacklisting kills executors, configured by BLACKLIST_KILL_ENABLED") {
++    val allocationClientMock = mock[ExecutorAllocationClient]
++    when(allocationClientMock.killExecutors(any(), any(), any())).thenReturn(Seq("called"))
++    when(allocationClientMock.killExecutorsOnHost("hostA")).thenAnswer(new Answer[Boolean] {
++      // To avoid a race between blacklisting and killing, it is important that the nodeBlacklist
++      // is updated before we ask the executor allocation client to kill all the executors
++      // on a particular host.
++      override def answer(invocation: InvocationOnMock): Boolean = {
++        if (blacklist.nodeBlacklist.contains("hostA") == false) {
++          throw new IllegalStateException("hostA should be on the blacklist")
++        }
++        true
++      }
++    })
++    blacklist = new BlacklistTracker(listenerBusMock, conf, Some(allocationClientMock), clock)
++
++    // Disable auto-kill. Blacklist an executor and make sure killExecutors is not called.
++    conf.set(BlacklistConfs.BLACKLIST_KILL_ENABLED, false.toString)
++
++    val taskSetBlacklist0 = createTaskSetBlacklist(stageId = 0)
++    // Fail 4 tasks in one task set on executor 1, so that executor gets blacklisted for the whole
++    // application.
++    (0 until 4).foreach { partition =>
++      taskSetBlacklist0.updateBlacklistForFailedTask("hostA", exec = "1", index = partition)
++    }
++    blacklist.updateBlacklistForSuccessfulTaskSet(0, 0, taskSetBlacklist0.execToFailures)
++
++    verify(allocationClientMock, never).killExecutor(any())
++
++    val taskSetBlacklist1 = createTaskSetBlacklist(stageId = 1)
++    // Fail 4 tasks in one task set on executor 2, so that executor gets blacklisted for the whole
++    // application.  Since that's the second executor that is blacklisted on the same node, we also
++    // blacklist that node.
++    (0 until 4).foreach { partition =>
++      taskSetBlacklist1.updateBlacklistForFailedTask("hostA", exec = "2", index = partition)
++    }
++    blacklist.updateBlacklistForSuccessfulTaskSet(0, 0, taskSetBlacklist1.execToFailures)
++
++    verify(allocationClientMock, never).killExecutors(any(), any(), any())
++    verify(allocationClientMock, never).killExecutorsOnHost(any())
++
++    // Enable auto-kill. Blacklist an executor and make sure killExecutors is called.
++    conf.set(BlacklistConfs.BLACKLIST_KILL_ENABLED, true.toString)
++    blacklist = new BlacklistTracker(listenerBusMock, conf, Some(allocationClientMock), clock)
++
++    val taskSetBlacklist2 = createTaskSetBlacklist(stageId = 0)
++    // Fail 4 tasks in one task set on executor 1, so that executor gets blacklisted for the whole
++    // application.
++    (0 until 4).foreach { partition =>
++      taskSetBlacklist2.updateBlacklistForFailedTask("hostA", exec = "1", index = partition)
++    }
++    blacklist.updateBlacklistForSuccessfulTaskSet(0, 0, taskSetBlacklist2.execToFailures)
++
++    verify(allocationClientMock).killExecutors(Seq("1"), true, true)
++
++    val taskSetBlacklist3 = createTaskSetBlacklist(stageId = 1)
++    // Fail 4 tasks in one task set on executor 2, so that executor gets blacklisted for the whole
++    // application.  Since that's the second executor that is blacklisted on the same node, we also
++    // blacklist that node.
++    (0 until 4).foreach { partition =>
++      taskSetBlacklist3.updateBlacklistForFailedTask("hostA", exec = "2", index = partition)
++    }
++    blacklist.updateBlacklistForSuccessfulTaskSet(0, 0, taskSetBlacklist3.execToFailures)
++
++    verify(allocationClientMock).killExecutors(Seq("2"), true, true)
++    verify(allocationClientMock).killExecutorsOnHost("hostA")
++  }
+ }
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/TaskSetManagerSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/TaskSetManagerSuite.scala
+index 5d902a1..f7f4299 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/TaskSetManagerSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/TaskSetManagerSuite.scala
+@@ -422,7 +422,7 @@ class TaskSetManagerSuite extends SparkFunSuite with LocalSparkContext with Logg
+     // We don't directly use the application blacklist, but its presence triggers blacklisting
+     // within the taskset.
+     val mockListenerBus = mock(classOf[LiveListenerBus])
+-    val blacklistTrackerOpt = Some(new BlacklistTracker(mockListenerBus, conf, clock))
++    val blacklistTrackerOpt = Some(new BlacklistTracker(mockListenerBus, conf, None, clock))
+     val manager = new TaskSetManager(sched, taskSet, 4, blacklistTrackerOpt, clock)
+ 
+     {
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 628c45c..96ab4f3 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -1326,6 +1326,15 @@ Apart from these, the following properties are also available, and may be useful
+   </td>
+ </tr>
+ <tr>
++  <td><code>spark.blacklist.killBlacklistedExecutors</code></td>
++  <td>false</td>
++  <td>
++    (Experimental) If set to "true", allow Spark to automatically kill, and attempt to re-create,
++    executors when they are blacklisted.  Note that, when an entire node is added to the blacklist,
++    all of the executors on that node will be killed.
++  </td>
++</tr>
++<tr>
+   <td><code>spark.speculation</code></td>
+   <td>false</td>
+   <td>
+-- 
+1.7.9.5
+

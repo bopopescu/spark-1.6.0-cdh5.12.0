@@ -1,0 +1,365 @@
+From b9d65e85a5bc4c5a00b4130a7d1d4d6cc356f0c5 Mon Sep 17 00:00:00 2001
+From: Salil Surendran <salilsurendran@cloudera.com>
+Date: Wed, 8 Feb 2017 21:52:30 -0800
+Subject: [PATCH 474/517] CLOUDERA-BUILD. CDH-46754. Adding output table to
+ LogicalRelation
+
+Changes to support the output table in case data is being persisted as done in the PR for SPARK-12724. We don't need the exact changes in the PR but only the change related to the output table which is the 3rd parameter in the constructor definition of the class LogicalRelation. This is necessary to have the output data in the QueryExecution object for analysis. So you will see changes like "case LogicalRelation(r, )" changed to "case LogicalRelation(r, , \_)" with the 3rd parameter being the output table name.
+---
+ .../scala/org/apache/spark/sql/DataFrame.scala     |    2 +-
+ .../execution/datasources/DataSourceStrategy.scala |   16 +++++++-------
+ .../execution/datasources/LogicalRelation.scala    |   22 ++++++++++++++++----
+ .../spark/sql/execution/datasources/rules.scala    |   15 ++++++-------
+ .../datasources/parquet/ParquetFilterSuite.scala   |    2 +-
+ .../parquet/ParquetPartitionDiscoverySuite.scala   |    2 +-
+ .../spark/sql/sources/FilteredScanSuite.scala      |    2 +-
+ .../apache/spark/sql/hive/execution/commands.scala |    4 ++--
+ .../spark/sql/hive/MetastoreDataSourcesSuite.scala |    2 +-
+ .../spark/sql/hive/execution/SQLQuerySuite.scala   |    2 +-
+ .../org/apache/spark/sql/hive/parquetSuites.scala  |    8 +++----
+ .../spark/sql/sources/hadoopFsRelationSuites.scala |    2 +-
+ 12 files changed, 47 insertions(+), 32 deletions(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala b/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
+index 8884daa..d5ec9a8 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
+@@ -1714,7 +1714,7 @@ class DataFrame private[sql](
+    */
+   def inputFiles: Array[String] = {
+     val files: Seq[String] = logicalPlan.collect {
+-      case LogicalRelation(fsBasedRelation: FileRelation, _) =>
++      case LogicalRelation(fsBasedRelation: FileRelation, _, _) =>
+         fsBasedRelation.inputFiles
+       case fr: FileRelation =>
+         fr.inputFiles
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/DataSourceStrategy.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/DataSourceStrategy.scala
+index aa502c6..962fdc8 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/DataSourceStrategy.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/DataSourceStrategy.scala
+@@ -41,7 +41,7 @@ import org.apache.spark.{Logging, TaskContext}
+  */
+ private[sql] object DataSourceStrategy extends Strategy with Logging {
+   def apply(plan: LogicalPlan): Seq[execution.SparkPlan] = plan match {
+-    case PhysicalOperation(projects, filters, l @ LogicalRelation(t: CatalystScan, _)) =>
++    case PhysicalOperation(projects, filters, l @ LogicalRelation(t: CatalystScan, _, _)) =>
+       pruneFilterProjectRaw(
+         l,
+         projects,
+@@ -49,14 +49,14 @@ private[sql] object DataSourceStrategy extends Strategy with Logging {
+         (requestedColumns, allPredicates, _) =>
+           toCatalystRDD(l, requestedColumns, t.buildScan(requestedColumns, allPredicates))) :: Nil
+ 
+-    case PhysicalOperation(projects, filters, l @ LogicalRelation(t: PrunedFilteredScan, _)) =>
++    case PhysicalOperation(projects, filters, l @ LogicalRelation(t: PrunedFilteredScan, _, _)) =>
+       pruneFilterProject(
+         l,
+         projects,
+         filters,
+         (a, f) => toCatalystRDD(l, a, t.buildScan(a.map(_.name).toArray, f))) :: Nil
+ 
+-    case PhysicalOperation(projects, filters, l @ LogicalRelation(t: PrunedScan, _)) =>
++    case PhysicalOperation(projects, filters, l @ LogicalRelation(t: PrunedScan, _, _)) =>
+       pruneFilterProject(
+         l,
+         projects,
+@@ -64,7 +64,7 @@ private[sql] object DataSourceStrategy extends Strategy with Logging {
+         (a, _) => toCatalystRDD(l, a, t.buildScan(a.map(_.name).toArray))) :: Nil
+ 
+     // Scanning partitioned HadoopFsRelation
+-    case PhysicalOperation(projects, filters, l @ LogicalRelation(t: HadoopFsRelation, _))
++    case PhysicalOperation(projects, filters, l @ LogicalRelation(t: HadoopFsRelation, _, _))
+         if t.partitionSpec.partitionColumns.nonEmpty =>
+       // We divide the filter expressions into 3 parts
+       val partitionColumns = AttributeSet(
+@@ -118,7 +118,7 @@ private[sql] object DataSourceStrategy extends Strategy with Logging {
+       ).getOrElse(scan) :: Nil
+ 
+     // Scanning non-partitioned HadoopFsRelation
+-    case PhysicalOperation(projects, filters, l @ LogicalRelation(t: HadoopFsRelation, _)) =>
++    case PhysicalOperation(projects, filters, l @ LogicalRelation(t: HadoopFsRelation, _, _)) =>
+       // See buildPartitionedTableScan for the reason that we need to create a shard
+       // broadcast HadoopConf.
+       val sharedHadoopConf = SparkHadoopUtil.get.conf
+@@ -130,16 +130,16 @@ private[sql] object DataSourceStrategy extends Strategy with Logging {
+         filters,
+         (a, f) => t.buildInternalScan(a.map(_.name).toArray, f, t.paths, confBroadcast)) :: Nil
+ 
+-    case l @ LogicalRelation(baseRelation: TableScan, _) =>
++    case l @ LogicalRelation(baseRelation: TableScan, _, _) =>
+       execution.PhysicalRDD.createFromDataSource(
+         l.output, toCatalystRDD(l, baseRelation.buildScan()), baseRelation) :: Nil
+ 
+-    case i @ logical.InsertIntoTable(l @ LogicalRelation(t: InsertableRelation, _),
++    case i @ logical.InsertIntoTable(l @ LogicalRelation(t: InsertableRelation, _, _),
+       part, query, overwrite, false) if part.isEmpty =>
+       execution.ExecutedCommand(InsertIntoDataSource(l, query, overwrite)) :: Nil
+ 
+     case i @ logical.InsertIntoTable(
+-      l @ LogicalRelation(t: HadoopFsRelation, _), part, query, overwrite, false) =>
++      l @ LogicalRelation(t: HadoopFsRelation, _, _), part, query, overwrite, false) =>
+       val mode = if (overwrite) SaveMode.Overwrite else SaveMode.Append
+       execution.ExecutedCommand(InsertIntoHadoopFsRelation(t, query, mode)) :: Nil
+ 
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/LogicalRelation.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/LogicalRelation.scala
+index fd299a2..ef08356 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/LogicalRelation.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/LogicalRelation.scala
+@@ -17,6 +17,7 @@
+ package org.apache.spark.sql.execution.datasources
+ 
+ import org.apache.spark.sql.catalyst.analysis.{EliminateSubQueries, MultiInstanceRelation}
++import org.apache.spark.sql.catalyst.TableIdentifier
+ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeMap, AttributeReference}
+ import org.apache.spark.sql.catalyst.plans.logical.{LeafNode, LogicalPlan, Statistics}
+ import org.apache.spark.sql.sources.BaseRelation
+@@ -30,7 +31,8 @@ import org.apache.spark.sql.sources.BaseRelation
+  */
+ case class LogicalRelation(
+     relation: BaseRelation,
+-    expectedOutputAttributes: Option[Seq[Attribute]] = None)
++    expectedOutputAttributes: Option[Seq[Attribute]] = None,
++    metastoreTableIdentifier: Option[TableIdentifier] = None)
+   extends LeafNode with MultiInstanceRelation {
+ 
+   override val output: Seq[AttributeReference] = {
+@@ -49,7 +51,7 @@ case class LogicalRelation(
+ 
+   // Logical Relations are distinct if they have different output for the sake of transformations.
+   override def equals(other: Any): Boolean = other match {
+-    case l @ LogicalRelation(otherRelation, _) => relation == otherRelation && output == l.output
++    case l @ LogicalRelation(otherRelation, _, _) => relation == otherRelation && output == l.output
+     case _ => false
+   }
+ 
+@@ -57,9 +59,10 @@ case class LogicalRelation(
+     com.google.common.base.Objects.hashCode(relation, output)
+   }
+ 
++
+   override def sameResult(otherPlan: LogicalPlan): Boolean = {
+     EliminateSubQueries(otherPlan) match {
+-      case LogicalRelation(otherRelation, _) => relation == otherRelation
++      case LogicalRelation(otherRelation, _, _) => relation == otherRelation
+       case _ => false
+     }
+   }
+@@ -76,7 +79,18 @@ case class LogicalRelation(
+   /** Used to lookup original attribute capitalization */
+   val attributeMap: AttributeMap[AttributeReference] = AttributeMap(output.map(o => (o, o)))
+ 
+-  def newInstance(): this.type = LogicalRelation(relation).asInstanceOf[this.type]
++  /**
++   * Returns a new instance of this LogicalRelation. According to the semantics of
++   * MultiInstanceRelation, this method returns a copy of this object with
++   * unique expression ids. We respect the `expectedOutputAttributes` and create
++   * new instances of attributes in it.
++   */
++  override def newInstance(): this.type = {
++    LogicalRelation(
++      relation,
++      expectedOutputAttributes.map(_.map(_.newInstance())),
++      metastoreTableIdentifier).asInstanceOf[this.type]
++  }
+ 
+   override def simpleString: String = s"Relation[${output.mkString(",")}] $relation"
+ }
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/rules.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/rules.scala
+index 1a8e7ab..5fc7830 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/rules.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/rules.scala
+@@ -61,7 +61,7 @@ private[sql] object PreInsertCastAndRename extends Rule[LogicalPlan] {
+ 
+       // We are inserting into an InsertableRelation or HadoopFsRelation.
+       case i @ InsertIntoTable(
+-      l @ LogicalRelation(_: InsertableRelation | _: HadoopFsRelation, _), _, child, _, _) => {
++      l @ LogicalRelation(_: InsertableRelation | _: HadoopFsRelation, _, _), _, child, _, _) => {
+         // First, make sure the data to be inserted have the same number of fields with the
+         // schema of the relation.
+         if (l.output.size != child.output.size) {
+@@ -108,14 +108,15 @@ private[sql] case class PreWriteCheck(catalog: Catalog) extends (LogicalPlan =>
+   def apply(plan: LogicalPlan): Unit = {
+     plan.foreach {
+       case i @ logical.InsertIntoTable(
+-        l @ LogicalRelation(t: InsertableRelation, _), partition, query, overwrite, ifNotExists) =>
++        l @ LogicalRelation(
++          t: InsertableRelation, _, _), partition, query, overwrite, ifNotExists) =>
+         // Right now, we do not support insert into a data source table with partition specs.
+         if (partition.nonEmpty) {
+           failAnalysis(s"Insert into a partition is not allowed because $l is not partitioned.")
+         } else {
+           // Get all input data source relations of the query.
+           val srcRelations = query.collect {
+-            case LogicalRelation(src: BaseRelation, _) => src
++            case LogicalRelation(src: BaseRelation, _, _) => src
+           }
+           if (srcRelations.contains(t)) {
+             failAnalysis(
+@@ -126,7 +127,7 @@ private[sql] case class PreWriteCheck(catalog: Catalog) extends (LogicalPlan =>
+         }
+ 
+       case logical.InsertIntoTable(
+-        LogicalRelation(r: HadoopFsRelation, _), part, query, overwrite, _) =>
++        LogicalRelation(r: HadoopFsRelation, _, _), part, query, overwrite, _) =>
+         // We need to make sure the partition columns specified by users do match partition
+         // columns of the relation.
+         val existingPartitionColumns = r.partitionColumns.fieldNames.toSet
+@@ -145,7 +146,7 @@ private[sql] case class PreWriteCheck(catalog: Catalog) extends (LogicalPlan =>
+ 
+         // Get all input data source relations of the query.
+         val srcRelations = query.collect {
+-          case LogicalRelation(src: BaseRelation, _) => src
++          case LogicalRelation(src: BaseRelation, _, _) => src
+         }
+         if (srcRelations.contains(r)) {
+           failAnalysis(
+@@ -173,10 +174,10 @@ private[sql] case class PreWriteCheck(catalog: Catalog) extends (LogicalPlan =>
+           EliminateSubQueries(catalog.lookupRelation(tableIdent)) match {
+             // Only do the check if the table is a data source table
+             // (the relation is a BaseRelation).
+-            case l @ LogicalRelation(dest: BaseRelation, _) =>
++            case l @ LogicalRelation(dest: BaseRelation, _, _) =>
+               // Get all input data source relations of the query.
+               val srcRelations = query.collect {
+-                case LogicalRelation(src: BaseRelation, _) => src
++                case LogicalRelation(src: BaseRelation, _, _) => src
+               }
+               if (srcRelations.contains(dest)) {
+                 failAnalysis(
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFilterSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFilterSuite.scala
+index ba6dcc9..8537386 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFilterSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFilterSuite.scala
+@@ -55,7 +55,7 @@ class ParquetFilterSuite extends QueryTest with ParquetTest with SharedSQLContex
+         .where(Column(predicate))
+ 
+       val maybeAnalyzedPredicate = query.queryExecution.optimizedPlan.collect {
+-        case PhysicalOperation(_, filters, LogicalRelation(_: ParquetRelation, _)) => filters
++        case PhysicalOperation(_, filters, LogicalRelation(_: ParquetRelation, _, _)) => filters
+       }.flatten.reduceLeftOption(_ && _)
+       assert(maybeAnalyzedPredicate.isDefined)
+ 
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetPartitionDiscoverySuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetPartitionDiscoverySuite.scala
+index 6dc855c..4103bad 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetPartitionDiscoverySuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetPartitionDiscoverySuite.scala
+@@ -563,7 +563,7 @@ class ParquetPartitionDiscoverySuite extends QueryTest with ParquetTest with Sha
+       (1 to 10).map(i => (i, i.toString)).toDF("a", "b").write.parquet(dir.getCanonicalPath)
+       val queryExecution = sqlContext.read.parquet(dir.getCanonicalPath).queryExecution
+       queryExecution.analyzed.collectFirst {
+-        case LogicalRelation(relation: ParquetRelation, _) =>
++        case LogicalRelation(relation: ParquetRelation, _, _) =>
+           assert(relation.partitionSpec === PartitionSpec.emptySpec)
+       }.getOrElse {
+         fail(s"Expecting a ParquetRelation2, but got:\n$queryExecution")
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/sources/FilteredScanSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/sources/FilteredScanSuite.scala
+index 398b8a1..7196b6d 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/sources/FilteredScanSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/sources/FilteredScanSuite.scala
+@@ -317,7 +317,7 @@ class FilteredScanSuite extends DataSourceTest with SharedSQLContext with Predic
+ 
+       val table = caseInsensitiveContext.table("oneToTenFiltered")
+       val relation = table.queryExecution.logical.collectFirst {
+-        case LogicalRelation(r, _) => r
++        case LogicalRelation(r, _, _) => r
+       }.get
+ 
+       assert(
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/commands.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/commands.scala
+index 6b16d59..e9c9b0f 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/commands.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/commands.scala
+@@ -228,9 +228,9 @@ case class CreateMetastoreDataSourceAsSelect(
+           // Check if the specified data source match the data source of the existing table.
+           val resolved = ResolvedDataSource(
+             sqlContext, Some(query.schema.asNullable), partitionColumns, provider, optionsWithPath)
+-          val createdRelation = LogicalRelation(resolved.relation)
++          val createdRelation = LogicalRelation(resolved.relation, None, Some(tableIdent))
+           EliminateSubQueries(sqlContext.catalog.lookupRelation(tableIdent)) match {
+-            case l @ LogicalRelation(_: InsertableRelation | _: HadoopFsRelation, _) =>
++            case l @ LogicalRelation(_: InsertableRelation | _: HadoopFsRelation, _, _) =>
+               if (l.relation != createdRelation.relation) {
+                 val errorDescription =
+                   s"Cannot append to table $tableName because the resolved relation does not " +
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/MetastoreDataSourcesSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/MetastoreDataSourcesSuite.scala
+index 21bc956..c0885ba 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/MetastoreDataSourcesSuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/MetastoreDataSourcesSuite.scala
+@@ -571,7 +571,7 @@ class MetastoreDataSourcesSuite extends QueryTest with SQLTestUtils with TestHiv
+             Row(3) :: Row(4) :: Nil)
+ 
+           table("test_parquet_ctas").queryExecution.optimizedPlan match {
+-            case LogicalRelation(p: ParquetRelation, _) => // OK
++            case LogicalRelation(p: ParquetRelation, _, _) => // OK
+             case _ =>
+               fail(s"test_parquet_ctas should have be converted to ${classOf[ParquetRelation]}")
+           }
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLQuerySuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLQuerySuite.scala
+index 87ca5b9..a37b72f 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLQuerySuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLQuerySuite.scala
+@@ -268,7 +268,7 @@ class SQLQuerySuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
+     def checkRelation(tableName: String, isDataSourceParquet: Boolean): Unit = {
+       val relation = EliminateSubQueries(catalog.lookupRelation(TableIdentifier(tableName)))
+       relation match {
+-        case LogicalRelation(r: ParquetRelation, _) =>
++        case LogicalRelation(r: ParquetRelation, _, _) =>
+           if (!isDataSourceParquet) {
+             fail(
+               s"${classOf[MetastoreRelation].getCanonicalName} is expected, but found " +
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/parquetSuites.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/parquetSuites.scala
+index 905eb7a..c3ef845 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/parquetSuites.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/parquetSuites.scala
+@@ -282,7 +282,7 @@ class ParquetMetastoreSuite extends ParquetPartitioningTest {
+       )
+ 
+       table("test_parquet_ctas").queryExecution.optimizedPlan match {
+-        case LogicalRelation(_: ParquetRelation, _) => // OK
++        case LogicalRelation(_: ParquetRelation, _, _) => // OK
+         case _ => fail(
+           "test_parquet_ctas should be converted to " +
+               s"${classOf[ParquetRelation].getCanonicalName }")
+@@ -369,7 +369,7 @@ class ParquetMetastoreSuite extends ParquetPartitioningTest {
+ 
+       assertResult(2) {
+         analyzed.collect {
+-          case r @ LogicalRelation(_: ParquetRelation, _) => r
++          case r @ LogicalRelation(_: ParquetRelation, _, _) => r
+         }.size
+       }
+     }
+@@ -378,7 +378,7 @@ class ParquetMetastoreSuite extends ParquetPartitioningTest {
+   def collectParquetRelation(df: DataFrame): ParquetRelation = {
+     val plan = df.queryExecution.analyzed
+     plan.collectFirst {
+-      case LogicalRelation(r: ParquetRelation, _) => r
++      case LogicalRelation(r: ParquetRelation, _, _) => r
+     }.getOrElse {
+       fail(s"Expecting a ParquetRelation2, but got:\n$plan")
+     }
+@@ -428,7 +428,7 @@ class ParquetMetastoreSuite extends ParquetPartitioningTest {
+       // Converted test_parquet should be cached.
+       catalog.cachedDataSourceTables.getIfPresent(tableIdentifier) match {
+         case null => fail("Converted test_parquet should be cached in the cache.")
+-        case logical @ LogicalRelation(parquetRelation: ParquetRelation, _) => // OK
++        case logical @ LogicalRelation(parquetRelation: ParquetRelation, _, _) => // OK
+         case other =>
+           fail(
+             "The cached test_parquet should be a Parquet Relation. " +
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/sources/hadoopFsRelationSuites.scala b/sql/hive/src/test/scala/org/apache/spark/sql/sources/hadoopFsRelationSuites.scala
+index bd073fe..1c2c172 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/sources/hadoopFsRelationSuites.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/sources/hadoopFsRelationSuites.scala
+@@ -501,7 +501,7 @@ abstract class HadoopFsRelationTest extends QueryTest with SQLTestUtils with Tes
+       }
+ 
+       val actualPaths = df.queryExecution.analyzed.collectFirst {
+-        case LogicalRelation(relation: HadoopFsRelation, _) =>
++        case LogicalRelation(relation: HadoopFsRelation, _, _) =>
+           relation.paths.toSet
+       }.getOrElse {
+         fail("Expect an FSBasedRelation, but none could be found")
+-- 
+1.7.9.5
+

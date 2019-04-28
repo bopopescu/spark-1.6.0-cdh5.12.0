@@ -1,0 +1,200 @@
+From 5337d313505573c924fb3c1186d986d8cfb41a24 Mon Sep 17 00:00:00 2001
+From: Imran Rashid <irashid@cloudera.com>
+Date: Wed, 21 Sep 2016 17:49:36 -0400
+Subject: [PATCH 448/517] [SPARK-17623][CORE] Clarify type of TaskEndReason
+ with a failed task.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+In TaskResultGetter, enqueueFailedTask currently deserializes the result
+as a TaskEndReason. But the type is actually more specific, its a
+TaskFailedReason. This just leads to more blind casting later on – it
+would be more clear if the msg was cast to the right type immediately,
+so method parameter types could be tightened.
+
+Existing unit tests via jenkins.  Note that the code was already performing a blind-cast to a TaskFailedReason before in any case, just in a different spot, so there shouldn't be any behavior change.
+
+Author: Imran Rashid <irashid@cloudera.com>
+
+Closes #15181 from squito/SPARK-17623.
+
+(cherry picked from commit 9fcf1c51d518847eda7f5ea71337cfa7def3c45c)
+---
+ .../spark/executor/CommitDeniedException.scala     |    4 ++--
+ .../scala/org/apache/spark/executor/Executor.scala |    4 ++--
+ .../apache/spark/scheduler/TaskResultGetter.scala  |    4 ++--
+ .../apache/spark/scheduler/TaskSchedulerImpl.scala |    2 +-
+ .../apache/spark/scheduler/TaskSetManager.scala    |   23 +++++++++++---------
+ .../spark/shuffle/FetchFailedException.scala       |    4 ++--
+ .../org/apache/spark/util/JsonProtocolSuite.scala  |    2 +-
+ 7 files changed, 23 insertions(+), 20 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/executor/CommitDeniedException.scala b/core/src/main/scala/org/apache/spark/executor/CommitDeniedException.scala
+index 7d84889..326e042 100644
+--- a/core/src/main/scala/org/apache/spark/executor/CommitDeniedException.scala
++++ b/core/src/main/scala/org/apache/spark/executor/CommitDeniedException.scala
+@@ -17,7 +17,7 @@
+ 
+ package org.apache.spark.executor
+ 
+-import org.apache.spark.{TaskCommitDenied, TaskEndReason}
++import org.apache.spark.{TaskCommitDenied, TaskFailedReason}
+ 
+ /**
+  * Exception thrown when a task attempts to commit output to HDFS but is denied by the driver.
+@@ -29,5 +29,5 @@ private[spark] class CommitDeniedException(
+     attemptNumber: Int)
+   extends Exception(msg) {
+ 
+-  def toTaskEndReason: TaskEndReason = TaskCommitDenied(jobID, splitID, attemptNumber)
++  def toTaskFailedReason: TaskFailedReason = TaskCommitDenied(jobID, splitID, attemptNumber)
+ }
+diff --git a/core/src/main/scala/org/apache/spark/executor/Executor.scala b/core/src/main/scala/org/apache/spark/executor/Executor.scala
+index ede88e9..323b8a9 100644
+--- a/core/src/main/scala/org/apache/spark/executor/Executor.scala
++++ b/core/src/main/scala/org/apache/spark/executor/Executor.scala
+@@ -320,7 +320,7 @@ private[spark] class Executor(
+ 
+       } catch {
+         case ffe: FetchFailedException =>
+-          val reason = ffe.toTaskEndReason
++          val reason = ffe.toTaskFailedReason
+           execBackend.statusUpdate(taskId, TaskState.FAILED, ser.serialize(reason))
+ 
+         case _: TaskKilledException | _: InterruptedException if task.killed =>
+@@ -328,7 +328,7 @@ private[spark] class Executor(
+           execBackend.statusUpdate(taskId, TaskState.KILLED, ser.serialize(TaskKilled))
+ 
+         case CausedBy(cDE: CommitDeniedException) =>
+-          val reason = cDE.toTaskEndReason
++          val reason = cDE.toTaskFailedReason
+           execBackend.statusUpdate(taskId, TaskState.FAILED, ser.serialize(reason))
+ 
+         case t: Throwable =>
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/TaskResultGetter.scala b/core/src/main/scala/org/apache/spark/scheduler/TaskResultGetter.scala
+index f496599..a4ffa3d 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/TaskResultGetter.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/TaskResultGetter.scala
+@@ -99,14 +99,14 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
+ 
+   def enqueueFailedTask(taskSetManager: TaskSetManager, tid: Long, taskState: TaskState,
+     serializedData: ByteBuffer) {
+-    var reason : TaskEndReason = UnknownReason
++    var reason : TaskFailedReason = UnknownReason
+     try {
+       getTaskResultExecutor.execute(new Runnable {
+         override def run(): Unit = Utils.logUncaughtExceptions {
+           val loader = Utils.getContextOrSparkClassLoader
+           try {
+             if (serializedData != null && serializedData.limit() > 0) {
+-              reason = serializer.get().deserialize[TaskEndReason](
++              reason = serializer.get().deserialize[TaskFailedReason](
+                 serializedData, loader)
+             }
+           } catch {
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala b/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala
+index e8ad360..58aa71c 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala
+@@ -418,7 +418,7 @@ private[spark] class TaskSchedulerImpl(
+       taskSetManager: TaskSetManager,
+       tid: Long,
+       taskState: TaskState,
+-      reason: TaskEndReason): Unit = synchronized {
++      reason: TaskFailedReason): Unit = synchronized {
+     taskSetManager.handleFailedTask(tid, taskState, reason)
+     if (!taskSetManager.isZombie && taskState != TaskState.KILLED) {
+       // Need to revive offers again now that the task set manager state has been updated to
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/TaskSetManager.scala b/core/src/main/scala/org/apache/spark/scheduler/TaskSetManager.scala
+index f2dd2e7..b43afbf 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/TaskSetManager.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/TaskSetManager.scala
+@@ -692,7 +692,7 @@ private[spark] class TaskSetManager(
+    * Marks the task as failed, re-adds it to the list of pending tasks, and notifies the
+    * DAG Scheduler.
+    */
+-  def handleFailedTask(tid: Long, state: TaskState, reason: TaskEndReason) {
++  def handleFailedTask(tid: Long, state: TaskState, reason: TaskFailedReason) {
+     val info = taskInfos(tid)
+     if (info.failed) {
+       return
+@@ -704,7 +704,7 @@ private[spark] class TaskSetManager(
+     var taskMetrics : TaskMetrics = null
+ 
+     val failureReason = s"Lost task ${info.id} in stage ${taskSet.id} (TID $tid, ${info.host}): " +
+-      reason.asInstanceOf[TaskFailedReason].toErrorString
++      reason.toErrorString
+     val failureException: Option[Throwable] = reason match {
+       case fetchFailed: FetchFailed =>
+         logWarning(failureReason)
+@@ -761,19 +761,22 @@ private[spark] class TaskSetManager(
+       case e: TaskFailedReason =>  // TaskResultLost, TaskKilled, and others
+         logWarning(failureReason)
+         None
+-
+-      case e: TaskEndReason =>
+-        logError("Unknown TaskEndReason: " + e)
+-        None
+     }
+     // always add to failed executors
+     failedExecutors.getOrElseUpdate(index, new HashMap[String, Long]()).
+       put(info.executorId, clock.getTimeMillis())
+     sched.dagScheduler.taskEnded(tasks(index), reason, null, null, info, taskMetrics)
+-    addPendingTask(index)
+-    if (!isZombie && state != TaskState.KILLED
+-        && reason.isInstanceOf[TaskFailedReason]
+-        && reason.asInstanceOf[TaskFailedReason].countTowardsTaskFailures) {
++
++    if (successful(index)) {
++      logInfo(
++        s"Task ${info.id} in stage ${taskSet.id} (TID $tid) failed, " +
++        "but another instance of the task has already succeeded, " +
++        "so not re-queuing the task to be re-executed.")
++    } else {
++      addPendingTask(index)
++    }
++
++    if (!isZombie && state != TaskState.KILLED && reason.countTowardsTaskFailures) {
+       assert (null != failureReason)
+       numFailures(index) += 1
+       if (numFailures(index) >= maxTaskFailures) {
+diff --git a/core/src/main/scala/org/apache/spark/shuffle/FetchFailedException.scala b/core/src/main/scala/org/apache/spark/shuffle/FetchFailedException.scala
+index be18446..498c12e 100644
+--- a/core/src/main/scala/org/apache/spark/shuffle/FetchFailedException.scala
++++ b/core/src/main/scala/org/apache/spark/shuffle/FetchFailedException.scala
+@@ -17,8 +17,8 @@
+ 
+ package org.apache.spark.shuffle
+ 
++import org.apache.spark.{FetchFailed, TaskFailedReason}
+ import org.apache.spark.storage.BlockManagerId
+-import org.apache.spark.{FetchFailed, TaskEndReason}
+ import org.apache.spark.util.Utils
+ 
+ /**
+@@ -45,7 +45,7 @@ private[spark] class FetchFailedException(
+     this(bmAddress, shuffleId, mapId, reduceId, cause.getMessage, cause)
+   }
+ 
+-  def toTaskEndReason: TaskEndReason = FetchFailed(bmAddress, shuffleId, mapId, reduceId,
++  def toTaskFailedReason: TaskFailedReason = FetchFailed(bmAddress, shuffleId, mapId, reduceId,
+     Utils.exceptionString(this))
+ }
+ 
+diff --git a/core/src/test/scala/org/apache/spark/util/JsonProtocolSuite.scala b/core/src/test/scala/org/apache/spark/util/JsonProtocolSuite.scala
+index 1939ce5..da942a9 100644
+--- a/core/src/test/scala/org/apache/spark/util/JsonProtocolSuite.scala
++++ b/core/src/test/scala/org/apache/spark/util/JsonProtocolSuite.scala
+@@ -142,7 +142,7 @@ class JsonProtocolSuite extends SparkFunSuite {
+     val fetchFailed = FetchFailed(BlockManagerId("With or", "without you", 15), 17, 18, 19,
+       "Some exception")
+     val fetchMetadataFailed = new MetadataFetchFailedException(17,
+-      19, "metadata Fetch failed exception").toTaskEndReason
++      19, "metadata Fetch failed exception").toTaskFailedReason
+     val exceptionFailure = new ExceptionFailure(exception, None)
+     testTaskEndReason(Success)
+     testTaskEndReason(Resubmitted)
+-- 
+1.7.9.5
+

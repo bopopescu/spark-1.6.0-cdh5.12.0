@@ -1,0 +1,93 @@
+From f76a54d4eb044a7f2ecf2df253161f37368b7d44 Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Fri, 7 Apr 2017 13:22:38 -0700
+Subject: [PATCH 500/517] CDH-52469. Fix dependencies to avoid re-packaging
+ Hadoop classes.
+
+It seems maven pulls some dependencies of test jars in compile scope,
+and because they weren't declared in the root pom, they get included
+in the final assembly; so we ended up with duplicate Hadoop and HDFS
+classes.
+
+Instead of declaring these in the root pom, I chose a more surgical
+spot and just excluded all Hadoop dependencies from the lineage
+module when packaging the assembly. And also added a test to make
+sure a few classes are not in the assembly when building the CDH
+packaging.
+---
+ assembly/pom.xml |   53 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 53 insertions(+)
+
+diff --git a/assembly/pom.xml b/assembly/pom.xml
+index 1c03ae1..7ef5fd3 100644
+--- a/assembly/pom.xml
++++ b/assembly/pom.xml
+@@ -103,6 +103,12 @@
+       <groupId>com.cloudera.spark</groupId>
+       <artifactId>spark-lineage_${scala.binary.version}</artifactId>
+       <version>${project.version}</version>
++      <exclusions>
++        <exclusion>
++          <groupId>org.apache.hadoop</groupId>
++          <artifactId>*</artifactId>
++        </exclusion>
++      </exclusions>
+     </dependency>
+   </dependencies>
+ 
+@@ -362,5 +368,52 @@
+         <flume.deps.scope>provided</flume.deps.scope>
+       </properties>
+     </profile>
++
++    <!-- Profiled to ensure that unwanted classes do not show up in the assembly. -->
++    <profile>
++      <id>provided-deps-check</id>
++      <activation>
++        <property>
++          <name>cdh.build</name>
++        </property>
++      </activation>
++      <build>
++        <plugins>
++          <plugin>
++            <groupId>org.apache.maven.plugins</groupId>
++            <artifactId>maven-antrun-plugin</artifactId>
++            <executions>
++              <execution>
++                <phase>verify</phase>
++                <goals>
++                  <goal>run</goal>
++                </goals>
++                <configuration>
++                  <target>
++                    <macrodef name="not_exists">
++                      <attribute name="resource"/>
++                      <sequential>
++                        <fail message="Found @{resource}">
++                          <condition>
++                            <resourceexists>
++                              <zipentry zipfile="${spark.jar}" name="@{resource}"/>
++                            </resourceexists>
++                          </condition>
++                        </fail>
++                      </sequential>
++                    </macrodef>
++                    <echo>Verifying provided dependencies</echo>
++                    <not_exists resource="org/apache/hadoop/ipc/Client.class" />
++                    <not_exists resource="org/apache/hadoop/fs/FileSystem.class" />
++                    <not_exists resource="org/apache/hadoop/yarn/client/api/YarnClient.class" />
++                    <not_exists resource="org/apache/hadoop/hive/conf/HiveConf.class" />
++                  </target>
++                </configuration>
++              </execution>
++            </executions>
++          </plugin>
++        </plugins>
++      </build>
++    </profile>
+   </profiles>
+ </project>
+-- 
+1.7.9.5
+

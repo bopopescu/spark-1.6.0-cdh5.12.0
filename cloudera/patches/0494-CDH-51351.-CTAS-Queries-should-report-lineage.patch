@@ -1,0 +1,173 @@
+From fc31fcfb9086dfc1e81e1108212c3ea5e2079f00 Mon Sep 17 00:00:00 2001
+From: Salil Surendran <salilsurendran@cloudera.com>
+Date: Fri, 10 Mar 2017 06:55:03 -0800
+Subject: [PATCH 494/517] CDH-51351. CTAS Queries should report lineage
+
+CTAS queries such as sqlContext.sql("create table sample_1 as select * from sample_07") should report lineage
+---
+ .../spark/sql/query/analysis/QueryAnalysis.scala   |    5 +++
+ .../query/analysis/HiveQueryAnalysisSuite.scala    |   43 ++++++++++++++++++++
+ .../spark/sql/query/analysis/TestUtils.scala       |   10 +++--
+ .../scala/org/apache/spark/sql/DataFrame.scala     |   16 +++++++-
+ .../sql/hive/execution/CreateTableAsSelect.scala   |    2 +-
+ 5 files changed, 70 insertions(+), 6 deletions(-)
+
+diff --git a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+index 8c9acdf..17880fa 100644
+--- a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
++++ b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+@@ -32,6 +32,7 @@ import org.apache.spark.sql.execution.datasources.{
+   LogicalRelation
+ }
+ import org.apache.spark.sql.hive.MetastoreRelation
++import org.apache.spark.sql.hive.execution.CreateTableAsSelect
+ import org.apache.spark.sql.query.analysis.DataSourceFormat.DataSourceFormat
+ import org.apache.spark.sql.query.analysis.DataSourceType.DataSourceType
+ import org.apache.spark.sql.sources.HadoopFsRelation
+@@ -68,6 +69,9 @@ object QueryAnalysis {
+           case CreateTableUsingAsSelect(t, _, _, _, _, _, _) =>
+             Some(QueryDetails(getQualifiedDBName(qe, t), fields.to[ListBuffer],
+                 DataSourceType.HIVE))
++          case CreateTableAsSelect(ht, _, _) =>
++            Some(QueryDetails(ht.database + "." + ht.name, fields.to[ListBuffer],
++                DataSourceType.HIVE))
+           case _ => None
+         }
+       }
+@@ -204,6 +208,7 @@ object QueryAnalysis {
+           None
+         }
+       case m: MetastoreRelation => Some(m)
++      case CreateTableAsSelect(_, query, _) => getRelation(query, attr)
+       case p @ Project(_, _) =>
+         if (getAttributesReferences(p.projectList).exists(a => a.sameRef(attr))) {
+           getRelation(p.child, attr)
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+index adfaa4f..ed84b3a 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+@@ -166,6 +166,49 @@ class HiveQueryAnalysisSuite
+     assertHiveOutputs(qe, nonInputTable + 6, Seq("code", "description", "name", "age"))
+   }
+ 
++  test("CDH-51351: CTAS Queries should report lineage") {
++    val inputDF = hiveContext.sql("select * from test_table_1")
++    inputDF.write.saveAsTable("test_table_3")
++    var qe = TestQeListener.getAndClear()
++    assertHiveInputs(qe, "test_table_1", Seq("description", "code", "salary", "total_emp"))
++    assertHiveOutputs(qe, "test_table_3", Seq("description", "code", "salary", "total_emp"))
++    hiveContext.sql("create table test_table_4 as select * from test_table_1")
++    qe = TestQeListener.getAndClear()
++    assertHiveInputs(qe, "test_table_1", Seq("description", "code", "salary", "total_emp"))
++    assertHiveOutputs(qe, "test_table_4", Seq("description", "code", "salary", "total_emp"))
++
++    hiveContext.sql("create table test_table_7 as select code, salary from test_table_1")
++    qe = TestQeListener.getAndClear()
++    assertHiveInputs(qe, "test_table_1", Seq("code", "salary"))
++    assertHiveOutputs(qe, "test_table_7", Seq("code", "salary"))
++
++    hiveContext.sql(
++      s"""create table test_table_5 as
++        | select
++        |   code, sal
++        |   from (
++        |     select
++        |       t2.code as code,
++        |       t1.description as desc,
++        |       t1.salary as sal
++        |   from
++        |     test_table_1 t1
++        |   join
++        |     test_table_2 t2
++        |   on
++        |     (t1.code = t2.code)
++        |   where t1.salary > 170000
++        |   sort by sal
++        |   ) t
++        |limit 3""".stripMargin)
++    qe = TestQeListener.getAndClear()
++    val inputMetadata = QueryAnalysis.getInputMetadata(qe)
++    assert(inputMetadata.length === 2)
++    assertHiveFieldExists(inputMetadata, "test_table_1", "salary")
++    assertHiveFieldExists(inputMetadata, "test_table_2", "code")
++    assertHiveOutputs(qe, "test_table_5", Seq("code", "sal"))
++  }
++
+   def assertHiveInputs(
+       qe: org.apache.spark.sql.execution.QueryExecution,
+       table: String,
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
+index 6672c77..22521de 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
+@@ -43,8 +43,9 @@ object TestUtils {
+       table: String,
+       column: String,
+       db: String = "default"): Unit = {
+-    assert(inputMetadata.contains(FieldDetails(Array(db + "." + table), column,
+-      DataSourceType.HIVE, DataSourceFormat.UNKNOWN)))
++    val fd = FieldDetails(Array(db + "." + table), column,
++      DataSourceType.HIVE, DataSourceFormat.UNKNOWN)
++    assert(inputMetadata.contains(fd), s"$inputMetadata doesn't contain: $fd")
+   }
+ 
+   def assertHDFSFieldExists(
+@@ -52,8 +53,9 @@ object TestUtils {
+       parquetFiles: Array[String],
+       column: String,
+       dataSourceType: DataSourceType): Unit = {
+-    assert(inputMetadata.contains(FieldDetails(parquetFiles.map(getScheme(dataSourceType) + _),
+-      column, dataSourceType, DataSourceFormat.UNKNOWN)))
++    val fd = FieldDetails(parquetFiles.map(getScheme(dataSourceType) + _), column,
++      dataSourceType, DataSourceFormat.UNKNOWN)
++    assert(inputMetadata.contains(fd), s"$inputMetadata doesn't contain: $fd")
+   }
+ 
+   def getScheme(dataSourceType: DataSourceType): String = {
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala b/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
+index d5ec9a8..4336d12 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
+@@ -142,11 +142,25 @@ class DataFrame private[sql](
+     case _: Command |
+          _: InsertIntoTable |
+          _: CreateTableUsingAsSelect =>
+-      LogicalRDD(queryExecution.analyzed.output, queryExecution.toRdd)(sqlContext)
++      LogicalRDD(queryExecution.analyzed.output, withCallback("CTAS", queryExecution))(sqlContext)
+     case _ =>
+       queryExecution.analyzed
+   }
+ 
++  private def withCallback(funcName: String, qe: QueryExecution): RDD[InternalRow] = {
++    try {
++      val start = System.nanoTime()
++      val rdd = qe.toRdd
++      val end = System.nanoTime()
++      qe.sqlContext.listenerManager.onSuccess(funcName, qe, end - start)
++      rdd
++    } catch {
++      case e: Exception =>
++        qe.sqlContext.listenerManager.onFailure(funcName, qe, e)
++        throw e
++    }
++  }
++
+   protected[sql] def resolve(colName: String): NamedExpression = {
+     queryExecution.analyzed.resolveQuoted(colName, sqlContext.analyzer.resolver).getOrElse {
+       throw new AnalysisException(
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/CreateTableAsSelect.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/CreateTableAsSelect.scala
+index e72a60b..edb4c4a 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/CreateTableAsSelect.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/CreateTableAsSelect.scala
+@@ -31,7 +31,7 @@ import org.apache.spark.sql.{AnalysisException, Row, SQLContext}
+  * @param allowExisting allow continue working if it's already exists, otherwise
+  *                      raise exception
+  */
+-private[hive]
++private[sql]
+ case class CreateTableAsSelect(
+     tableDesc: HiveTable,
+     query: LogicalPlan,
+-- 
+1.7.9.5
+

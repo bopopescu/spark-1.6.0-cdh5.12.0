@@ -1,0 +1,173 @@
+From 8bc255fd912ce7a67083dfadbf91aab0c1b84664 Mon Sep 17 00:00:00 2001
+From: jerryshao <sshao@hortonworks.com>
+Date: Fri, 6 Jan 2017 10:07:54 -0600
+Subject: [PATCH 461/517] [SPARK-19033][CORE] Add admin acls for history
+ server
+
+Current HistoryServer's ACLs is derived from application event-log, which means the newly changed ACLs cannot be applied to the old data, this will become a problem where newly added admin cannot access the old application history UI, only the new application can be affected.
+
+So here propose to add admin ACLs for history server, any configured user/group could have the view access to all the applications, while the view ACLs derived from application run-time still take effect.
+
+Unit test added.
+
+Cloudera ID: CDH-49083
+
+Author: jerryshao <sshao@hortonworks.com>
+
+Closes #16470 from jerryshao/SPARK-19033.
+
+(cherry picked from commit 4a4c3dc9ca10e52f7981b225ec44e97247986905)
+---
+ .../spark/deploy/history/FsHistoryProvider.scala   |   11 ++-
+ .../deploy/history/FsHistoryProviderSuite.scala    |   75 +++++++++++++++++++-
+ docs/monitoring.md                                 |   11 +++
+ 3 files changed, 93 insertions(+), 4 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/deploy/history/FsHistoryProvider.scala b/core/src/main/scala/org/apache/spark/deploy/history/FsHistoryProvider.scala
+index 5b9f5ac..97d606b 100644
+--- a/core/src/main/scala/org/apache/spark/deploy/history/FsHistoryProvider.scala
++++ b/core/src/main/scala/org/apache/spark/deploy/history/FsHistoryProvider.scala
+@@ -92,6 +92,11 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
+     .map { d => Utils.resolveURI(d).toString }
+     .getOrElse(DEFAULT_LOG_DIR)
+ 
++  private val HISTORY_UI_ACLS_ENABLE = conf.getBoolean("spark.history.ui.acls.enable", false)
++  private val HISTORY_UI_ADMIN_ACLS = conf.get("spark.history.ui.admin.acls", "")
++  logInfo(s"History server ui acls " + (if (HISTORY_UI_ACLS_ENABLE) "enabled" else "disabled") +
++    "; users with admin permissions: " + HISTORY_UI_ADMIN_ACLS.toString)
++
+   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
+   private val fs = Utils.getHadoopFileSystem(logDir, hadoopConf)
+ 
+@@ -232,10 +237,10 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
+           val appAttemptInfo = replay(fs.getFileStatus(new Path(logDir, attempt.logPath)),
+             replayBus)
+           appAttemptInfo.map { info =>
+-            val uiAclsEnabled = conf.getBoolean("spark.history.ui.acls.enable", false)
+-            ui.getSecurityManager.setAcls(uiAclsEnabled)
++            ui.getSecurityManager.setAcls(HISTORY_UI_ACLS_ENABLE)
+             // make sure to set admin acls before view acls so they are properly picked up
+-            ui.getSecurityManager.setAdminAcls(appListener.adminAcls.getOrElse(""))
++            val adminAcls = HISTORY_UI_ADMIN_ACLS + "," + appListener.adminAcls.getOrElse("")
++            ui.getSecurityManager.setAdminAcls(adminAcls)
+             ui.getSecurityManager.setViewAcls(attempt.sparkUser,
+               appListener.viewAcls.getOrElse(""))
+             LoadedAppUI(ui, updateProbe(appId, attemptId, attempt.fileSize))
+diff --git a/core/src/test/scala/org/apache/spark/deploy/history/FsHistoryProviderSuite.scala b/core/src/test/scala/org/apache/spark/deploy/history/FsHistoryProviderSuite.scala
+index 5cab17f..35bf0a5 100644
+--- a/core/src/test/scala/org/apache/spark/deploy/history/FsHistoryProviderSuite.scala
++++ b/core/src/test/scala/org/apache/spark/deploy/history/FsHistoryProviderSuite.scala
+@@ -38,7 +38,7 @@ import org.scalatest.BeforeAndAfter
+ import org.scalatest.Matchers
+ import org.scalatest.concurrent.Eventually._
+ 
+-import org.apache.spark.{Logging, SparkConf, SparkFunSuite}
++import org.apache.spark.{Logging, SecurityManager, SparkConf, SparkFunSuite}
+ import org.apache.spark.io._
+ import org.apache.spark.scheduler._
+ import org.apache.spark.util.{Clock, JsonProtocol, ManualClock, Utils}
+@@ -460,6 +460,79 @@ class FsHistoryProviderSuite extends SparkFunSuite with BeforeAndAfter with Matc
+     }
+   }
+ 
++  test("support history server ui admin acls") {
++    def createAndCheck(conf: SparkConf, properties: (String, String)*)
++      (checkFn: SecurityManager => Unit): Unit = {
++      // Empty the testDir for each test.
++      if (testDir.exists() && testDir.isDirectory) {
++        testDir.listFiles().foreach { f => if (f.isFile) f.delete() }
++      }
++
++      var provider: FsHistoryProvider = null
++      try {
++        provider = new FsHistoryProvider(conf)
++        val log = newLogFile("app1", Some("attempt1"), inProgress = false)
++        writeFile(log, true, None,
++          SparkListenerApplicationStart("app1", Some("app1"), System.currentTimeMillis(),
++            "test", Some("attempt1")),
++          SparkListenerEnvironmentUpdate(Map(
++            "Spark Properties" -> properties.toSeq,
++            "JVM Information" -> Seq.empty,
++            "System Properties" -> Seq.empty,
++            "Classpath Entries" -> Seq.empty
++          )),
++          SparkListenerApplicationEnd(System.currentTimeMillis()))
++
++        provider.checkForLogs()
++        val appUi = provider.getAppUI("app1", Some("attempt1"))
++
++        assert(appUi.nonEmpty)
++        val securityManager = appUi.get.ui.securityManager
++        checkFn(securityManager)
++      } finally {
++        if (provider != null) {
++          provider.stop()
++        }
++      }
++    }
++
++    // Test both history ui admin acls and application acls are configured.
++    val conf1 = createTestConf()
++      .set("spark.history.ui.acls.enable", "true")
++      .set("spark.history.ui.admin.acls", "user1,user2")
++
++    createAndCheck(conf1, ("spark.admin.acls", "user")) {
++      securityManager =>
++        // Test whether user has permission to access UI.
++        securityManager.checkUIViewPermissions("user1") should be (true)
++        securityManager.checkUIViewPermissions("user2") should be (true)
++        securityManager.checkUIViewPermissions("user") should be (true)
++        securityManager.checkUIViewPermissions("abc") should be (false)
++    }
++
++    // Test only history ui admin acls are configured.
++    val conf2 = createTestConf()
++      .set("spark.history.ui.acls.enable", "true")
++      .set("spark.history.ui.admin.acls", "user1,user2")
++    createAndCheck(conf2) { securityManager =>
++      // Test whether user has permission to access UI.
++      securityManager.checkUIViewPermissions("user1") should be (true)
++      securityManager.checkUIViewPermissions("user2") should be (true)
++      // Check the unknown "user" should return false
++      securityManager.checkUIViewPermissions("user") should be (false)
++    }
++
++    // Test neither history ui admin acls nor application acls are configured.
++     val conf3 = createTestConf()
++      .set("spark.history.ui.acls.enable", "true")
++    createAndCheck(conf3) { securityManager =>
++      // Test whether user has permission to access UI.
++      securityManager.checkUIViewPermissions("user1") should be (false)
++      securityManager.checkUIViewPermissions("user2") should be (false)
++      securityManager.checkUIViewPermissions("user") should be (false)
++    }
++ }
++
+   /**
+    * Asks the provider to check for logs and calls a function to perform checks on the updated
+    * app list. Example:
+diff --git a/docs/monitoring.md b/docs/monitoring.md
+index 4385ff7..9d06977 100644
+--- a/docs/monitoring.md
++++ b/docs/monitoring.md
+@@ -168,6 +168,17 @@ The history server can be configured as follows:
+     </td>
+   </tr>
+   <tr>
++    <td>spark.history.ui.admin.acls</td>
++    <td>empty</td>
++    <td>
++      Comma separated list of users/administrators that have view access to all the Spark applications in
++      history server. By default only the users permitted to view the application at run-time could
++      access the related application history, with this, configured users/administrators could also
++      have the permission to access it.
++      Putting a "*" in the list means any user can have the privilege of admin.
++    </td>
++  </tr>
++  <tr>
+     <td>spark.history.fs.cleaner.enabled</td>
+     <td>false</td>
+     <td>
+-- 
+1.7.9.5
+

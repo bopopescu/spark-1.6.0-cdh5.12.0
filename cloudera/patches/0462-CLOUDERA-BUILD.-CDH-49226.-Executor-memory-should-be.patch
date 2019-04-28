@@ -1,0 +1,140 @@
+From 2f2a9d0666747b60a24fa53be25ad45d8a0c52ac Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Thu, 19 Jan 2017 18:41:13 -0800
+Subject: [PATCH 462/517] CLOUDERA-BUILD. CDH-49226. Executor memory should be
+ in bytes, not MB.
+
+Parse the user-defined string as bytes instead of MB, which is what
+the "MemoryParam()" call used to do before it was replaced as part
+of CDH-48784.
+
+Also added a unit test to avoid breaking this yet again.
+---
+ .../spark/deploy/yarn/ApplicationMaster.scala      |    3 +-
+ .../org/apache/spark/deploy/yarn/Client.scala      |    4 +-
+ .../apache/spark/deploy/yarn/YarnAllocator.scala   |    5 ++-
+ .../org/apache/spark/deploy/yarn/ClientSuite.scala |   43 ++++++++++++++++++++
+ 4 files changed, 50 insertions(+), 5 deletions(-)
+
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
+index 0952ff0..52adc68 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
+@@ -289,7 +289,8 @@ private[spark] class ApplicationMaster(
+     // be run up front, to avoid printing this out for every single executor being launched.
+     // Use placeholders for information that changes such as executor IDs.
+     logInfo {
+-      val executorMemory = _sparkConf.getSizeAsMb("spark.executor.memory", "1024m").toInt
++      val executorMemory = Utils.memoryStringToMb(
++        _sparkConf.get("spark.executor.memory", "1g")).toInt
+       val executorCores = _sparkConf.getInt("spark.executor.cores", 1)
+       val dummyRunner = new ExecutorRunnable(None, yarnConf, _sparkConf, driverUrl, "<executorId>",
+         "<hostname>", executorMemory, executorCores, appId, securityMgr)
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
+index 44fcec1..d81818e 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
+@@ -274,14 +274,14 @@ private[spark] class Client(
+   /**
+    * Fail fast if we have requested more resources per container than is available in the cluster.
+    */
+-  private def verifyClusterResources(newAppResponse: GetNewApplicationResponse): Unit = {
++  private[spark] def verifyClusterResources(newAppResponse: GetNewApplicationResponse): Unit = {
+     import YarnSparkHadoopUtil._
+ 
+     // This may not be accurate in cluster mode. If the user is setting the config via SparkConf,
+     // that value is not visible here, so the check might fail (in case the user is setting a
+     // smaller value). But that should be rare.
+     val executorMemory = args.executorMemory.getOrElse(
+-      sparkConf.getSizeAsMb("spark.executor.memory", "1g").toInt)
++      Utils.memoryStringToMb(sparkConf.get("spark.executor.memory", "1g")).toInt)
+     val executorMemoryOverhead = sparkConf.getInt("spark.yarn.executor.memoryOverhead",
+       math.max((MEMORY_OVERHEAD_FACTOR * executorMemory).toInt, MEMORY_OVERHEAD_MIN))
+ 
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala
+index ec3ee5d..874a2d5 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala
+@@ -39,7 +39,7 @@ import org.apache.spark.deploy.yarn.YarnSparkHadoopUtil._
+ import org.apache.spark.rpc.{RpcCallContext, RpcEndpointRef}
+ import org.apache.spark.scheduler.{ExecutorExited, ExecutorLossReason}
+ import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RemoveExecutor
+-import org.apache.spark.util.ThreadUtils
++import org.apache.spark.util.{ThreadUtils, Utils}
+ 
+ /**
+  * YarnAllocator is charged with requesting containers from the YARN ResourceManager and deciding
+@@ -109,7 +109,8 @@ private[yarn] class YarnAllocator(
+   private val containerIdToExecutorId = new HashMap[ContainerId, String]
+ 
+   // Executor memory in MB.
+-  protected val executorMemory = sparkConf.getSizeAsMb("spark.executor.memory", "1g").toInt
++  protected val executorMemory = Utils.memoryStringToMb(
++    sparkConf.get("spark.executor.memory", "1g")).toInt
+   // Additional memory overhead.
+   protected val memoryOverhead: Int = sparkConf.getInt("spark.yarn.executor.memoryOverhead",
+     math.max((MEMORY_OVERHEAD_FACTOR * executorMemory).toInt, MEMORY_OVERHEAD_MIN))
+diff --git a/yarn/src/test/scala/org/apache/spark/deploy/yarn/ClientSuite.scala b/yarn/src/test/scala/org/apache/spark/deploy/yarn/ClientSuite.scala
+index dbcd47c..a505a6a 100644
+--- a/yarn/src/test/scala/org/apache/spark/deploy/yarn/ClientSuite.scala
++++ b/yarn/src/test/scala/org/apache/spark/deploy/yarn/ClientSuite.scala
+@@ -39,6 +39,7 @@ import org.mockito.Mockito._
+ import org.scalatest.{BeforeAndAfterAll, Matchers}
+ 
+ import org.apache.spark.{SparkConf, SparkFunSuite}
++import org.apache.spark.network.util.ByteUnit
+ import org.apache.spark.util.Utils
+ 
+ class ClientSuite extends SparkFunSuite with Matchers with BeforeAndAfterAll {
+@@ -206,6 +207,48 @@ class ClientSuite extends SparkFunSuite with Matchers with BeforeAndAfterAll {
+     appContext.getMaxAppAttempts should be (42)
+   }
+ 
++  test("cluster memory validation") {
++    val response = mock(classOf[GetNewApplicationResponse])
++    val resource = mock(classOf[Resource])
++    when(resource.getMemory()).thenReturn(2000)
++    when(response.getMaximumResourceCapability()).thenReturn(resource)
++
++    def makeClient(mem: Int, overhead: String): Client = {
++      val memory = ByteUnit.MiB.convertTo(mem, ByteUnit.BYTE).toString()
++      val conf = new SparkConf()
++        .set("spark.executor.memory", memory)
++        .set("spark.yarn.am.memory", memory)
++      if (overhead != null) {
++        conf.set("spark.yarn.executor.memoryOverhead", overhead)
++          .set("spark.yarn.am.memoryOverhead", overhead)
++      }
++      new Client(new ClientArguments(Array(), conf), new Configuration(), conf)
++    }
++
++    // Tuples of (memory in MB, optional overhead). The values are adjusted to be large because
++    // the minimum overhead is 384m.
++    val valid = Seq(
++      (1000, "500"),
++      (1500, null),
++      (1600, "400"),
++      (1800, "100"))
++    val invalid = Seq(
++      (1000, "1500"),
++      (1500, "600"),
++      (1700, null))
++
++    valid.foreach { case (mem, overhead) =>
++      makeClient(mem, overhead).verifyClusterResources(response)
++    }
++
++    invalid.foreach { case (mem, overhead) =>
++      intercept[IllegalArgumentException] {
++        makeClient(mem, overhead).verifyClusterResources(response)
++      }
++    }
++
++  }
++
+   object Fixtures {
+ 
+     val knownDefYarnAppCP: Seq[String] =
+-- 
+1.7.9.5
+

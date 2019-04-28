@@ -1,0 +1,69 @@
+From 950175fcd74bcdb9421b0f2609ad9a11197c83ba Mon Sep 17 00:00:00 2001
+From: Mortada Mehyar <mortada.mehyar@gmail.com>
+Date: Fri, 10 Jun 2016 00:23:34 -0700
+Subject: [PATCH 364/517] [DOCUMENTATION] fixed groupby aggregation example
+ for pyspark
+
+## What changes were proposed in this pull request?
+
+fixing documentation for the groupby/agg example in python
+
+## How was this patch tested?
+
+the existing example in the documentation dose not contain valid syntax (missing parenthesis) and is not using `Column` in the expression for `agg()`
+
+after the fix here's how I tested it:
+
+```
+In [1]: from pyspark.sql import Row
+
+In [2]: import pyspark.sql.functions as func
+
+In [3]: %cpaste
+Pasting code; enter '--' alone on the line to stop or use Ctrl-D.
+:records = [{'age': 19, 'department': 1, 'expense': 100},
+: {'age': 20, 'department': 1, 'expense': 200},
+: {'age': 21, 'department': 2, 'expense': 300},
+: {'age': 22, 'department': 2, 'expense': 300},
+: {'age': 23, 'department': 3, 'expense': 300}]
+:--
+
+In [4]: df = sqlContext.createDataFrame([Row(**d) for d in records])
+
+In [5]: df.groupBy("department").agg(df["department"], func.max("age"), func.sum("expense")).show()
+
++----------+----------+--------+------------+
+|department|department|max(age)|sum(expense)|
++----------+----------+--------+------------+
+|         1|         1|      20|         300|
+|         2|         2|      22|         600|
+|         3|         3|      23|         300|
++----------+----------+--------+------------+
+
+Author: Mortada Mehyar <mortada.mehyar@gmail.com>
+
+Closes #13587 from mortada/groupby_agg_doc_fix.
+
+(cherry picked from commit 675a73715d3c8adb9d9a9dce5f76a2db5106790c)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit 393f4ba1516af47388e72310aee8dbbea9652134)
+---
+ docs/sql-programming-guide.md |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docs/sql-programming-guide.md b/docs/sql-programming-guide.md
+index d2c2491..1c5f4dd 100644
+--- a/docs/sql-programming-guide.md
++++ b/docs/sql-programming-guide.md
+@@ -2248,7 +2248,7 @@ import pyspark.sql.functions as func
+ 
+ # In 1.3.x, in order for the grouping column "department" to show up,
+ # it must be included explicitly as part of the agg function call.
+-df.groupBy("department").agg("department"), func.max("age"), func.sum("expense"))
++df.groupBy("department").agg(df["department"], func.max("age"), func.sum("expense"))
+ 
+ # In 1.4+, grouping column "department" is included automatically.
+ df.groupBy("department").agg(func.max("age"), func.sum("expense"))
+-- 
+1.7.9.5
+

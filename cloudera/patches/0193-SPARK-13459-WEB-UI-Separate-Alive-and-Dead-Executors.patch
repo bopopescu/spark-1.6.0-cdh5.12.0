@@ -1,0 +1,155 @@
+From 333477ee687d8d58256da691950facf7f4bf25e8 Mon Sep 17 00:00:00 2001
+From: Alex Bozarth <ajbozart@us.ibm.com>
+Date: Fri, 4 Mar 2016 17:04:09 -0600
+Subject: [PATCH 193/517] [SPARK-13459][WEB UI] Separate Alive and Dead
+ Executors in Executor Totals Table
+
+Now that dead executors are shown in the executors table (#10058) the totals table is updated to include the separate totals for alive and dead executors as well as the current total, as originally discussed in #10668
+
+Manually verified by running the Standalone Web UI in the latest Safari and Firefox ESR
+
+Author: Alex Bozarth <ajbozart@us.ibm.com>
+
+Closes #11381 from ajbozarth/spark13459.
+
+(cherry picked from commit 5f42c28b119b79c0ea4910c478853d451cd1a967)
+---
+ .../org/apache/spark/ui/exec/ExecutorsPage.scala   |   84 +++++++++++---------
+ 1 file changed, 45 insertions(+), 39 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala b/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala
+index eba7a31..791dbe5 100644
+--- a/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala
++++ b/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala
+@@ -86,7 +86,7 @@ private[ui] class ExecutorsPage(
+           <th>Failed Tasks</th>
+           <th>Complete Tasks</th>
+           <th>Total Tasks</th>
+-          <th data-toggle="tooltip" title={ToolTips.TASK_TIME}>Task Time (GC Time)</th>
++          <th><span data-toggle="tooltip" title={ToolTips.TASK_TIME}>Task Time (GC Time)</span></th>
+           <th><span data-toggle="tooltip" title={ToolTips.INPUT}>Input</span></th>
+           <th><span data-toggle="tooltip" title={ToolTips.SHUFFLE_READ}>Shuffle Read</span></th>
+           <th>
+@@ -109,13 +109,8 @@ private[ui] class ExecutorsPage(
+     val content =
+       <div class="row">
+         <div class="span12">
+-          <h4>Dead Executors({deadExecutorInfo.size})</h4>
+-        </div>
+-      </div>
+-      <div class="row">
+-        <div class="span12">
+-          <h4>Active Executors({activeExecutorInfo.size})</h4>
+-          {execSummary(activeExecutorInfo)}
++          <h4>Summary</h4>
++          {execSummary(activeExecutorInfo, deadExecutorInfo)}
+         </div>
+       </div>
+       <div class = "row">
+@@ -198,7 +193,7 @@ private[ui] class ExecutorsPage(
+     </tr>
+   }
+ 
+-  private def execSummary(execInfo: Seq[ExecutorSummary]): Seq[Node] = {
++  private def execSummaryRow(execInfo: Seq[ExecutorSummary], rowName: String): Seq[Node] = {
+     val maximumMemory = execInfo.map(_.maxMemory).sum
+     val memoryUsed = execInfo.map(_.memoryUsed).sum
+     val diskUsed = execInfo.map(_.diskUsed).sum
+@@ -207,37 +202,46 @@ private[ui] class ExecutorsPage(
+     val totalShuffleRead = execInfo.map(_.totalShuffleRead).sum
+     val totalShuffleWrite = execInfo.map(_.totalShuffleWrite).sum
+ 
+-    val sumContent =
+-      <tr>
+-        <td>{execInfo.map(_.rddBlocks).sum}</td>
+-        <td sorttable_customkey={memoryUsed.toString}>
+-          {Utils.bytesToString(memoryUsed)} /
+-          {Utils.bytesToString(maximumMemory)}
+-        </td>
+-        <td sorttable_customkey={diskUsed.toString}>
+-          {Utils.bytesToString(diskUsed)}
+-        </td>
+-        <td>{totalCores}</td>
+-        {taskData(execInfo.map(_.maxTasks).sum,
+-        execInfo.map(_.activeTasks).sum,
+-        execInfo.map(_.failedTasks).sum,
+-        execInfo.map(_.completedTasks).sum,
+-        execInfo.map(_.totalTasks).sum,
+-        execInfo.map(_.totalDuration).sum,
+-        execInfo.map(_.totalGCTime).sum)}
+-        <td sorttable_customkey={totalInputBytes.toString}>
+-          {Utils.bytesToString(totalInputBytes)}
+-        </td>
+-        <td sorttable_customkey={totalShuffleRead.toString}>
+-          {Utils.bytesToString(totalShuffleRead)}
+-        </td>
+-        <td sorttable_customkey={totalShuffleWrite.toString}>
+-          {Utils.bytesToString(totalShuffleWrite)}
+-        </td>
+-      </tr>;
++    <tr>
++      <td><b>{rowName}({execInfo.size})</b></td>
++      <td>{execInfo.map(_.rddBlocks).sum}</td>
++      <td sorttable_customkey={memoryUsed.toString}>
++        {Utils.bytesToString(memoryUsed)} /
++        {Utils.bytesToString(maximumMemory)}
++      </td>
++      <td sorttable_customkey={diskUsed.toString}>
++        {Utils.bytesToString(diskUsed)}
++      </td>
++      <td>{totalCores}</td>
++      {taskData(execInfo.map(_.maxTasks).sum,
++      execInfo.map(_.activeTasks).sum,
++      execInfo.map(_.failedTasks).sum,
++      execInfo.map(_.completedTasks).sum,
++      execInfo.map(_.totalTasks).sum,
++      execInfo.map(_.totalDuration).sum,
++      execInfo.map(_.totalGCTime).sum)}
++      <td sorttable_customkey={totalInputBytes.toString}>
++        {Utils.bytesToString(totalInputBytes)}
++      </td>
++      <td sorttable_customkey={totalShuffleRead.toString}>
++        {Utils.bytesToString(totalShuffleRead)}
++      </td>
++      <td sorttable_customkey={totalShuffleWrite.toString}>
++        {Utils.bytesToString(totalShuffleWrite)}
++      </td>
++    </tr>
++  }
++
++  private def execSummary(activeExecInfo: Seq[ExecutorSummary], deadExecInfo: Seq[ExecutorSummary]):
++    Seq[Node] = {
++    val totalExecInfo = activeExecInfo ++ deadExecInfo
++    val activeRow = execSummaryRow(activeExecInfo, "Active");
++    val deadRow = execSummaryRow(deadExecInfo, "Dead");
++    val totalRow = execSummaryRow(totalExecInfo, "Total");
+ 
+     <table class={UIUtils.TABLE_CLASS_STRIPED}>
+       <thead>
++        <th></th>
+         <th>RDD Blocks</th>
+         <th><span data-toggle="tooltip" title={ToolTips.STORAGE_MEMORY}>Storage Memory</span></th>
+         <th>Disk Used</th>
+@@ -246,7 +250,7 @@ private[ui] class ExecutorsPage(
+         <th>Failed Tasks</th>
+         <th>Complete Tasks</th>
+         <th>Total Tasks</th>
+-        <th data-toggle="tooltip" title={ToolTips.TASK_TIME}>Task Time (GC Time)</th>
++        <th><span data-toggle="tooltip" title={ToolTips.TASK_TIME}>Task Time (GC Time)</span></th>
+         <th><span data-toggle="tooltip" title={ToolTips.INPUT}>Input</span></th>
+         <th><span data-toggle="tooltip" title={ToolTips.SHUFFLE_READ}>Shuffle Read</span></th>
+         <th>
+@@ -256,7 +260,9 @@ private[ui] class ExecutorsPage(
+         </th>
+       </thead>
+       <tbody>
+-        {sumContent}
++        {activeRow}
++        {deadRow}
++        {totalRow}
+       </tbody>
+     </table>
+   }
+-- 
+1.7.9.5
+

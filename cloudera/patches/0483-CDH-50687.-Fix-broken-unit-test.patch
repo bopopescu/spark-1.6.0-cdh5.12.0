@@ -1,0 +1,94 @@
+From 66bbde5f8896d2eaac8637d53544c54e4a3f8250 Mon Sep 17 00:00:00 2001
+From: Salil Surendran <salilsurendran@cloudera.com>
+Date: Sun, 26 Feb 2017 13:44:26 -0800
+Subject: [PATCH 483/517] CDH-50687. Fix broken unit test
+
+---
+ lineage/pom.xml                                    |    7 ++++++-
+ .../spark/lineage/ClouderaNavigatorListener.scala  |    2 +-
+ .../query/analysis/FileQueryAnalysisSuite.scala    |   12 ++----------
+ .../query/analysis/HiveQueryAnalysisSuite.scala    |    2 +-
+ 4 files changed, 10 insertions(+), 13 deletions(-)
+
+diff --git a/lineage/pom.xml b/lineage/pom.xml
+index ca929c4..9a1246a 100644
+--- a/lineage/pom.xml
++++ b/lineage/pom.xml
+@@ -35,7 +35,6 @@
+   <artifactId>spark-lineage_2.10</artifactId>
+   <packaging>jar</packaging>
+   <dependencies>
+-
+     <dependency>
+       <groupId>org.apache.hadoop</groupId>
+       <artifactId>hadoop-common</artifactId>
+@@ -56,6 +55,12 @@
+     <dependency>
+       <groupId>org.apache.hadoop</groupId>
+       <artifactId>hadoop-common</artifactId>
++      <exclusions>
++        <exclusion>
++          <groupId>javax.servlet</groupId>
++          <artifactId>servlet-api</artifactId>
++        </exclusion>
++      </exclusions>
+     </dependency>
+     <dependency>
+       <groupId>org.apache.hadoop</groupId>
+diff --git a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+index 01a70bc..1a49d25 100644
+--- a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
++++ b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+@@ -135,7 +135,7 @@ private[lineage] class ClouderaNavigatorListener
+       try {
+         fileWriter = new OutputStreamWriter(
+             new FileOutputStream(dir + File.separator + "spark_lineage_log_" + sc.applicationId
+-                  + "-" + sc.startTime + ".log"), StandardCharsets.UTF_8);
++                  + "-" + sc.startTime + ".log", true), StandardCharsets.UTF_8);
+         fileWriter.append(mapper.writeValueAsString(lineageElement) + System.lineSeparator())
+       } finally {
+         if (fileWriter != null) {
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala
+index 96a776f..c3e3216 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala
+@@ -26,11 +26,8 @@ import org.apache.spark.sql.test.SharedSQLContext
+ /**
+  * Tests that reading and writing to the local and HDFS file systems produces the desired lineage.
+  */
+-class FileQueryAnalysisSuite
+-    extends SparkFunSuite
+-    with ParquetHDFSTest
+-    with ParquetTest
+-    with SharedSQLContext {
++class FileQueryAnalysisSuite extends SharedSQLContext with ParquetHDFSTest with
++ParquetTest {
+ 
+   test("Local file works") {
+     testSimpleQuery(withParquetFile, DataSourceType.LOCAL)
+@@ -92,9 +89,4 @@ class FileQueryAnalysisSuite
+       }
+     }
+   }
+-
+-  override def afterAll(): Unit = {
+-    sqlContext.listenerManager.clear()
+-    sqlContext.sparkContext.stop()
+-  }
+ }
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+index 80999d3..1e9f4bc 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+@@ -135,7 +135,7 @@ class HiveQueryAnalysisSuite extends SparkFunSuite with TestHiveSingleton with S
+   }
+ 
+   override def afterAll(): Unit = {
++    super.afterAll()
+     hiveContext.listenerManager.clear()
+-    hiveContext.sparkContext.stop()
+   }
+ }
+-- 
+1.7.9.5
+

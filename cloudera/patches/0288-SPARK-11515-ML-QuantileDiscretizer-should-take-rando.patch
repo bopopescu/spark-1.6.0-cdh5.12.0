@@ -1,0 +1,96 @@
+From ce85c9c107b4bdefdc6f8a35cf991120e0edb690 Mon Sep 17 00:00:00 2001
+From: Yu ISHIKAWA <yuu.ishikawa@gmail.com>
+Date: Thu, 11 Feb 2016 15:05:34 -0800
+Subject: [PATCH 288/517] [SPARK-11515][ML] QuantileDiscretizer should take
+ random seed
+
+cc jkbradley
+
+Author: Yu ISHIKAWA <yuu.ishikawa@gmail.com>
+
+Closes #9535 from yu-iskw/SPARK-11515.
+
+(cherry picked from commit 574571c87098795a2206a113ee9ed4bafba8f00f)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 5a27129528f4e42eebb897d81fb1de26296933bf)
+---
+ .../spark/ml/feature/QuantileDiscretizer.scala     |   15 ++++++++++-----
+ .../ml/feature/QuantileDiscretizerSuite.scala      |    2 +-
+ 2 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/ml/feature/QuantileDiscretizer.scala b/mllib/src/main/scala/org/apache/spark/ml/feature/QuantileDiscretizer.scala
+index 7bf67c6..c9467b2 100644
+--- a/mllib/src/main/scala/org/apache/spark/ml/feature/QuantileDiscretizer.scala
++++ b/mllib/src/main/scala/org/apache/spark/ml/feature/QuantileDiscretizer.scala
+@@ -23,8 +23,8 @@ import org.apache.spark.Logging
+ import org.apache.spark.annotation.{Since, Experimental}
+ import org.apache.spark.ml._
+ import org.apache.spark.ml.attribute.NominalAttribute
+-import org.apache.spark.ml.param.shared.{HasInputCol, HasOutputCol}
+ import org.apache.spark.ml.param.{IntParam, _}
++import org.apache.spark.ml.param.shared.{HasInputCol, HasOutputCol, HasSeed}
+ import org.apache.spark.ml.util._
+ import org.apache.spark.sql.types.{DoubleType, StructType}
+ import org.apache.spark.sql.{DataFrame, Row}
+@@ -33,7 +33,8 @@ import org.apache.spark.util.random.XORShiftRandom
+ /**
+  * Params for [[QuantileDiscretizer]].
+  */
+-private[feature] trait QuantileDiscretizerBase extends Params with HasInputCol with HasOutputCol {
++private[feature] trait QuantileDiscretizerBase extends Params
++  with HasInputCol with HasOutputCol with HasSeed {
+ 
+   /**
+    * Maximum number of buckets (quantiles, or categories) into which data points are grouped. Must
+@@ -73,6 +74,9 @@ final class QuantileDiscretizer(override val uid: String)
+   /** @group setParam */
+   def setOutputCol(value: String): this.type = set(outputCol, value)
+ 
++  /** @group setParam */
++  def setSeed(value: Long): this.type = set(seed, value)
++
+   override def transformSchema(schema: StructType): StructType = {
+     SchemaUtils.checkColumnType(schema, $(inputCol), DoubleType)
+     val inputFields = schema.fields
+@@ -84,7 +88,8 @@ final class QuantileDiscretizer(override val uid: String)
+   }
+ 
+   override def fit(dataset: DataFrame): Bucketizer = {
+-    val samples = QuantileDiscretizer.getSampledInput(dataset.select($(inputCol)), $(numBuckets))
++    val samples = QuantileDiscretizer
++      .getSampledInput(dataset.select($(inputCol)), $(numBuckets), $(seed))
+       .map { case Row(feature: Double) => feature }
+     val candidates = QuantileDiscretizer.findSplitCandidates(samples, $(numBuckets) - 1)
+     val splits = QuantileDiscretizer.getSplits(candidates)
+@@ -100,13 +105,13 @@ object QuantileDiscretizer extends DefaultParamsReadable[QuantileDiscretizer] wi
+   /**
+    * Sampling from the given dataset to collect quantile statistics.
+    */
+-  private[feature] def getSampledInput(dataset: DataFrame, numBins: Int): Array[Row] = {
++  private[feature] def getSampledInput(dataset: DataFrame, numBins: Int, seed: Long): Array[Row] = {
+     val totalSamples = dataset.count()
+     require(totalSamples > 0,
+       "QuantileDiscretizer requires non-empty input dataset but was given an empty input.")
+     val requiredSamples = math.max(numBins * numBins, 10000)
+     val fraction = math.min(requiredSamples / dataset.count(), 1.0)
+-    dataset.sample(withReplacement = false, fraction, new XORShiftRandom().nextInt()).collect()
++    dataset.sample(withReplacement = false, fraction, new XORShiftRandom(seed).nextInt()).collect()
+   }
+ 
+   /**
+diff --git a/mllib/src/test/scala/org/apache/spark/ml/feature/QuantileDiscretizerSuite.scala b/mllib/src/test/scala/org/apache/spark/ml/feature/QuantileDiscretizerSuite.scala
+index 3a4f6d2..0d1b940 100644
+--- a/mllib/src/test/scala/org/apache/spark/ml/feature/QuantileDiscretizerSuite.scala
++++ b/mllib/src/test/scala/org/apache/spark/ml/feature/QuantileDiscretizerSuite.scala
+@@ -93,7 +93,7 @@ private object QuantileDiscretizerSuite extends SparkFunSuite {
+ 
+     val df = sc.parallelize(data.map(Tuple1.apply)).toDF("input")
+     val discretizer = new QuantileDiscretizer().setInputCol("input").setOutputCol("result")
+-      .setNumBuckets(numBucket)
++      .setNumBuckets(numBucket).setSeed(1)
+     val result = discretizer.fit(df).transform(df)
+ 
+     val transformedFeatures = result.select("result").collect()
+-- 
+1.7.9.5
+

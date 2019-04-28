@@ -1,0 +1,348 @@
+From 07873eab052c88581d9281103c24cf2872afd067 Mon Sep 17 00:00:00 2001
+From: Hemant Bhanawat <hemant@snappydata.io>
+Date: Sat, 16 Apr 2016 23:43:32 -0700
+Subject: [PATCH 216/517] [SPARK-13904][SCHEDULER] Add support for pluggable
+ cluster manager
+
+This commit adds support for pluggable cluster manager. And also allows a cluster manager to clean up tasks without taking the parent process down.
+
+To plug a new external cluster manager, ExternalClusterManager trait should be implemented. It returns task scheduler and backend scheduler that will be used by SparkContext to schedule tasks. An external cluster manager is registered using the java.util.ServiceLoader mechanism (This mechanism is also being used to register data sources like parquet, json, jdbc etc.). This allows auto-loading implementations of ExternalClusterManager interface.
+
+Currently, when a driver fails, executors exit using system.exit. This does not bode well for cluster managers that would like to reuse the parent process of an executor. Hence,
+
+  1. Moving system.exit to a function that can be overriden in subclasses of CoarseGrainedExecutorBackend.
+  2. Added functionality of killing all the running tasks in an executor.
+
+ExternalClusterManagerSuite.scala was added to test this patch.
+
+Author: Hemant Bhanawat <hemant@snappydata.io>
+
+Closes #11723 from hbhanawat/pluggableScheduler.
+
+(cherry picked from commit af1f4da76268115c5a4cc3035d3236ad27f7240a)
+---
+ .rat-excludes                                      |    3 +
+ .../main/scala/org/apache/spark/SparkContext.scala |   32 +++++++--
+ .../executor/CoarseGrainedExecutorBackend.scala    |   20 ++++--
+ .../scala/org/apache/spark/executor/Executor.scala |   15 ++++
+ .../spark/scheduler/ExternalClusterManager.scala   |   65 +++++++++++++++++
+ ...g.apache.spark.scheduler.ExternalClusterManager |    1 +
+ .../scheduler/ExternalClusterManagerSuite.scala    |   73 ++++++++++++++++++++
+ 7 files changed, 198 insertions(+), 11 deletions(-)
+ create mode 100644 core/src/main/scala/org/apache/spark/scheduler/ExternalClusterManager.scala
+ create mode 100644 core/src/test/resources/META-INF/services/org.apache.spark.scheduler.ExternalClusterManager
+ create mode 100644 core/src/test/scala/org/apache/spark/scheduler/ExternalClusterManagerSuite.scala
+
+diff --git a/.rat-excludes b/.rat-excludes
+index 57d68d7..c4b0df6 100644
+--- a/.rat-excludes
++++ b/.rat-excludes
+@@ -85,3 +85,6 @@ org.apache.spark.sql.sources.DataSourceRegister
+ org.apache.spark.scheduler.SparkHistoryListenerFactory
+ .*parquet
+ spark-deps-.*
++.*csv
++.*tsv
++org.apache.spark.scheduler.ExternalClusterManager
+diff --git a/core/src/main/scala/org/apache/spark/SparkContext.scala b/core/src/main/scala/org/apache/spark/SparkContext.scala
+index 8614cc7..904c39e 100644
+--- a/core/src/main/scala/org/apache/spark/SparkContext.scala
++++ b/core/src/main/scala/org/apache/spark/SparkContext.scala
+@@ -22,8 +22,9 @@ import scala.language.implicitConversions
+ import java.io._
+ import java.lang.reflect.Constructor
+ import java.net.URI
+-import java.util.{Arrays, Properties, UUID}
+-import java.util.concurrent.atomic.{AtomicReference, AtomicBoolean, AtomicInteger}
++import java.util.{Arrays, Properties, ServiceLoader, UUID}
++import java.util.concurrent.ConcurrentMap
++import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
+ import java.util.UUID.randomUUID
+ 
+ import scala.collection.JavaConverters._
+@@ -2742,9 +2743,32 @@ object SparkContext extends Logging {
+           "in the form mesos://zk://host:port. Current Master URL will stop working in Spark 2.0.")
+         createTaskScheduler(sc, "mesos://" + zkUrl)
+ 
+-      case _ =>
+-        throw new SparkException("Could not parse Master URL: '" + master + "'")
++      case masterUrl =>
++        val cm = getClusterManager(masterUrl) match {
++          case Some(clusterMgr) => clusterMgr
++          case None => throw new SparkException("Could not parse Master URL: '" + master + "'")
++        }
++        try {
++          val scheduler = cm.createTaskScheduler(sc, masterUrl)
++          val backend = cm.createSchedulerBackend(sc, masterUrl, scheduler)
++          cm.initialize(scheduler, backend)
++          (backend, scheduler)
++        } catch {
++          case NonFatal(e) =>
++            throw new SparkException("External scheduler cannot be instantiated", e)
++        }
++    }
++  }
++
++  private def getClusterManager(url: String): Option[ExternalClusterManager] = {
++    val loader = Utils.getContextOrSparkClassLoader
++    val serviceLoaders =
++    ServiceLoader.load(classOf[ExternalClusterManager], loader).asScala.filter(_.canCreate(url))
++    if (serviceLoaders.size > 1) {
++      throw new SparkException(s"Multiple Cluster Managers ($serviceLoaders) registered " +
++          s"for the url $url:")
+     }
++    serviceLoaders.headOption
+   }
+ }
+ 
+diff --git a/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala b/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
+index 9d7f863..a1477b0 100644
+--- a/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
++++ b/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
+@@ -61,10 +61,9 @@ private[spark] class CoarseGrainedExecutorBackend(
+       case Success(msg) => Utils.tryLogNonFatalError {
+         Option(self).foreach(_.send(msg)) // msg must be RegisterExecutorResponse
+       }
+-      case Failure(e) => {
++      case Failure(e) =>
+         logError(s"Cannot register with driver: $driverUrl", e)
+-        System.exit(1)
+-      }
++        exitExecutor()
+     }(ThreadUtils.sameThread)
+   }
+ 
+@@ -81,12 +80,12 @@ private[spark] class CoarseGrainedExecutorBackend(
+ 
+     case RegisterExecutorFailed(message) =>
+       logError("Slave registration failed: " + message)
+-      System.exit(1)
++      exitExecutor()
+ 
+     case LaunchTask(data) =>
+       if (executor == null) {
+         logError("Received LaunchTask command but executor was null")
+-        System.exit(1)
++        exitExecutor()
+       } else {
+         val taskDesc = ser.deserialize[TaskDescription](data.value)
+         logInfo("Got assigned task " + taskDesc.taskId)
+@@ -97,7 +96,7 @@ private[spark] class CoarseGrainedExecutorBackend(
+     case KillTask(taskId, _, interruptThread) =>
+       if (executor == null) {
+         logError("Received KillTask command but executor was null")
+-        System.exit(1)
++        exitExecutor()
+       } else {
+         executor.killTask(taskId, interruptThread)
+       }
+@@ -117,7 +116,7 @@ private[spark] class CoarseGrainedExecutorBackend(
+   override def onDisconnected(remoteAddress: RpcAddress): Unit = {
+     if (driver.exists(_.address == remoteAddress)) {
+       logError(s"Driver $remoteAddress disassociated! Shutting down.")
+-      System.exit(1)
++      exitExecutor()
+     } else {
+       logWarning(s"An unknown ($remoteAddress) driver disconnected.")
+     }
+@@ -130,6 +129,13 @@ private[spark] class CoarseGrainedExecutorBackend(
+       case None => logWarning(s"Drop $msg because has not yet connected to driver")
+     }
+   }
++
++  /**
++   * This function can be overloaded by other child classes to handle
++   * executor exits differently. For e.g. when an executor goes down,
++   * back-end may not want to take the parent process down.
++   */
++  protected def exitExecutor(): Unit = System.exit(1)
+ }
+ 
+ private[spark] object CoarseGrainedExecutorBackend extends Logging {
+diff --git a/core/src/main/scala/org/apache/spark/executor/Executor.scala b/core/src/main/scala/org/apache/spark/executor/Executor.scala
+index 9b14184..658a547 100644
+--- a/core/src/main/scala/org/apache/spark/executor/Executor.scala
++++ b/core/src/main/scala/org/apache/spark/executor/Executor.scala
+@@ -135,6 +135,21 @@ private[spark] class Executor(
+     }
+   }
+ 
++  /**
++   * Function to kill the running tasks in an executor.
++   * This can be called by executor back-ends to kill the
++   * tasks instead of taking the JVM down.
++   * @param interruptThread whether to interrupt the task thread
++   */
++  def killAllTasks(interruptThread: Boolean) : Unit = {
++    // kill all the running tasks
++    for (taskRunner <- runningTasks.values().asScala) {
++      if (taskRunner != null) {
++        taskRunner.kill(interruptThread)
++      }
++    }
++  }
++
+   def stop(): Unit = {
+     env.metricsSystem.report()
+     heartbeater.shutdown()
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/ExternalClusterManager.scala b/core/src/main/scala/org/apache/spark/scheduler/ExternalClusterManager.scala
+new file mode 100644
+index 0000000..6ca1f56
+--- /dev/null
++++ b/core/src/main/scala/org/apache/spark/scheduler/ExternalClusterManager.scala
+@@ -0,0 +1,65 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.spark.scheduler
++
++import org.apache.spark.SparkContext
++import org.apache.spark.annotation.DeveloperApi
++
++/**
++ * :: DeveloperApi ::
++ * A cluster manager interface to plugin external scheduler.
++ */
++@DeveloperApi
++trait ExternalClusterManager {
++
++  /**
++   * Check if this cluster manager instance can create scheduler components
++   * for a certain master URL.
++   * @param masterURL the master URL
++   * @return True if the cluster manager can create scheduler backend/
++   */
++  def canCreate(masterURL: String): Boolean
++
++  /**
++   * Create a task scheduler instance for the given SparkContext
++   * @param sc SparkContext
++   * @param masterURL the master URL
++   * @return TaskScheduler that will be responsible for task handling
++   */
++  def createTaskScheduler(sc: SparkContext, masterURL: String): TaskScheduler
++
++  /**
++   * Create a scheduler backend for the given SparkContext and scheduler. This is
++   * called after task scheduler is created using [[ExternalClusterManager.createTaskScheduler()]].
++   * @param sc SparkContext
++   * @param masterURL the master URL
++   * @param scheduler TaskScheduler that will be used with the scheduler backend.
++   * @return SchedulerBackend that works with a TaskScheduler
++   */
++  def createSchedulerBackend(sc: SparkContext,
++      masterURL: String,
++      scheduler: TaskScheduler): SchedulerBackend
++
++  /**
++   * Initialize task scheduler and backend scheduler. This is called after the
++   * scheduler components are created
++   * @param scheduler TaskScheduler that will be responsible for task handling
++   * @param backend SchedulerBackend that works with a TaskScheduler
++   */
++  def initialize(scheduler: TaskScheduler, backend: SchedulerBackend): Unit
++}
+diff --git a/core/src/test/resources/META-INF/services/org.apache.spark.scheduler.ExternalClusterManager b/core/src/test/resources/META-INF/services/org.apache.spark.scheduler.ExternalClusterManager
+new file mode 100644
+index 0000000..3c570ff
+--- /dev/null
++++ b/core/src/test/resources/META-INF/services/org.apache.spark.scheduler.ExternalClusterManager
+@@ -0,0 +1 @@
++org.apache.spark.scheduler.DummyExternalClusterManager
+\ No newline at end of file
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/ExternalClusterManagerSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/ExternalClusterManagerSuite.scala
+new file mode 100644
+index 0000000..0b2a629
+--- /dev/null
++++ b/core/src/test/scala/org/apache/spark/scheduler/ExternalClusterManagerSuite.scala
+@@ -0,0 +1,73 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.spark.scheduler
++
++import org.apache.spark.{LocalSparkContext, SparkConf, SparkContext, SparkFunSuite}
++import org.apache.spark.scheduler.SchedulingMode.SchedulingMode
++import org.apache.spark.storage.BlockManagerId
++
++class ExternalClusterManagerSuite extends SparkFunSuite with LocalSparkContext
++{
++  test("launch of backend and scheduler") {
++    val conf = new SparkConf().setMaster("myclusterManager").
++        setAppName("testcm").set("spark.driver.allowMultipleContexts", "true")
++    sc = new SparkContext(conf)
++    // check if the scheduler components are created
++    assert(sc.schedulerBackend.isInstanceOf[DummySchedulerBackend])
++    assert(sc.taskScheduler.isInstanceOf[DummyTaskScheduler])
++  }
++}
++
++private class DummyExternalClusterManager extends ExternalClusterManager {
++
++  def canCreate(masterURL: String): Boolean = masterURL == "myclusterManager"
++
++  def createTaskScheduler(sc: SparkContext,
++      masterURL: String): TaskScheduler = new DummyTaskScheduler
++
++  def createSchedulerBackend(sc: SparkContext,
++      masterURL: String,
++      scheduler: TaskScheduler): SchedulerBackend = new DummySchedulerBackend()
++
++  def initialize(scheduler: TaskScheduler, backend: SchedulerBackend): Unit = {}
++
++}
++
++private class DummySchedulerBackend extends SchedulerBackend {
++  def start() {}
++  def stop() {}
++  def reviveOffers() {}
++  def defaultParallelism(): Int = 1
++}
++
++private class DummyTaskScheduler extends TaskScheduler {
++  override def rootPool: Pool = null
++  override def schedulingMode: SchedulingMode = SchedulingMode.NONE
++  override def start(): Unit = {}
++  override def stop(): Unit = {}
++  override def submitTasks(taskSet: TaskSet): Unit = {}
++  override def cancelTasks(stageId: Int, interruptThread: Boolean): Unit = {}
++  override def setDAGScheduler(dagScheduler: DAGScheduler): Unit = {}
++  override def defaultParallelism(): Int = 2
++  override def executorLost(executorId: String, reason: ExecutorLossReason): Unit = {}
++  override def applicationAttemptId(): Option[String] = None
++  def executorHeartbeatReceived(
++      execId: String,
++      taskMetrics: Array[(Long, org.apache.spark.executor.TaskMetrics)],
++      blockManagerId: BlockManagerId): Boolean = true
++}
+-- 
+1.7.9.5
+

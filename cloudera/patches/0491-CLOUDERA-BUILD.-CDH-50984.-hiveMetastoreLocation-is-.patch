@@ -1,0 +1,37 @@
+From e15407ff933e0796888904d5987aeba5bbd49a51 Mon Sep 17 00:00:00 2001
+From: Mark Grover <mark@apache.org>
+Date: Mon, 6 Mar 2017 13:23:55 -0800
+Subject: [PATCH 491/517] CLOUDERA-BUILD. CDH-50984. hiveMetastoreLocation is
+ coming as a blank string in lineage output
+
+---
+ .../spark/lineage/ClouderaNavigatorListener.scala  |    6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+index 3732488..f850d55 100644
+--- a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
++++ b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+@@ -24,6 +24,10 @@ import java.nio.file.{Files, Paths}
+ import com.fasterxml.jackson.annotation.JsonInclude.Include
+ import com.fasterxml.jackson.databind.ObjectMapper
+ import com.fasterxml.jackson.module.scala.DefaultScalaModule
++
++import org.apache.hadoop.hive.conf.HiveConf
++import org.apache.hadoop.hive.conf.HiveConf.ConfVars._
++
+ import org.apache.spark.{Logging, SparkContext}
+ import org.apache.spark.scheduler.{SparkListener, SparkListenerApplicationEnd}
+ import org.apache.spark.sql.execution.QueryExecution
+@@ -98,7 +102,7 @@ private[lineage] class ClouderaNavigatorListener
+       queryDetails: QueryDetails,
+       qe: QueryExecution): QueryDetails = {
+     if (queryDetails.dataSourceType == DataSourceType.HIVE) {
+-      queryDetails.hiveMetastoreLocation = Some(qe.sqlContext.getConf("hive.metastore.uris"))
++      queryDetails.hiveMetastoreLocation = Option(new HiveConf().getVar(METASTOREURIS))
+     }
+     queryDetails
+   }
+-- 
+1.7.9.5
+

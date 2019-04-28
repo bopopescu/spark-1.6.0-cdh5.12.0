@@ -1,0 +1,37 @@
+From a0635c76391f9058804c9e20228ae47a8055e50f Mon Sep 17 00:00:00 2001
+From: Sean Owen <sowen@cloudera.com>
+Date: Tue, 3 May 2016 13:13:35 +0100
+Subject: [PATCH 344/517] [SPARK-14897][CORE] Upgrade Jetty to latest version
+ of 8
+
+Update Jetty 8.1 to the latest 2016/02 release, from a 2013/10 release, for security and bug fixes. This does not resolve the JIRA necessarily, as it's still worth considering an update to 9.3.
+
+Jenkins tests
+
+Author: Sean Owen <sowen@cloudera.com>
+
+Closes #12842 from srowen/SPARK-14897.
+
+(cherry picked from commit 57ac7c182465e1653e74a8ad6c826b2cf56a0ad8)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 2db19a3af4404b2fa8c48dec261ce073c4ef31f3)
+---
+ pom.xml |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pom.xml b/pom.xml
+index 208e915..91bd9c6 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -148,7 +148,7 @@
+     <parquet.version>${cdh.parquet.version}</parquet.version>
+     <hive.parquet.version>${parquet.version}</hive.parquet.version>
+     <jblas.version>1.2.4</jblas.version>
+-    <jetty.version>8.1.14.v20131031</jetty.version>
++    <jetty.version>8.1.19.v20160209</jetty.version>
+     <orbit.version>3.0.0.v201112011016</orbit.version>
+     <chill.version>0.5.0</chill.version>
+     <ivy.version>2.4.0</ivy.version>
+-- 
+1.7.9.5
+

@@ -1,0 +1,36 @@
+From b6ab3b2deb7d5d73638dc030aad7abe2740f26a2 Mon Sep 17 00:00:00 2001
+From: hushan <hushan@xiaomi.com>
+Date: Thu, 25 Feb 2016 16:57:41 -0800
+Subject: [PATCH 234/517] [SPARK-12009][YARN] Avoid to re-allocating yarn
+ container while driver want to stop all Executors
+
+Author: hushan <hushan@xiaomi.com>
+
+Closes #9992 from suyanNone/tricky.
+
+(cherry picked from commit 7a6ee8a8fe0fad78416ed7e1ac694959de5c5314)
+---
+ .../scheduler/cluster/YarnSchedulerBackend.scala   |    7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/YarnSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/YarnSchedulerBackend.scala
+index b7aab40..d1bd2d4 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/YarnSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/YarnSchedulerBackend.scala
+@@ -54,6 +54,13 @@ private[spark] abstract class YarnSchedulerBackend(
+   // Flag to specify whether this schedulerBackend should be reset.
+   private var shouldResetOnAmRegister = false
+ 
++  override def stop(): Unit = {
++    // SPARK-12009: To prevent Yarn allocator from requesting backup for the executors which
++    // was Stopped by SchedulerBackend.
++    requestTotalExecutors(0, 0, Map.empty)
++    super.stop()
++  }
++
+   /**
+    * Request executors from the ApplicationMaster by specifying the total number desired.
+    * This includes executors already pending or running.
+-- 
+1.7.9.5
+

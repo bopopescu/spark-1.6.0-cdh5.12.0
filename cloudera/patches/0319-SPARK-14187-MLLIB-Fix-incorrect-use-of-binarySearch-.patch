@@ -1,0 +1,57 @@
+From dc8d0071926a821779c787511bb85a0fb57c0d29 Mon Sep 17 00:00:00 2001
+From: Chenliang Xu <chexu@groupon.com>
+Date: Mon, 28 Mar 2016 08:33:37 -0700
+Subject: [PATCH 319/517] [SPARK-14187][MLLIB] Fix incorrect use of
+ binarySearch in SparseMatrix
+
+## What changes were proposed in this pull request?
+
+Fix incorrect use of binarySearch in SparseMatrix
+
+## How was this patch tested?
+
+Unit test added.
+
+Author: Chenliang Xu <chexu@groupon.com>
+
+Closes #11992 from luckyrandom/SPARK-14187.
+
+(cherry picked from commit c8388297c436691a236520d2396deaf556aedb0e)
+Signed-off-by: Xiangrui Meng <meng@databricks.com>
+(cherry picked from commit 546569ec119bae25b77bf4bc69febd088b08f327)
+---
+ .../org/apache/spark/mllib/linalg/Matrices.scala   |    2 +-
+ .../apache/spark/mllib/linalg/MatricesSuite.scala  |    4 ++++
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/linalg/Matrices.scala b/mllib/src/main/scala/org/apache/spark/mllib/linalg/Matrices.scala
+index 8879dcf..48e9778 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/linalg/Matrices.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/linalg/Matrices.scala
+@@ -584,7 +584,7 @@ class SparseMatrix @Since("1.3.0") (
+ 
+   private[mllib] def update(i: Int, j: Int, v: Double): Unit = {
+     val ind = index(i, j)
+-    if (ind == -1) {
++    if (ind < 0) {
+       throw new NoSuchElementException("The given row and column indices correspond to a zero " +
+         "value. Only non-zero elements in Sparse Matrices can be updated.")
+     } else {
+diff --git a/mllib/src/test/scala/org/apache/spark/mllib/linalg/MatricesSuite.scala b/mllib/src/test/scala/org/apache/spark/mllib/linalg/MatricesSuite.scala
+index 1833cf3..da04a44 100644
+--- a/mllib/src/test/scala/org/apache/spark/mllib/linalg/MatricesSuite.scala
++++ b/mllib/src/test/scala/org/apache/spark/mllib/linalg/MatricesSuite.scala
+@@ -150,6 +150,10 @@ class MatricesSuite extends SparkFunSuite {
+       sparseMat.update(0, 0, 10.0)
+     }
+ 
++    intercept[NoSuchElementException] {
++      sparseMat.update(2, 1, 10.0)
++    }
++
+     sparseMat.update(0, 1, 10.0)
+     assert(sparseMat(0, 1) === 10.0)
+     assert(sparseMat.values(2) === 10.0)
+-- 
+1.7.9.5
+

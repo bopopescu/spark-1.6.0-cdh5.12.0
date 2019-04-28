@@ -1,0 +1,473 @@
+From 8676566c34d96347a28355ad2399c07c805660a3 Mon Sep 17 00:00:00 2001
+From: Salil Surendran <salilsurendran@cloudera.com>
+Date: Mon, 27 Feb 2017 19:33:53 -0800
+Subject: [PATCH 488/517] CDH-50511. QueryExecutionListener api should be
+ consistent with upstream Spark
+
+This commit removes the extraParams parameter from the onSuccess and onFailure methods of the QueryExecutionListener. This map is now embedded in the QueryExecution object.
+---
+ .../spark/lineage/ClouderaNavigatorListener.scala  |   24 +++----
+ .../spark/sql/query/analysis/QueryAnalysis.scala   |    6 +-
+ .../query/analysis/FileQueryAnalysisSuite.scala    |   10 ++-
+ .../query/analysis/HiveQueryAnalysisSuite.scala    |   12 ++--
+ .../spark/sql/query/analysis/TestUtils.scala       |   21 ++----
+ .../org/apache/spark/sql/DataFrameWriter.scala     |    5 +-
+ .../spark/sql/execution/QueryExecution.scala       |    3 +
+ .../spark/sql/util/QueryExecutionListener.scala    |   28 ++------
+ .../spark/sql/util/DataFrameCallbackSuite.scala    |   72 +++++---------------
+ .../apache/spark/sql/hive/HiveDataFrameSuite.scala |   13 +---
+ 10 files changed, 57 insertions(+), 137 deletions(-)
+
+diff --git a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+index 1a49d25..3732488 100644
+--- a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
++++ b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+@@ -46,17 +46,11 @@ private[lineage] class ClouderaNavigatorListener
+   private val SPARK_LINEAGE_DIR_PROPERTY: String = "spark.lineage.log.dir"
+   private val DEFAULT_SPARK_LINEAGE_DIR: String = "/var/log/spark/lineage"
+ 
+-  override def onFailure(
+-      funcName: String,
+-      qe: QueryExecution,
+-      exception: Exception,
+-      extraParams: Map[String, String]): Unit = {}
+-
+-  override def onSuccess(
+-      funcName: String,
+-      qe: QueryExecution,
+-      durationNs: Long,
+-      extraParams: Map[String, String]): Unit = writeQueryMetadata(qe, durationNs, extraParams)
++  override def onFailure( funcName: String, qe: QueryExecution, exception: Exception): Unit = {}
++
++  override def onSuccess( funcName: String, qe: QueryExecution, durationNs: Long): Unit = {
++    writeQueryMetadata(qe, durationNs)
++  }
+ 
+   override def onApplicationEnd(applicationEnd: SparkListenerApplicationEnd): Unit = {
+     val sc = SparkContext.getOrCreate()
+@@ -67,10 +61,7 @@ private[lineage] class ClouderaNavigatorListener
+     }
+   }
+ 
+-  private def writeQueryMetadata(
+-      qe: QueryExecution,
+-      durationNs: Long,
+-      extraParams: Map[String, String]): Unit = {
++  private def writeQueryMetadata( qe: QueryExecution, durationNs: Long): Unit = {
+     val sc = SparkContext.getOrCreate()
+     if (checkLineageEnabled(sc)) {
+       val lineageElement = getNewLineageElement(sc)
+@@ -85,7 +76,7 @@ private[lineage] class ClouderaNavigatorListener
+         .foreach(lineageElement.addInput(_))
+ 
+       QueryAnalysis
+-        .getOutputMetaData(qe, extraParams)
++        .getOutputMetaData(qe)
+         .map(addHiveMetastoreLocation(_, qe))
+         .foreach(lineageElement.addOutput(_))
+ 
+@@ -125,6 +116,7 @@ private[lineage] class ClouderaNavigatorListener
+   /**
+    * Write the lineage element to the file, flush and close it so that navigator can see the data
+    * immediately
++   *
+    * @param lineageElement
+    * @param sc
+    */
+diff --git a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+index 6b00343..e484f7f 100644
+--- a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
++++ b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+@@ -45,11 +45,9 @@ import scala.collection.mutable.ListBuffer
+  */
+ object QueryAnalysis {
+ 
+-  def getOutputMetaData(
+-      qe: QueryExecution,
+-      extraParams: Map[String, String]): Option[QueryDetails] = {
++  def getOutputMetaData(qe: QueryExecution): Option[QueryDetails] = {
+     getTopLevelNamedExpressions(qe.optimizedPlan) match {
+-      case Some(s) => getSource(qe, extraParams, s.map(_.name))
++      case Some(s) => getSource(qe, qe.outputParams, s.map(_.name))
+       case None => None
+     }
+   }
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala
+index dd04ef6..f0c1a00 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/FileQueryAnalysisSuite.scala
+@@ -17,12 +17,10 @@
+ 
+ package org.apache.spark.sql.query.analysis
+ 
+-import org.apache.spark.SparkFunSuite
+ import org.apache.spark.sql.execution.datasources.parquet.ParquetTest
+ import org.apache.spark.sql.hive.test.TestHiveSingleton
+ import org.apache.spark.sql.query.analysis.DataSourceType.DataSourceType
+ import org.apache.spark.sql.query.analysis.TestUtils._
+-import org.apache.spark.sql.test.SharedSQLContext
+ 
+ /**
+  * Tests that reading and writing to the local and HDFS file systems produces the desired lineage.
+@@ -53,12 +51,12 @@ class FileQueryAnalysisSuite extends ParquetTest with ParquetHDFSTest with TestH
+     fileFunc((1 to 4).map(i => Customer(i, i.toString))) { parquetFile =>
+       val df = sqlContext.read.load(parquetFile).select("id", "name")
+       df.write.save(parquetFile + "_output")
+-      val (qe, extraParams) = TestQeListener.getAndClear()
++      val qe = TestQeListener.getAndClear()
+       val inputMetadata = QueryAnalysis.getInputMetadata(qe)
+       assert(inputMetadata.length === 2)
+       assertHDFSFieldExists(inputMetadata, Array(parquetFile), "id", dataSourceType)
+       assertHDFSFieldExists(inputMetadata, Array(parquetFile), "name", dataSourceType)
+-      val outputMetadata = QueryAnalysis.getOutputMetaData(df.queryExecution, extraParams)
++      val outputMetadata = QueryAnalysis.getOutputMetaData(df.queryExecution)
+       assert(outputMetadata.isDefined)
+       assert(outputMetadata.get.fields.forall(Seq("id", "name").contains(_)))
+       assert(outputMetadata.get.dataSourceType === dataSourceType)
+@@ -76,12 +74,12 @@ class FileQueryAnalysisSuite extends ParquetTest with ParquetHDFSTest with TestH
+           val parquetFiles = Array(parquetFile, parquetFile2, parquetFile3)
+           val df = sqlContext.read.load(parquetFiles: _*).select("id", "name")
+           df.write.save(parquetFile + "_output")
+-          val (qe, extraParams) = TestQeListener.getAndClear()
++          val qe = TestQeListener.getAndClear()
+           val inputMetadata = QueryAnalysis.getInputMetadata(qe)
+           assert(inputMetadata.length === 2)
+           assertHDFSFieldExists(inputMetadata, parquetFiles, "id", dataSourceType)
+           assertHDFSFieldExists(inputMetadata, parquetFiles, "name", dataSourceType)
+-          val outputMetadata = QueryAnalysis.getOutputMetaData(df.queryExecution, extraParams)
++          val outputMetadata = QueryAnalysis.getOutputMetaData(df.queryExecution)
+           assert(outputMetadata.isDefined)
+           assert(outputMetadata.get.fields.forall(Seq("id", "name").contains(_)))
+           assert(outputMetadata.get.dataSourceType === dataSourceType)
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+index 1e9f4bc..f3854ae 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+@@ -65,12 +65,12 @@ class HiveQueryAnalysisSuite extends SparkFunSuite with TestHiveSingleton with S
+           + " where c.salary > 170000 sort by sal)t1 limit 3")
+     df2 = df2.filter(df2("sal") > 100000)
+     df2.write.saveAsTable("mytable")
+-    val (qe, extraParams) = TestQeListener.getAndClear()
++    val qe = TestQeListener.getAndClear()
+     val inputMetadata = QueryAnalysis.getInputMetadata(qe)
+     assert(inputMetadata.length === 2)
+     assertHiveFieldExists(inputMetadata, "test_table_1", "salary")
+     assertHiveFieldExists(inputMetadata, "test_table_2", "code")
+-    val outputMetadata = QueryAnalysis.getOutputMetaData(qe, extraParams)
++    val outputMetadata = QueryAnalysis.getOutputMetaData(qe)
+     assert(outputMetadata.isDefined)
+     assert(outputMetadata.get.fields.forall(Seq("code", "sal").contains(_)))
+     assert(outputMetadata.get.dataSourceType === DataSourceType.HIVE)
+@@ -92,14 +92,14 @@ class HiveQueryAnalysisSuite extends SparkFunSuite with TestHiveSingleton with S
+     withTempDatabase { db =>
+       activateDatabase(db) {
+         df.write.saveAsTable("mytable")
+-        val (qe, extraParams) = TestQeListener.getAndClear()
++        val qe = TestQeListener.getAndClear()
+         val inputMetadata = QueryAnalysis.getInputMetadata(df.queryExecution)
+         assert(inputMetadata.length === 4)
+         assertHiveFieldExists(inputMetadata, "test_table_1", "code")
+         assertHiveFieldExists(inputMetadata, "test_table_1", "description")
+         assertHiveFieldExists(inputMetadata, "test_table_1", "salary")
+         assertHiveFieldExists(inputMetadata, "test_table_1", "total_emp")
+-        val outputMetadata = QueryAnalysis.getOutputMetaData(qe, extraParams)
++        val outputMetadata = QueryAnalysis.getOutputMetaData(qe)
+         assert(outputMetadata.isDefined)
+         assert(outputMetadata.get.fields.forall(Seq("code", "description", "salary",
+               "total_emp").contains(_)))
+@@ -116,12 +116,12 @@ class HiveQueryAnalysisSuite extends SparkFunSuite with TestHiveSingleton with S
+         .sql("select test_table_1.code, customers.name from test_table_1 join customers where " +
+           "test_table_1.code = customers.id and test_table_1.description = 'Tom Cruise'")
+         .write.saveAsTable("myowntable")
+-      val (qe, extraParams) = TestQeListener.getAndClear()
++      val qe = TestQeListener.getAndClear()
+       val inputMetadata = QueryAnalysis.getInputMetadata(qe)
+       assert(inputMetadata.length === 2)
+       assertHiveFieldExists(inputMetadata, "test_table_1", "code")
+       assertHDFSFieldExists(inputMetadata, Array(prq), "name", DataSourceType.HDFS)
+-      val outputMetadata = QueryAnalysis.getOutputMetaData(qe, extraParams)
++      val outputMetadata = QueryAnalysis.getOutputMetaData(qe)
+       assert(outputMetadata.isDefined)
+       assert(outputMetadata.get.source === "default.myowntable")
+       assert(outputMetadata.get.dataSourceType === DataSourceType.HIVE)
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
+index 068d3d4..37aa937 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
+@@ -23,28 +23,17 @@ import org.apache.spark.sql.util.QueryExecutionListener
+ 
+ object TestQeListener extends QueryExecutionListener {
+   private var qe: QueryExecution = _
+-  private var extraParams: Map[String, String] = _
+ 
+-  override def onSuccess(
+-      funcName: String,
+-      qe: QueryExecution,
+-      durationNs: Long,
+-      extraParams: Map[String, String]): Unit = {
++  override def onSuccess( funcName: String, qe: QueryExecution, durationNs: Long): Unit = {
+     this.qe = qe
+-    this.extraParams = extraParams
+   }
+ 
+-  override def onFailure(
+-      funcName: String,
+-      qe: QueryExecution,
+-      exception: Exception,
+-      extraParams: Map[String, String]): Unit = {}
++  override def onFailure( funcName: String, qe: QueryExecution, exception: Exception): Unit = {}
+ 
+-  def getAndClear(): (QueryExecution, Map[String, String]) = {
+-    val rValues = (qe, extraParams)
++  def getAndClear(): QueryExecution = {
++    val rQe = qe
+     qe = null
+-    extraParams = null
+-    rValues
++    rQe
+   }
+ }
+ 
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/DataFrameWriter.scala b/sql/core/src/main/scala/org/apache/spark/sql/DataFrameWriter.scala
+index 378d4f7..547481e 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/DataFrameWriter.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/DataFrameWriter.scala
+@@ -153,10 +153,11 @@ final class DataFrameWriter private[sql](df: DataFrame) {
+         val start = System.nanoTime()
+         action
+         val end = System.nanoTime()
+-        df.sqlContext.listenerManager.onSuccess(funcName, qe, end - start, options.toMap)
++        qe.outputParams = options.toMap
++        df.sqlContext.listenerManager.onSuccess(funcName, qe, end - start)
+       } catch {
+         case e: Exception =>
+-            df.sqlContext.listenerManager.onFailure(funcName, qe, e, options.toMap)
++            df.sqlContext.listenerManager.onFailure(funcName, qe, e)
+             throw e
+       }
+   }
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/QueryExecution.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/QueryExecution.scala
+index 107570f..2611263 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/QueryExecution.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/QueryExecution.scala
+@@ -17,6 +17,7 @@
+ 
+ package org.apache.spark.sql.execution
+ 
++import org.apache.spark.annotation.DeveloperApi
+ import org.apache.spark.rdd.RDD
+ import org.apache.spark.sql.SQLContext
+ import org.apache.spark.sql.catalyst.InternalRow
+@@ -54,6 +55,8 @@ class QueryExecution(val sqlContext: SQLContext, val logical: LogicalPlan) {
+   /** Internal version of the RDD. Avoids copies and has no schema */
+   lazy val toRdd: RDD[InternalRow] = executedPlan.execute()
+ 
++  private[sql] var outputParams: Map[String, String] = Map.empty
++
+   protected def stringOrError[A](f: => A): String =
+     try f.toString catch { case e: Throwable => e.toString }
+ 
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/util/QueryExecutionListener.scala b/sql/core/src/main/scala/org/apache/spark/sql/util/QueryExecutionListener.scala
+index d5c78dd..ac432e2 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/util/QueryExecutionListener.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/util/QueryExecutionListener.scala
+@@ -46,11 +46,7 @@ trait QueryExecutionListener {
+    * @param durationNs the execution time for this query in nanoseconds.
+    */
+   @DeveloperApi
+-  def onSuccess(
+-      funcName: String,
+-      qe: QueryExecution,
+-      durationNs: Long,
+-      extraParams: Map[String, String] = Map.empty): Unit
++  def onSuccess(funcName: String, qe: QueryExecution, durationNs: Long): Unit
+ 
+   /**
+    * A callback function that will be called when a query execution failed.
+@@ -62,11 +58,7 @@ trait QueryExecutionListener {
+    * @param exception the exception that failed this query.
+    */
+   @DeveloperApi
+-  def onFailure(
+-      funcName: String,
+-      qe: QueryExecution,
+-      exception: Exception,
+-      extraParams: Map[String, String] = Map.empty): Unit
++  def onFailure(funcName: String, qe: QueryExecution, exception: Exception): Unit
+ }
+ 
+ 
+@@ -102,26 +94,18 @@ class ExecutionListenerManager private[sql] () extends Logging {
+     listeners.clear()
+   }
+ 
+-  private[sql] def onSuccess(
+-      funcName: String,
+-      qe: QueryExecution,
+-      duration: Long,
+-      extraParams: Map[String, String] = Map()): Unit = {
++  private[sql] def onSuccess(funcName: String, qe: QueryExecution, duration: Long): Unit = {
+     readLock {
+       withErrorHandling { listener =>
+-          listener.onSuccess(funcName, qe, duration, extraParams)
++        listener.onSuccess(funcName, qe, duration)
+       }
+     }
+   }
+ 
+-  private[sql] def onFailure(
+-      funcName: String,
+-      qe: QueryExecution,
+-      exception: Exception,
+-      extraParams: Map[String, String] = Map()): Unit = {
++  private[sql] def onFailure(funcName: String, qe: QueryExecution, exception: Exception): Unit = {
+     readLock {
+       withErrorHandling { listener =>
+-          listener.onFailure(funcName, qe, exception, extraParams)
++        listener.onFailure(funcName, qe, exception)
+       }
+     }
+   }
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/util/DataFrameCallbackSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/util/DataFrameCallbackSuite.scala
+index d6f1705..e8231d9 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/util/DataFrameCallbackSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/util/DataFrameCallbackSuite.scala
+@@ -32,17 +32,9 @@ class DataFrameCallbackSuite extends QueryTest with SharedSQLContext {
+     val metrics = ArrayBuffer.empty[(String, QueryExecution, Long)]
+     val listener = new QueryExecutionListener {
+       // Only test successful case here, so no need to implement `onFailure`
+-      override def onFailure(
+-          funcName: String,
+-          qe: QueryExecution,
+-          exception: Exception,
+-          options: Map[String, String]): Unit = {}
+-
+-      override def onSuccess(
+-          funcName: String,
+-          qe: QueryExecution,
+-          duration: Long,
+-          options: Map[String, String]): Unit = {
++      override def onFailure( funcName: String, qe: QueryExecution, exception: Exception): Unit = {}
++
++      override def onSuccess( funcName: String, qe: QueryExecution, duration: Long): Unit = {
+         metrics += ((funcName, qe, duration))
+       }
+     }
+@@ -68,20 +60,12 @@ class DataFrameCallbackSuite extends QueryTest with SharedSQLContext {
+   test("execute callback functions when a DataFrame action failed") {
+     val metrics = ArrayBuffer.empty[(String, QueryExecution, Exception)]
+     val listener = new QueryExecutionListener {
+-      override def onFailure(
+-          funcName: String,
+-          qe: QueryExecution,
+-          exception: Exception,
+-          options: Map[String, String]): Unit = {
++      override def onFailure( funcName: String, qe: QueryExecution, exception: Exception): Unit = {
+         metrics += ((funcName, qe, exception))
+       }
+ 
+       // Only test failed case here, so no need to implement `onSuccess`
+-      override def onSuccess(
+-          funcName: String,
+-          qe: QueryExecution,
+-          duration: Long,
+-          options: Map[String, String]): Unit = {}
++      override def onSuccess( funcName: String, qe: QueryExecution, duration: Long): Unit = {}
+     }
+     sqlContext.listenerManager.register(listener)
+ 
+@@ -104,17 +88,9 @@ class DataFrameCallbackSuite extends QueryTest with SharedSQLContext {
+     val metrics = ArrayBuffer.empty[Long]
+     val listener = new QueryExecutionListener {
+       // Only test successful case here, so no need to implement `onFailure`
+-      override def onFailure(
+-          funcName: String,
+-          qe: QueryExecution,
+-          exception: Exception,
+-          options: Map[String, String]): Unit = {}
+-
+-      override def onSuccess(
+-          funcName: String,
+-          qe: QueryExecution,
+-          duration: Long,
+-          options: Map[String, String]): Unit = {
++      override def onFailure( funcName: String, qe: QueryExecution, exception: Exception): Unit = {}
++
++      override def onSuccess( funcName: String, qe: QueryExecution, duration: Long): Unit = {
+           metrics += qe.executedPlan.longMetric("numInputRows").value.value
+       }
+     }
+@@ -163,17 +139,9 @@ class DataFrameCallbackSuite extends QueryTest with SharedSQLContext {
+     val metrics = ArrayBuffer.empty[Long]
+     val listener = new QueryExecutionListener {
+       // Only test successful case here, so no need to implement `onFailure`
+-      override def onFailure(
+-          funcName: String,
+-          qe: QueryExecution,
+-          exception: Exception,
+-          options: Map[String, String]): Unit = {}
+-
+-      override def onSuccess(
+-          funcName: String,
+-          qe: QueryExecution,
+-          duration: Long,
+-          options: Map[String, String]): Unit = {
++      override def onFailure( funcName: String, qe: QueryExecution, exception: Exception): Unit = {}
++
++      override def onSuccess( funcName: String, qe: QueryExecution, duration: Long): Unit = {
+           metrics += qe.executedPlan.longMetric("dataSize").value.value
+           val bottomAgg = qe.executedPlan.children(0).children(0)
+           metrics += bottomAgg.longMetric("dataSize").value.value
+@@ -211,19 +179,13 @@ class DataFrameCallbackSuite extends QueryTest with SharedSQLContext {
+   class TestQueryExecutionListener(source: String) extends QueryExecutionListener {
+       var onWriteSuccessCalled = false
+     // Only test successful case here, so no need to implement `onFailure`
+-    override def onFailure(
+-        funcName: String,
+-        qe: QueryExecution,
+-        exception: Exception,
+-        options: Map[String, String]): Unit = {}
+-    override def onSuccess(
+-        funcName: String,
+-        qe: QueryExecution,
+-        durationNs: Long,
+-        options: Map[String, String]): Unit = {
+-      assert(options.contains("path"))
++    override def onFailure( funcName: String, qe: QueryExecution, exception: Exception): Unit = {}
++
++    override def onSuccess( funcName: String, qe: QueryExecution, durationNs: Long): Unit = {
++      val outputParams = qe.outputParams
++      assert(outputParams.contains("path"))
+       assertResult(Some(source)) {
+-        options.get("source")
++        outputParams.get("source")
+       }
+       assert(durationNs > 0)
+       onWriteSuccessCalled = true
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveDataFrameSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveDataFrameSuite.scala
+index 4f7e615..274ff8d 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveDataFrameSuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveDataFrameSuite.scala
+@@ -41,16 +41,9 @@ class HiveDataFrameSuite extends QueryTest with TestHiveSingleton with SQLTestUt
+     var onWriteSuccessCalled = false
+ 
+     hiveContext.listenerManager.register(new QueryExecutionListener {
+-      override def onFailure(
+-                              funcName: String,
+-                              qe: QueryExecution,
+-                              exception: Exception,
+-                              options: Map[String, String]): Unit = {}
+-      override def onSuccess(
+-                              funcName: String,
+-                              qe: QueryExecution,
+-                              durationNs: Long,
+-                              options: Map[String, String]): Unit = {
++      override def onFailure( funcName: String, qe: QueryExecution, exception: Exception): Unit = {}
++
++      override def onSuccess( funcName: String, qe: QueryExecution, durationNs: Long): Unit = {
+         assert(durationNs > 0)
+         assert(qe ne null)
+         onWriteSuccessCalled = true
+-- 
+1.7.9.5
+

@@ -1,0 +1,49 @@
+From 29ae58bfc180062f5afccece58c7953c0961af4a Mon Sep 17 00:00:00 2001
+From: Yuhao Yang <hhbyyh@gmail.com>
+Date: Wed, 6 Apr 2016 11:36:26 -0700
+Subject: [PATCH 328/517] [SPARK-14322][MLLIB] Use treeAggregate instead of
+ reduce in OnlineLDAOptimizer
+
+## What changes were proposed in this pull request?
+jira: https://issues.apache.org/jira/browse/SPARK-14322
+
+OnlineLDAOptimizer uses RDD.reduce in two places where it could use treeAggregate. This can cause scalability issues. This should be an easy fix.
+This is also a bug since it modifies the first argument to reduce, so we should use aggregate or treeAggregate.
+See this line: https://github.com/apache/spark/blob/f12f11e578169b47e3f8b18b299948c0670ba585/mllib/src/main/scala/org/apache/spark/mllib/clustering/LDAOptimizer.scala#L452
+and a few lines below it.
+
+## How was this patch tested?
+unit tests
+
+Author: Yuhao Yang <hhbyyh@gmail.com>
+
+Closes #12106 from hhbyyh/ldaTreeReduce.
+
+(cherry picked from commit 8cffcb60deb82d04a5c6e144ec9927f6f7addc8b)
+Signed-off-by: Joseph K. Bradley <joseph@databricks.com>
+(cherry picked from commit dca0d9a481afef1e85703ced7e8ad3955895f256)
+---
+ .../spark/mllib/clustering/LDAOptimizer.scala      |    5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/clustering/LDAOptimizer.scala b/mllib/src/main/scala/org/apache/spark/mllib/clustering/LDAOptimizer.scala
+index 4b06fad..6cc1a2a 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/clustering/LDAOptimizer.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/clustering/LDAOptimizer.scala
+@@ -449,10 +449,11 @@ final class OnlineLDAOptimizer extends LDAOptimizer {
+       }
+       Iterator((stat, gammaPart))
+     }
+-    val statsSum: BDM[Double] = stats.map(_._1).reduce(_ += _)
++    val statsSum: BDM[Double] = stats.map(_._1).treeAggregate(BDM.zeros[Double](k, vocabSize))(
++      _ += _, _ += _)
+     expElogbetaBc.unpersist()
+     val gammat: BDM[Double] = breeze.linalg.DenseMatrix.vertcat(
+-      stats.map(_._2).reduce(_ ++ _).map(_.toDenseMatrix): _*)
++      stats.map(_._2).flatMap(list => list).collect().map(_.toDenseMatrix): _*)
+     val batchResult = statsSum :* expElogbeta.t
+ 
+     // Note that this is an optimization to avoid batch.count
+-- 
+1.7.9.5
+

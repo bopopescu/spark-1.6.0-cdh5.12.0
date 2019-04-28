@@ -1,0 +1,150 @@
+From 60e812c22da88ac219666f588b6b760415596ad7 Mon Sep 17 00:00:00 2001
+From: Josh Rosen <joshrosen@databricks.com>
+Date: Tue, 10 May 2016 08:21:32 +0900
+Subject: [PATCH 347/517] [SPARK-15209] Fix display of job descriptions with
+ single quotes in web UI timeline
+
+## What changes were proposed in this pull request?
+
+This patch fixes an escaping bug in the Web UI's event timeline that caused Javascript errors when displaying timeline entries whose descriptions include single quotes.
+
+The original bug can be reproduced by running
+
+```scala
+sc.setJobDescription("double quote: \" ")
+sc.parallelize(1 to 10).count()
+
+sc.setJobDescription("single quote: ' ")
+sc.parallelize(1 to 10).count()
+```
+
+and then browsing to the driver UI. Previously, this resulted in an "Uncaught SyntaxError" because the single quote from the description was not escaped and ended up closing a Javascript string literal too early.
+
+The fix implemented here is to change the relevant Javascript to define its string literals using double-quotes. Our escaping logic already properly escapes double quotes in the description, so this is safe to do.
+
+## How was this patch tested?
+
+Tested manually in `spark-shell` using the following cases:
+
+```scala
+sc.setJobDescription("double quote: \" ")
+sc.parallelize(1 to 10).count()
+
+sc.setJobDescription("single quote: ' ")
+sc.parallelize(1 to 10).count()
+
+sc.setJobDescription("ampersand: &")
+sc.parallelize(1 to 10).count()
+
+sc.setJobDescription("newline: \n text after newline ")
+sc.parallelize(1 to 10).count()
+
+sc.setJobDescription("carriage return: \r text after return ")
+sc.parallelize(1 to 10).count()
+```
+
+/cc sarutak for review.
+
+Author: Josh Rosen <joshrosen@databricks.com>
+
+Closes #12995 from JoshRosen/SPARK-15209.
+
+(cherry picked from commit 3323d0f931ddd11f41abca11425b5e43a6538667)
+Signed-off-by: Kousuke Saruta <sarutak@oss.nttdata.co.jp>
+(cherry picked from commit 1678bff7f4d3bbcfd80df2ee6ea4213498b29fa3)
+---
+ .../org/apache/spark/ui/jobs/AllJobsPage.scala     |   11 +++++++----
+ .../scala/org/apache/spark/ui/jobs/JobPage.scala   |   11 +++++++----
+ 2 files changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/ui/jobs/AllJobsPage.scala b/core/src/main/scala/org/apache/spark/ui/jobs/AllJobsPage.scala
+index 47d6c36..08dc17d 100644
+--- a/core/src/main/scala/org/apache/spark/ui/jobs/AllJobsPage.scala
++++ b/core/src/main/scala/org/apache/spark/ui/jobs/AllJobsPage.scala
+@@ -23,6 +23,8 @@ import javax.servlet.http.HttpServletRequest
+ import scala.collection.mutable.{HashMap, ListBuffer}
+ import scala.xml._
+ 
++import org.apache.commons.lang3.StringEscapeUtils
++
+ import org.apache.spark.JobExecutionStatus
+ import org.apache.spark.ui.jobs.UIData.{ExecutorUIData, JobUIData}
+ import org.apache.spark.ui.{ToolTips, UIUtils, WebUIPage}
+@@ -82,9 +84,10 @@ private[ui] class AllJobsPage(parent: JobsTab) extends WebUIPage("") {
+         case JobExecutionStatus.UNKNOWN => "unknown"
+       }
+ 
+-      // The timeline library treats contents as HTML, so we have to escape them; for the
+-      // data-title attribute string we have to escape them twice since that's in a string.
++      // The timeline library treats contents as HTML, so we have to escape them. We need to add
++      // extra layers of escaping in order to embed this in a Javascript string literal.
+       val escapedDesc = Utility.escape(displayJobDescription)
++      val jsEscapedDesc = StringEscapeUtils.escapeEcmaScript(escapedDesc)
+       val jobEventJsonAsStr =
+         s"""
+            |{
+@@ -94,7 +97,7 @@ private[ui] class AllJobsPage(parent: JobsTab) extends WebUIPage("") {
+            |  'end': new Date(${completionTime}),
+            |  'content': '<div class="application-timeline-content"' +
+            |     'data-html="true" data-placement="top" data-toggle="tooltip"' +
+-           |     'data-title="${Utility.escape(escapedDesc)} (Job ${jobId})<br>' +
++           |     'data-title="${jsEscapedDesc} (Job ${jobId})<br>' +
+            |     'Status: ${status}<br>' +
+            |     'Submitted: ${UIUtils.formatDate(new Date(submissionTime))}' +
+            |     '${
+@@ -104,7 +107,7 @@ private[ui] class AllJobsPage(parent: JobsTab) extends WebUIPage("") {
+                        ""
+                      }
+                   }">' +
+-           |    '${escapedDesc} (Job ${jobId})</div>'
++           |    '${jsEscapedDesc} (Job ${jobId})</div>'
+            |}
+          """.stripMargin
+       jobEventJsonAsStr
+diff --git a/core/src/main/scala/org/apache/spark/ui/jobs/JobPage.scala b/core/src/main/scala/org/apache/spark/ui/jobs/JobPage.scala
+index 6a35f0e..8c6a668 100644
+--- a/core/src/main/scala/org/apache/spark/ui/jobs/JobPage.scala
++++ b/core/src/main/scala/org/apache/spark/ui/jobs/JobPage.scala
+@@ -24,6 +24,8 @@ import scala.xml.{NodeSeq, Node, Unparsed, Utility}
+ 
+ import javax.servlet.http.HttpServletRequest
+ 
++import org.apache.commons.lang3.StringEscapeUtils
++
+ import org.apache.spark.JobExecutionStatus
+ import org.apache.spark.scheduler.StageInfo
+ import org.apache.spark.ui.{ToolTips, UIUtils, WebUIPage}
+@@ -64,9 +66,10 @@ private[ui] class JobPage(parent: JobsTab) extends WebUIPage("job") {
+       val submissionTime = stage.submissionTime.get
+       val completionTime = stage.completionTime.getOrElse(System.currentTimeMillis())
+ 
+-      // The timeline library treats contents as HTML, so we have to escape them; for the
+-      // data-title attribute string we have to escape them twice since that's in a string.
++      // The timeline library treats contents as HTML, so we have to escape them. We need to add
++      // extra layers of escaping in order to embed this in a Javascript string literal.
+       val escapedName = Utility.escape(name)
++      val jsEscapedName = StringEscapeUtils.escapeEcmaScript(escapedName)
+       s"""
+          |{
+          |  'className': 'stage job-timeline-object ${status}',
+@@ -75,7 +78,7 @@ private[ui] class JobPage(parent: JobsTab) extends WebUIPage("job") {
+          |  'end': new Date(${completionTime}),
+          |  'content': '<div class="job-timeline-content" data-toggle="tooltip"' +
+          |   'data-placement="top" data-html="true"' +
+-         |   'data-title="${Utility.escape(escapedName)} (Stage ${stageId}.${attemptId})<br>' +
++         |   'data-title="${jsEscapedName} (Stage ${stageId}.${attemptId})<br>' +
+          |   'Status: ${status.toUpperCase}<br>' +
+          |   'Submitted: ${UIUtils.formatDate(new Date(submissionTime))}' +
+          |   '${
+@@ -85,7 +88,7 @@ private[ui] class JobPage(parent: JobsTab) extends WebUIPage("job") {
+                    ""
+                  }
+               }">' +
+-         |    '${escapedName} (Stage ${stageId}.${attemptId})</div>',
++         |    '${jsEscapedName} (Stage ${stageId}.${attemptId})</div>',
+          |}
+        """.stripMargin
+     }
+-- 
+1.7.9.5
+

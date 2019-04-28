@@ -1,0 +1,56 @@
+From da58f495806ccb60f15a1d0d947627037cafc3fa Mon Sep 17 00:00:00 2001
+From: Shixiong Zhu <shixiong@databricks.com>
+Date: Mon, 7 Mar 2016 20:56:08 -0800
+Subject: [PATCH 296/517] [SPARK-13711][CORE] Don't call
+ SparkUncaughtExceptionHandler in AppClient as it's
+ in driver
+
+## What changes were proposed in this pull request?
+
+AppClient runs in the driver side. It should not call `Utils.tryOrExit` as it will send exception to SparkUncaughtExceptionHandler and call `System.exit`. This PR just removed `Utils.tryOrExit`.
+
+## How was this patch tested?
+
+manual tests.
+
+Author: Shixiong Zhu <shixiong@databricks.com>
+
+Closes #11566 from zsxwing/SPARK-13711.
+
+(cherry picked from commit bace137f28cc08eb78e964fd1cfb2fd2c73688fa)
+---
+ .../org/apache/spark/deploy/client/AppClient.scala |   18 ++++++++----------
+ 1 file changed, 8 insertions(+), 10 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/deploy/client/AppClient.scala b/core/src/main/scala/org/apache/spark/deploy/client/AppClient.scala
+index 3129267..4a15dea 100644
+--- a/core/src/main/scala/org/apache/spark/deploy/client/AppClient.scala
++++ b/core/src/main/scala/org/apache/spark/deploy/client/AppClient.scala
+@@ -123,16 +123,14 @@ private[spark] class AppClient(
+       registerMasterFutures.set(tryRegisterAllMasters())
+       registrationRetryTimer.set(registrationRetryThread.scheduleAtFixedRate(new Runnable {
+         override def run(): Unit = {
+-          Utils.tryOrExit {
+-            if (registered.get) {
+-              registerMasterFutures.get.foreach(_.cancel(true))
+-              registerMasterThreadPool.shutdownNow()
+-            } else if (nthRetry >= REGISTRATION_RETRIES) {
+-              markDead("All masters are unresponsive! Giving up.")
+-            } else {
+-              registerMasterFutures.get.foreach(_.cancel(true))
+-              registerWithMaster(nthRetry + 1)
+-            }
++          if (registered.get) {
++            registerMasterFutures.get.foreach(_.cancel(true))
++            registerMasterThreadPool.shutdownNow()
++          } else if (nthRetry >= REGISTRATION_RETRIES) {
++            markDead("All masters are unresponsive! Giving up.")
++          } else {
++            registerMasterFutures.get.foreach(_.cancel(true))
++            registerWithMaster(nthRetry + 1)
+           }
+         }
+       }, REGISTRATION_TIMEOUT_SECONDS, REGISTRATION_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+-- 
+1.7.9.5
+

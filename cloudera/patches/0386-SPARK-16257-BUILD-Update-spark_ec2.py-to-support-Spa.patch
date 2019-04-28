@@ -1,0 +1,85 @@
+From 64c2cbe8d0a0d3f43df5119dc71c0cbd1226b8eb Mon Sep 17 00:00:00 2001
+From: Brian Uri <brian.uri@novetta.com>
+Date: Thu, 30 Jun 2016 07:52:28 +0100
+Subject: [PATCH 386/517] [SPARK-16257][BUILD] Update spark_ec2.py to support
+ Spark 1.6.2 and 1.6.3.
+
+## What changes were proposed in this pull request?
+
+- Adds 1.6.2 and 1.6.3 as supported Spark versions within the bundled spark-ec2 script.
+- Makes the default Spark version 1.6.3 to keep in sync with the upcoming release.
+- Does not touch the newer spark-ec2 scripts in the separate amplabs repository.
+
+## How was this patch tested?
+
+- Manual script execution:
+
+export AWS_SECRET_ACCESS_KEY=_snip_
+export AWS_ACCESS_KEY_ID=_snip_
+$SPARK_HOME/ec2/spark-ec2 \
+    --key-pair=_snip_ \
+    --identity-file=_snip_ \
+    --region=us-east-1 \
+    --vpc-id=_snip_ \
+    --slaves=1 \
+    --instance-type=t1.micro \
+    --spark-version=1.6.2 \
+    --hadoop-major-version=yarn \
+    launch test-cluster
+
+- Result: Successful creation of a 1.6.2-based Spark cluster.
+
+This contribution is my original work and I license the work to the project under the project's open source license.
+
+Author: Brian Uri <brian.uri@novetta.com>
+
+Closes #13947 from briuri/branch-1.6-bug-spark-16257.
+
+(cherry picked from commit ccc7fa357099e0f621cfc02448ba20d3f6fabc14)
+---
+ ec2/spark_ec2.py |    8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/ec2/spark_ec2.py b/ec2/spark_ec2.py
+index 76c09f0..b28b4c5 100755
+--- a/ec2/spark_ec2.py
++++ b/ec2/spark_ec2.py
+@@ -51,7 +51,7 @@ else:
+     raw_input = input
+     xrange = range
+ 
+-SPARK_EC2_VERSION = "1.6.1"
++SPARK_EC2_VERSION = "1.6.3"
+ SPARK_EC2_DIR = os.path.dirname(os.path.realpath(__file__))
+ 
+ VALID_SPARK_VERSIONS = set([
+@@ -77,6 +77,8 @@ VALID_SPARK_VERSIONS = set([
+     "1.5.2",
+     "1.6.0",
+     "1.6.1",
++    "1.6.2",
++    "1.6.3",
+ ])
+ 
+ SPARK_TACHYON_MAP = {
+@@ -96,6 +98,8 @@ SPARK_TACHYON_MAP = {
+     "1.5.2": "0.7.1",
+     "1.6.0": "0.8.2",
+     "1.6.1": "0.8.2",
++    "1.6.2": "0.8.2",
++    "1.6.3": "0.8.2",
+ }
+ 
+ DEFAULT_SPARK_VERSION = SPARK_EC2_VERSION
+@@ -103,7 +107,7 @@ DEFAULT_SPARK_GITHUB_REPO = "https://github.com/apache/spark"
+ 
+ # Default location to get the spark-ec2 scripts (and ami-list) from
+ DEFAULT_SPARK_EC2_GITHUB_REPO = "https://github.com/amplab/spark-ec2"
+-DEFAULT_SPARK_EC2_BRANCH = "branch-1.5"
++DEFAULT_SPARK_EC2_BRANCH = "branch-1.6"
+ 
+ 
+ def setup_external_libs(libs):
+-- 
+1.7.9.5
+

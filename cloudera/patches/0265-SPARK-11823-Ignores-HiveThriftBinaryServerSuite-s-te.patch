@@ -1,0 +1,39 @@
+From e945f1edec0d59664dba32af1e2414961551f9d8 Mon Sep 17 00:00:00 2001
+From: Yin Huai <yhuai@databricks.com>
+Date: Mon, 11 Jan 2016 19:59:15 -0800
+Subject: [PATCH 265/517] [SPARK-11823] Ignores HiveThriftBinaryServerSuite's
+ test jdbc cancel
+
+https://issues.apache.org/jira/browse/SPARK-11823
+
+This test often hangs and times out, leaving hanging processes. Let's ignore it for now and improve the test.
+
+Author: Yin Huai <yhuai@databricks.com>
+
+Closes #10715 from yhuai/SPARK-11823-ignore.
+
+(cherry picked from commit aaa2c3b628319178ca1f3f68966ff253c2de49cb)
+Signed-off-by: Josh Rosen <joshrosen@databricks.com>
+(cherry picked from commit a6c9c68d8855e3a8bfc92f26b3877b92367087a4)
+---
+ .../thriftserver/HiveThriftServer2Suites.scala     |    4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/sql/hive-thriftserver/src/test/scala/org/apache/spark/sql/hive/thriftserver/HiveThriftServer2Suites.scala b/sql/hive-thriftserver/src/test/scala/org/apache/spark/sql/hive/thriftserver/HiveThriftServer2Suites.scala
+index ebb2575..1bd6ec9 100644
+--- a/sql/hive-thriftserver/src/test/scala/org/apache/spark/sql/hive/thriftserver/HiveThriftServer2Suites.scala
++++ b/sql/hive-thriftserver/src/test/scala/org/apache/spark/sql/hive/thriftserver/HiveThriftServer2Suites.scala
+@@ -347,7 +347,9 @@ class HiveThriftBinaryServerSuite extends HiveThriftJdbcTest {
+     )
+   }
+ 
+-  test("test jdbc cancel") {
++  // This test often hangs and then times out, leaving the hanging processes.
++  // Let's ignore it and improve the test.
++  ignore("test jdbc cancel") {
+     withJdbcStatement { statement =>
+       val queries = Seq(
+         "DROP TABLE IF EXISTS test_map",
+-- 
+1.7.9.5
+

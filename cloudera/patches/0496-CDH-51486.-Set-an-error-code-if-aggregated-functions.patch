@@ -1,0 +1,343 @@
+From c24eefdb5b7304c96654978eacaf22b5eb4144b0 Mon Sep 17 00:00:00 2001
+From: Salil Surendran <salilsurendran@cloudera.com>
+Date: Mon, 13 Mar 2017 00:33:00 -0700
+Subject: [PATCH 496/517] CDH-51486. Set an error code if aggregated functions
+ are found in query
+
+If query plan contains aggregated functions such as avg, sum, max etc.  set an error code in lineage output
+
+Below code is an example where the aggregated function avg is used.
+
+var df2 = hc.sql("select * from sample_07")
+df2 = df2.groupBy("code","description").avg("salary")
+df2 = df2.withColumnRenamed(df2.columns(2),"avgsal")
+df2.write.saveAsTable("group_agg2")
+---
+ .../spark/lineage/ClouderaNavigatorListener.scala  |   10 +-
+ .../cloudera/spark/lineage/LineageElement.scala    |    3 +
+ .../spark/sql/query/analysis/QueryAnalysis.scala   |   12 +-
+ .../spark/lineage/LineageElementSuite.scala        |    3 +
+ .../query/analysis/HiveQueryAnalysisSuite.scala    |  176 +++++++++++++++++++-
+ .../spark/sql/query/analysis/TestUtils.scala       |    7 +
+ 6 files changed, 206 insertions(+), 5 deletions(-)
+
+diff --git a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+index 9ed0ec2..1e8d663 100644
+--- a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
++++ b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+@@ -83,7 +83,15 @@ private[lineage] class ClouderaNavigatorListener
+         .map(addHiveMetastoreLocation(_, qe))
+         .foreach(lineageElement.addOutput(_))
+ 
+-      if (lineageElement.inputs.size > 0 || lineageElement.outputs.size > 0) {
++      if (QueryAnalysis.hasAggregateFunction(qe.optimizedPlan)) {
++        lineageElement.errorCode = "01"
++        logInfo(s"Lineage Error code: ${lineageElement.errorCode}. Query Plan has group " +
++          s"by/aggregate clause and lineage for such queries isn 't supported :\n" +
++          s"${qe.optimizedPlan.toString}")
++      }
++
++      if (lineageElement.inputs.size > 0 || lineageElement.outputs.size > 0 ||
++          !lineageElement.errorCode.equals("00")) {
+         writeToLineageFile(lineageElement, sc)
+       }
+     }
+diff --git a/lineage/src/main/scala/com/cloudera/spark/lineage/LineageElement.scala b/lineage/src/main/scala/com/cloudera/spark/lineage/LineageElement.scala
+index 67a3f7f..b2ba4a2 100644
+--- a/lineage/src/main/scala/com/cloudera/spark/lineage/LineageElement.scala
++++ b/lineage/src/main/scala/com/cloudera/spark/lineage/LineageElement.scala
+@@ -33,6 +33,9 @@ private[lineage] class LineageElement {
+   var duration: Long = _
+   var user: String = _
+   var message: String = _
++  // Though it looks like an integer, navigator wants a 2 character string, including the
++  // leading '0'.
++  var errorCode: String = "00"
+   var inputs: ListBuffer[QueryDetails] = ListBuffer[QueryDetails]()
+   var outputs: ListBuffer[QueryDetails] = ListBuffer[QueryDetails]()
+   var ended: Boolean = _
+diff --git a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+index a7092be..0a57068 100644
+--- a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
++++ b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+@@ -18,7 +18,6 @@ package org.apache.spark.sql.query.analysis
+ 
+ import com.fasterxml.jackson.module.scala.JsonScalaEnumeration
+ import com.fasterxml.jackson.core.`type`.TypeReference
+-
+ import org.apache.hadoop.fs.Path
+ import org.apache.spark.SparkContext
+ import org.apache.spark.sql.catalyst.TableIdentifier
+@@ -145,6 +144,17 @@ object QueryAnalysis {
+     map.values
+   }
+ 
++  /**
++   * Returns back if the plan has an aggregate function
++   * @param plan - the plan to be analyzed
++   */
++  def hasAggregateFunction(plan: LogicalPlan): Boolean = {
++    plan match {
++      case agg: Aggregate => true
++      case lp: LogicalPlan => lp.children.exists(hasAggregateFunction)
++    }
++  }
++
+   private def getTopLevelAttributes(qe: QueryExecution): List[AttributeReference] = {
+     getTopLevelAttributes(qe.optimizedPlan).getOrElse(List.empty)
+   }
+diff --git a/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala b/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala
+index e90d1a8..d0bd151 100644
+--- a/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala
++++ b/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala
+@@ -39,6 +39,7 @@ class LineageElementSuite extends FunSuite {
+     val timestamp: Long = 1234567890
+     val duration: Long = 1000
+     val user: String = "Myself"
++    val errorCode: String = "01"
+     val inputTable: String = "MyTable"
+     val col1: String = "MyCol1"
+     val col2: String = "MyCol2"
+@@ -54,6 +55,7 @@ class LineageElementSuite extends FunSuite {
+     lineageElement.timestamp = timestamp
+     lineageElement.duration = duration
+     lineageElement.user = user
++    lineageElement.errorCode = errorCode
+     val qd1 = new QueryDetails(inputTable, List(col1, col2).to[ListBuffer],
+       DataSourceType.HIVE, DataSourceFormat.PARQUET)
+     qd1.hiveMetastoreLocation = Some(hiveMetaStoreLocation)
+@@ -77,6 +79,7 @@ class LineageElementSuite extends FunSuite {
+     assert(map.get("user") === user)
+     assert(map.get("duration") === duration)
+     assert(map.get("ended") === false)
++    assert(map.get("errorCode") ===  errorCode)
+ 
+     val inputList: List[Map[String, Any]] = map.get("inputs").asInstanceOf[List[Map[String, Any]]]
+     assert(inputList.size === 2)
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+index b99fec9..699dd09 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+@@ -49,6 +49,26 @@ class HiveQueryAnalysisSuite
+          |  STORED AS TEXTFILE LOCATION "${new File(testDataDirectory, s).getCanonicalPath}"
+       """.stripMargin.cmd))
+     testTables.foreach(registerTestTable)
++
++    TestUtils.createTable(hiveContext, "employee",
++      Map(
++        "id" -> "int",
++        "first_name" -> "varchar(64)",
++        "last_name" -> "varchar(64)",
++        "salary" -> "int",
++        "address" -> "string",
++        "city" -> "varchar(64)"
++      )
++    )
++
++    TestUtils.createTable(hiveContext, "department",
++      Map(
++        "dept_id" -> "int",
++        "name" -> "varchar(64)",
++        "location" -> "varchar(64)",
++        "budget" -> "int"
++      )
++    )
+   }
+ 
+   test("QueryAnalysis.getInputMetadata returns back InputMetadata for simple queries") {
+@@ -211,9 +231,8 @@ class HiveQueryAnalysisSuite
+ 
+   test("CDH-51296: Insert Queries should report lineage") {
+     // Create test table of different column names
+-    hiveContext.sql(
+-      s"""create table test_table_6 (code_new STRING, salary_new INT)
+-        | ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t'""".stripMargin)
++    TestUtils.createTable(
++      hiveContext, "test_table_6", Map("code_new" -> "STRING", "salary_new" -> "INT"))
+ 
+     // Assert select * of tables of similar schema works for DataFrameWriter.insert method
+     hiveContext.sql("select * from test_table_1").write.insertInto("test_table_2")
+@@ -296,6 +315,157 @@ class HiveQueryAnalysisSuite
+     assertComplexInsert()
+   }
+ 
++  test("CDH-51486 : Add an error code to lineage data to indicate an aggregated function is used") {
++    // Assert DESCRIBE, CREATE, DROP queries
++    val descDf = hiveContext.sql("DESCRIBE employee")
++    assert(!QueryAnalysis.hasAggregateFunction(descDf.queryExecution.optimizedPlan))
++    val createDf = hiveContext.sql("create table test1(code int, desc string)")
++    assert(!QueryAnalysis.hasAggregateFunction(createDf.queryExecution.optimizedPlan))
++    val dropDf = hiveContext.sql("drop table test1")
++    assert(!QueryAnalysis.hasAggregateFunction(dropDf.queryExecution.optimizedPlan))
++
++    // Assert a simple query isn't flagged as aggregate
++    val simpleDf = hiveContext.sql("select * from employee")
++    assert(!QueryAnalysis.hasAggregateFunction(simpleDf.queryExecution.optimizedPlan))
++
++    // Assert a joined query isn't flagged as aggregate
++    val joinedDf = hiveContext.sql(
++      "select * from employee join department on employee.city = department.location")
++    assert(!QueryAnalysis.hasAggregateFunction(joinedDf.queryExecution.optimizedPlan))
++
++    // Test aggregate clauses are flagged as aggregate
++    getAggregateClauses("salary", "id").foreach { agg =>
++      val df = hiveContext.sql(
++        s"select aggClause from (select $agg as aggClause from employee group by city, address)t1")
++      assert(QueryAnalysis.hasAggregateFunction(df.queryExecution.optimizedPlan))
++      // The below line fails because of CDH-51222
++      // assertHiveInputs(df.queryExecution, "employee", "salary")
++    }
++
++    // Test complex joins are flagged as aggregate
++    getAggregateClauses("budget", "dept_id").foreach { agg =>
++      val df = hiveContext.sql(
++        s"""select emp.first_name, emp.last_name, aggClause,location
++              from employee emp
++            join
++              (
++                select
++                  $agg as aggClause,
++                  location
++                from department
++                group by location, dept_id
++                sort by location
++                limit 15
++              ) dept
++                on emp.city = dept.location"""
++      )
++      // Assert aggregate function is detected
++      assert(QueryAnalysis.hasAggregateFunction(df.queryExecution.optimizedPlan))
++
++      // Assert that the input metadata has all columns other than the aggregated column
++      // After fixing CDH-51222 assert on that column too.
++      val inputMetadata = QueryAnalysis.getInputMetadata(df.queryExecution)
++      // When CDH-51222 is fixed change 3 to 4
++      assert(inputMetadata.length === 3)
++      assertHiveFieldExists(inputMetadata, "employee", "first_name")
++      assertHiveFieldExists(inputMetadata, "employee", "last_name")
++      assertHiveFieldExists(inputMetadata, "department", "location")
++      // The below line fails because of CDH-51222
++      // assertHiveFieldExists(inputMetadata, "department", "budget")
++    }
++
++    // Test ctas with complex joins are flagged as aggregate
++    getAggregateClauses("budget", "dept_id").foreach { agg =>
++      hiveContext.sql("drop table if exists new_employee")
++      val df = hiveContext.sql(
++        s"""create table new_employee as
++            select emp.first_name, emp.last_name, aggClause,location
++              from employee emp
++            join
++              (
++                select
++                  $agg as aggClause,
++                  location
++                from department
++                group by location, dept_id
++                sort by location
++                limit 15
++              ) dept
++                on emp.city = dept.location"""
++      )
++      // Assert aggregate function is detected
++      assert(QueryAnalysis.hasAggregateFunction(df.queryExecution.optimizedPlan))
++
++      // Assert that the input metadata has all columns other than the aggregated column
++      // After fixing CDH-51222 assert on that column too.
++      val inputMetadata = QueryAnalysis.getInputMetadata(df.queryExecution)
++      // When CDH-51222 is fixed change 3 to 4
++      assert(inputMetadata.length === 3)
++      assertHiveFieldExists(inputMetadata, "employee", "first_name")
++      assertHiveFieldExists(inputMetadata, "employee", "last_name")
++      assertHiveFieldExists(inputMetadata, "department", "location")
++      // The below line fails because of CDH-51222
++      // assertHiveFieldExists(inputMetadata, "department", "budget")
++      assertHiveOutputs(df.queryExecution, "new_employee",
++        Seq("first_name", "last_name", "aggClause", "location"))
++    }
++
++    // Test inserts with complex joins are flagged as aggregate
++    TestUtils.createTable(hiveContext, "emp_insert", Map("first_name" -> "String", "last_name" ->
++      "String", "agg_clause" -> "Float", "location" -> "String"))
++    Seq("sum(budget)", "max(budget)", "min(budget)", "avg(budget)", "count(*)")
++      .foreach { agg =>
++      val df = hiveContext.sql(
++        s"""insert into emp_insert
++            select emp.first_name as fname, emp.last_name as lname, aggClauseInsert,location
++              from employee emp
++            join
++              (
++                select
++                  $agg as aggClauseInsert,
++                  location
++                from department
++                group by location, dept_id
++                sort by location
++                limit 15
++              ) dept
++                on emp.city = dept.location"""
++      )
++      // Assert aggregate function is detected
++      assert(QueryAnalysis.hasAggregateFunction(df.queryExecution.optimizedPlan))
++
++      // Assert that the input metadata has all columns other than the aggregated column
++      // After fixing CDH-51222 assert on that column too.
++      val inputMetadata = QueryAnalysis.getInputMetadata(df.queryExecution)
++      // When CDH-51222 is fixed change 3 to 4
++      assert(inputMetadata.length === 3)
++      assertHiveFieldExists(inputMetadata, "employee", "first_name")
++      assertHiveFieldExists(inputMetadata, "employee", "last_name")
++      assertHiveFieldExists(inputMetadata, "department", "location")
++      // The below line fails because of CDH-51222
++      // assertHiveFieldExists(inputMetadata, "department", "budget")
++      assertHiveOutputs(df.queryExecution, "emp_insert",
++        Seq("first_name", "last_name", "agg_clause", "location"))
++    }
++  }
++  
++  private def getAggregateClauses(col1: String, col2: String): Seq[String] = {
++    Seq(
++      s"sum($col1)",
++      s"avg($col1)",
++      s"count(*)",
++      s"max($col1)",
++      s"min($col1)",
++      s"variance($col1)",
++      s"stddev_pop($col1)",
++      s"covar_pop($col1, $col2)",
++      s"corr($col1, $col2)",
++      s"percentile($col1,0)",
++      s"histogram_numeric($col1,5)",
++      s"collect_set($col1)"
++    )
++  }
++
+   private def assertComplexInsert() = {
+     val qe = TestQeListener.getAndClear()
+     val inputMetadata = QueryAnalysis.getInputMetadata(qe)
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
+index 22521de..25984c4 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/TestUtils.scala
+@@ -18,6 +18,7 @@
+ package org.apache.spark.sql.query.analysis
+ 
+ import org.apache.spark.sql.execution.QueryExecution
++import org.apache.spark.sql.hive.HiveContext
+ import org.apache.spark.sql.query.analysis.DataSourceType.DataSourceType
+ import org.apache.spark.sql.util.QueryExecutionListener
+ 
+@@ -61,4 +62,10 @@ object TestUtils {
+   def getScheme(dataSourceType: DataSourceType): String = {
+     if (dataSourceType == DataSourceType.LOCAL) "file:" else ""
+   }
++
++  def createTable(hiveContext: HiveContext, table: String, cols: Map[String, String]): Unit = {
++    val colString = cols.map(kv => s"${kv._1} ${kv._2}").mkString(",")
++    hiveContext.sql(s"""create table $table ($colString)
++      | ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t'""".stripMargin)
++  }
+ }
+-- 
+1.7.9.5
+

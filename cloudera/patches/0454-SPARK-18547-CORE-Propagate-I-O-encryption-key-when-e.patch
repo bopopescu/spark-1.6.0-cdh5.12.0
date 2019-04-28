@@ -1,0 +1,952 @@
+From 11182b694875431826aee56c52e33f196272a709 Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Mon, 28 Nov 2016 21:10:57 -0800
+Subject: [PATCH 454/517] [SPARK-18547][CORE] Propagate I/O encryption key
+ when executors register.
+
+This change modifies the method used to propagate encryption keys used during
+shuffle. Instead of relying on YARN's UserGroupInformation credential propagation,
+this change explicitly distributes the key using the messages exchanged between
+driver and executor during registration. When RPC encryption is enabled, this means
+key propagation is also secure.
+
+This allows shuffle encryption to work in non-YARN mode, which means that it's
+easier to write unit tests for areas of the code that are affected by the feature.
+
+The key is stored in the SecurityManager; because there are many instances of
+that class used in the code, the key is only guaranteed to exist in the instance
+managed by the SparkEnv. This path was chosen to avoid storing the key in the
+SparkConf, which would risk having the key being written to disk as part of the
+configuration (as, for example, is done when starting YARN applications).
+
+Tested by new and existing unit tests (which were moved from the YARN module to
+core), and by running apps with shuffle encryption enabled.
+
+Author: Marcelo Vanzin <vanzin@cloudera.com>
+
+Closes #15981 from vanzin/SPARK-18547.
+
+(cherry picked from commit 8b325b17ecdf013b7a6edcb7ee3773546bd914df)
+---
+ .../scala/org/apache/spark/SecurityManager.scala   |    7 +-
+ .../main/scala/org/apache/spark/SparkContext.scala |    4 -
+ .../src/main/scala/org/apache/spark/SparkEnv.scala |   31 +-
+ .../scala/org/apache/spark/crypto/CryptoConf.scala |   25 --
+ .../apache/spark/crypto/CryptoStreamUtils.scala    |   56 +++-
+ .../executor/CoarseGrainedExecutorBackend.scala    |    6 +-
+ .../spark/executor/MesosExecutorBackend.scala      |    2 +-
+ .../cluster/CoarseGrainedClusterMessage.scala      |    7 +-
+ .../cluster/CoarseGrainedSchedulerBackend.scala    |    6 +-
+ .../spark/shuffle/BlockStoreShuffleReader.scala    |   10 +-
+ .../spark/storage/DiskBlockObjectWriter.scala      |   13 +-
+ .../spark/util/collection/ExternalSorter.scala     |   12 +-
+ .../spark/crypto/ShuffleEncryptionSuite.scala      |  108 ++++---
+ .../org/apache/spark/deploy/yarn/Client.scala      |    5 -
+ .../deploy/yarn/YarnShuffleEncryptionSuite.scala   |  297 --------------------
+ 15 files changed, 155 insertions(+), 434 deletions(-)
+ delete mode 100644 yarn/src/test/scala/org/apache/spark/deploy/yarn/YarnShuffleEncryptionSuite.scala
+
+diff --git a/core/src/main/scala/org/apache/spark/SecurityManager.scala b/core/src/main/scala/org/apache/spark/SecurityManager.scala
+index c5aec05..b761191 100644
+--- a/core/src/main/scala/org/apache/spark/SecurityManager.scala
++++ b/core/src/main/scala/org/apache/spark/SecurityManager.scala
+@@ -189,7 +189,9 @@ import org.apache.spark.util.Utils
+  *  setting `spark.ssl.useNodeLocalConf` to `true`.
+  */
+ 
+-private[spark] class SecurityManager(sparkConf: SparkConf)
++private[spark] class SecurityManager(
++    sparkConf: SparkConf,
++    ioEncryptionKey: Option[Array[Byte]] = None)
+   extends Logging with SecretKeyHolder {
+ 
+   import SecurityManager._
+@@ -357,6 +359,8 @@ private[spark] class SecurityManager(sparkConf: SparkConf)
+     logInfo("Changing acls enabled to: " + aclsOn)
+   }
+ 
++  def getIOEncryptionKey(): Option[Array[Byte]] = ioEncryptionKey
++
+   /**
+    * Generates or looks up the secret key.
+    *
+@@ -487,4 +491,5 @@ private[spark] object SecurityManager {
+ 
+   // key used to store the spark secret in the Hadoop UGI
+   val SECRET_LOOKUP_KEY = "sparkCookie"
++
+ }
+diff --git a/core/src/main/scala/org/apache/spark/SparkContext.scala b/core/src/main/scala/org/apache/spark/SparkContext.scala
+index 904c39e..7d5af13 100644
+--- a/core/src/main/scala/org/apache/spark/SparkContext.scala
++++ b/core/src/main/scala/org/apache/spark/SparkContext.scala
+@@ -449,10 +449,6 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
+     _conf.set("spark.externalBlockStore.folderName", externalBlockStoreFolderName)
+ 
+     if (master == "yarn-client") System.setProperty("SPARK_YARN_MODE", "true")
+-    if (CryptoConf.isShuffleEncryptionEnabled(_conf) && !SparkHadoopUtil.get.isYarnMode()) {
+-      throw new SparkException("Shuffle file encryption is only supported in Yarn mode, please " +
+-        "disable it by setting spark.shuffle.encryption.enabled to false")
+-    }
+ 
+     // "_jobProgressListener" should be set up before creating SparkEnv because when creating
+     // "SparkEnv", some messages will be posted to "listenerBus" and we should not miss them.
+diff --git a/core/src/main/scala/org/apache/spark/SparkEnv.scala b/core/src/main/scala/org/apache/spark/SparkEnv.scala
+index 8613ae0..1a92638 100644
+--- a/core/src/main/scala/org/apache/spark/SparkEnv.scala
++++ b/core/src/main/scala/org/apache/spark/SparkEnv.scala
+@@ -29,6 +29,7 @@ import com.google.common.collect.MapMaker
+ import org.apache.spark.annotation.DeveloperApi
+ import org.apache.spark.api.python.PythonWorkerFactory
+ import org.apache.spark.broadcast.BroadcastManager
++import org.apache.spark.crypto.{CryptoConf, CryptoStreamUtils}
+ import org.apache.spark.metrics.MetricsSystem
+ import org.apache.spark.memory.{MemoryManager, StaticMemoryManager, UnifiedMemoryManager}
+ import org.apache.spark.network.BlockTransferService
+@@ -190,14 +191,19 @@ object SparkEnv extends Logging {
+     assert(conf.contains("spark.driver.port"), "spark.driver.port is not set on the driver!")
+     val hostname = conf.get("spark.driver.host")
+     val port = conf.get("spark.driver.port").toInt
++    val ioEncryptionKey = if (conf.getBoolean(CryptoConf.SPARK_SHUFFLE_ENCRYPTION_ENABLED, false)) {
++      Some(CryptoStreamUtils.createKey(conf))
++    } else {
++      None
++    }
+     create(
+       conf,
+       SparkContext.DRIVER_IDENTIFIER,
+       hostname,
+       port,
+-      isDriver = true,
+-      isLocal = isLocal,
+-      numUsableCores = numCores,
++      isLocal,
++      numCores,
++      ioEncryptionKey,
+       listenerBus = listenerBus,
+       mockOutputCommitCoordinator = mockOutputCommitCoordinator
+     )
+@@ -213,15 +219,16 @@ object SparkEnv extends Logging {
+       hostname: String,
+       port: Int,
+       numCores: Int,
++      ioEncryptionKey: Option[Array[Byte]],
+       isLocal: Boolean): SparkEnv = {
+     val env = create(
+       conf,
+       executorId,
+       hostname,
+       port,
+-      isDriver = false,
+-      isLocal = isLocal,
+-      numUsableCores = numCores
++      isLocal,
++      numCores,
++      ioEncryptionKey
+     )
+     SparkEnv.set(env)
+     env
+@@ -235,18 +242,26 @@ object SparkEnv extends Logging {
+       executorId: String,
+       hostname: String,
+       port: Int,
+-      isDriver: Boolean,
+       isLocal: Boolean,
+       numUsableCores: Int,
++      ioEncryptionKey: Option[Array[Byte]],
+       listenerBus: LiveListenerBus = null,
+       mockOutputCommitCoordinator: Option[OutputCommitCoordinator] = None): SparkEnv = {
+ 
++    val isDriver = executorId == SparkContext.DRIVER_IDENTIFIER
++
+     // Listener bus is only used on the driver
+     if (isDriver) {
+       assert(listenerBus != null, "Attempted to create driver SparkEnv with null listener bus!")
+     }
+ 
+-    val securityManager = new SecurityManager(conf)
++    val securityManager = new SecurityManager(conf, ioEncryptionKey)
++    ioEncryptionKey.foreach { _ =>
++      if (!securityManager.isSaslEncryptionEnabled()) {
++        logWarning("I/O encryption enabled without RPC encryption: keys will be visible on the " +
++          "wire.")
++      }
++    }
+ 
+     // Create the ActorSystem for Akka and get the port it binds to.
+     val actorSystemName = if (isDriver) driverActorSystemName else executorActorSystemName
+diff --git a/core/src/main/scala/org/apache/spark/crypto/CryptoConf.scala b/core/src/main/scala/org/apache/spark/crypto/CryptoConf.scala
+index 3a9dc22..b0101a6 100644
+--- a/core/src/main/scala/org/apache/spark/crypto/CryptoConf.scala
++++ b/core/src/main/scala/org/apache/spark/crypto/CryptoConf.scala
+@@ -16,11 +16,6 @@
+  */
+ package org.apache.spark.crypto
+ 
+-import javax.crypto.KeyGenerator
+-
+-import org.apache.hadoop.io.Text
+-import org.apache.hadoop.security.Credentials
+-
+ import org.apache.spark.SparkConf
+ 
+ /**
+@@ -30,7 +25,6 @@ private[spark] object CryptoConf {
+   /**
+    * Constants and variables for spark shuffle file encryption
+    */
+-  val SPARK_SHUFFLE_TOKEN = new Text("SPARK_SHUFFLE_TOKEN")
+   val SPARK_SHUFFLE_ENCRYPTION_ENABLED = "spark.shuffle.encryption.enabled"
+   val SPARK_SHUFFLE_ENCRYPTION_KEYGEN_ALGORITHM = "spark.shuffle.encryption.keygen.algorithm"
+   val DEFAULT_SPARK_SHUFFLE_ENCRYPTION_KEYGEN_ALGORITHM = "HmacSHA1"
+@@ -48,24 +42,5 @@ private[spark] object CryptoConf {
+     }
+   }
+ 
+-  /**
+-   * Setup the cryptographic key used by file shuffle encryption in credentials. The key is
+-   * generated using [[KeyGenerator]]. The algorithm and key length is specified by the
+-   * [[SparkConf]].
+-   */
+-  def initSparkShuffleCredentials(conf: SparkConf, credentials: Credentials): Unit = {
+-    if (credentials.getSecretKey(SPARK_SHUFFLE_TOKEN) == null) {
+-      val keyLen = conf.getInt(SPARK_SHUFFLE_ENCRYPTION_KEY_SIZE_BITS,
+-        DEFAULT_SPARK_SHUFFLE_ENCRYPTION_KEY_SIZE_BITS)
+-      require(keyLen == 128 || keyLen == 192 || keyLen == 256)
+-      val shuffleKeyGenAlgorithm = conf.get(SPARK_SHUFFLE_ENCRYPTION_KEYGEN_ALGORITHM,
+-        DEFAULT_SPARK_SHUFFLE_ENCRYPTION_KEYGEN_ALGORITHM)
+-      val keyGen = KeyGenerator.getInstance(shuffleKeyGenAlgorithm)
+-      keyGen.init(keyLen)
+-
+-      val shuffleKey = keyGen.generateKey()
+-      credentials.addSecretKey(SPARK_SHUFFLE_TOKEN, shuffleKey.getEncoded)
+-    }
+-  }
+ }
+ 
+diff --git a/core/src/main/scala/org/apache/spark/crypto/CryptoStreamUtils.scala b/core/src/main/scala/org/apache/spark/crypto/CryptoStreamUtils.scala
+index af706fd..0d6bce4 100644
+--- a/core/src/main/scala/org/apache/spark/crypto/CryptoStreamUtils.scala
++++ b/core/src/main/scala/org/apache/spark/crypto/CryptoStreamUtils.scala
+@@ -18,12 +18,13 @@ package org.apache.spark.crypto
+ 
+ import java.io.{InputStream, OutputStream}
+ import java.util.Properties
++import javax.crypto.KeyGenerator
+ 
+ import com.intel.chimera.cipher._
+ import com.intel.chimera.random._
+ import com.intel.chimera.stream._
+ 
+-import org.apache.spark.SparkConf
++import org.apache.spark.{SparkConf, SparkEnv}
+ import org.apache.spark.crypto.CryptoConf._
+ import org.apache.spark.deploy.SparkHadoopUtil
+ 
+@@ -39,14 +40,41 @@ private[spark] object CryptoStreamUtils {
+   val CHIMERA_CONF_PREFIX = "chimera.crypto."
+ 
+   /**
++   * Wrap an output stream for encryption if there's a key registered with the app's
++   * SecurityManager.
++   */
++  def wrapForEncryption(os: OutputStream, conf: SparkConf): OutputStream = {
++    Option(SparkEnv.get).flatMap(_.securityManager.getIOEncryptionKey()) match {
++      case Some(key) =>
++        createCryptoOutputStream(os, conf, key)
++      case None =>
++        os
++    }
++  }
++
++  /**
++   * Wrap an input stream for encryption if there's a key registered with the app's
++   * SecurityManager.
++   */
++  def wrapForEncryption(is: InputStream, conf: SparkConf): InputStream = {
++    Option(SparkEnv.get).flatMap(_.securityManager.getIOEncryptionKey()) match {
++      case Some(key) =>
++        createCryptoInputStream(is, conf, key)
++      case None =>
++        is
++    }
++  }
++
++  /**
+    * Helper method to wrap [[OutputStream]] with [[CryptoOutputStream]] for encryption.
+    */
+-  def createCryptoOutputStream(os: OutputStream, sparkConf: SparkConf): CryptoOutputStream = {
++  def createCryptoOutputStream(
++      os: OutputStream,
++      sparkConf: SparkConf,
++      key: Array[Byte]): CryptoOutputStream = {
+     val properties = toChimeraConf(sparkConf)
+     val iv: Array[Byte] = createInitializationVector(properties)
+     os.write(iv)
+-    val credentials = SparkHadoopUtil.get.getCurrentUserCredentials()
+-    val key = credentials.getSecretKey(SPARK_SHUFFLE_TOKEN)
+     val transformationType = getCipherTransformationType(sparkConf)
+     new CryptoOutputStream(transformationType, properties, os, key, iv)
+   }
+@@ -54,12 +82,13 @@ private[spark] object CryptoStreamUtils {
+   /**
+    * Helper method to wrap [[InputStream]] with [[CryptoInputStream]] for decryption.
+    */
+-  def createCryptoInputStream(is: InputStream, sparkConf: SparkConf): CryptoInputStream = {
++  def createCryptoInputStream(
++      is: InputStream,
++      sparkConf: SparkConf,
++      key: Array[Byte]): CryptoInputStream = {
+     val properties = toChimeraConf(sparkConf)
+     val iv = new Array[Byte](IV_LENGTH_IN_BYTES)
+     is.read(iv, 0, iv.length)
+-    val credentials = SparkHadoopUtil.get.getCurrentUserCredentials()
+-    val key = credentials.getSecretKey(SPARK_SHUFFLE_TOKEN)
+     val transformationType = getCipherTransformationType(sparkConf)
+     new CryptoInputStream(transformationType, properties, is, key, iv)
+   }
+@@ -78,6 +107,19 @@ private[spark] object CryptoStreamUtils {
+   }
+ 
+   /**
++   * Creates a new encryption key.
++   */
++  def createKey(conf: SparkConf): Array[Byte] = {
++    val keyLen = conf.getInt(SPARK_SHUFFLE_ENCRYPTION_KEY_SIZE_BITS,
++      DEFAULT_SPARK_SHUFFLE_ENCRYPTION_KEY_SIZE_BITS)
++    val keyGenAlgorithm = conf.get(SPARK_SHUFFLE_ENCRYPTION_KEYGEN_ALGORITHM,
++      DEFAULT_SPARK_SHUFFLE_ENCRYPTION_KEYGEN_ALGORITHM)
++    val keyGen = KeyGenerator.getInstance(keyGenAlgorithm)
++    keyGen.init(keyLen)
++    keyGen.generateKey().getEncoded()
++  }
++
++  /**
+    * Get the cipher transformation type
+    */
+   private[this] def getCipherTransformationType(sparkConf: SparkConf): CipherTransformation = {
+diff --git a/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala b/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
+index a45711f..65a5fef 100644
+--- a/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
++++ b/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
+@@ -179,8 +179,8 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
+         new SecurityManager(executorConf),
+         clientMode = true)
+       val driver = fetcher.setupEndpointRefByURI(driverUrl)
+-      val props = driver.askWithRetry[Seq[(String, String)]](RetrieveSparkProps) ++
+-        Seq[(String, String)](("spark.app.id", appId))
++      val cfg = driver.askWithRetry[SparkAppConfig](RetrieveSparkAppConfig)
++      val props = cfg.sparkProperties ++ Seq[(String, String)](("spark.app.id", appId))
+       fetcher.shutdown()
+ 
+       // Create SparkEnv using properties we fetched from the driver.
+@@ -200,7 +200,7 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
+       }
+ 
+       val env = SparkEnv.createExecutorEnv(
+-        driverConf, executorId, hostname, port, cores, isLocal = false)
++        driverConf, executorId, hostname, port, cores, cfg.ioEncryptionKey, isLocal = false)
+ 
+       // SparkEnv will set spark.executor.port if the rpc env is listening for incoming
+       // connections (e.g., if it's using akka). Otherwise, the executor is running in
+diff --git a/core/src/main/scala/org/apache/spark/executor/MesosExecutorBackend.scala b/core/src/main/scala/org/apache/spark/executor/MesosExecutorBackend.scala
+index d85465e..fe0b4a2 100644
+--- a/core/src/main/scala/org/apache/spark/executor/MesosExecutorBackend.scala
++++ b/core/src/main/scala/org/apache/spark/executor/MesosExecutorBackend.scala
+@@ -73,7 +73,7 @@ private[spark] class MesosExecutorBackend
+     val conf = new SparkConf(loadDefaults = true).setAll(properties)
+     val port = conf.getInt("spark.executor.port", 0)
+     val env = SparkEnv.createExecutorEnv(
+-      conf, executorId, slaveInfo.getHostname, port, cpusPerTask, isLocal = false)
++      conf, executorId, slaveInfo.getHostname, port, cpusPerTask, None, isLocal = false)
+ 
+     executor = new Executor(
+       executorId,
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedClusterMessage.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedClusterMessage.scala
+index 161cebc..938ba95 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedClusterMessage.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedClusterMessage.scala
+@@ -28,7 +28,12 @@ private[spark] sealed trait CoarseGrainedClusterMessage extends Serializable
+ 
+ private[spark] object CoarseGrainedClusterMessages {
+ 
+-  case object RetrieveSparkProps extends CoarseGrainedClusterMessage
++  case object RetrieveSparkAppConfig extends CoarseGrainedClusterMessage
++
++  case class SparkAppConfig(
++      sparkProperties: Seq[(String, String)],
++      ioEncryptionKey: Option[Array[Byte]])
++    extends CoarseGrainedClusterMessage
+ 
+   // Driver to executors
+   case class LaunchTask(data: SerializableBuffer) extends CoarseGrainedClusterMessage
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+index bf518ef..6cfa77d 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+@@ -191,8 +191,10 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+         removeExecutor(executorId, reason)
+         context.reply(true)
+ 
+-      case RetrieveSparkProps =>
+-        context.reply(sparkProperties)
++      case RetrieveSparkAppConfig =>
++        val reply = SparkAppConfig(sparkProperties,
++          SparkEnv.get.securityManager.getIOEncryptionKey())
++        context.reply(reply)
+     }
+ 
+     // Make fake resource offers on all executors
+diff --git a/core/src/main/scala/org/apache/spark/shuffle/BlockStoreShuffleReader.scala b/core/src/main/scala/org/apache/spark/shuffle/BlockStoreShuffleReader.scala
+index 50ad282..342ce91 100644
+--- a/core/src/main/scala/org/apache/spark/shuffle/BlockStoreShuffleReader.scala
++++ b/core/src/main/scala/org/apache/spark/shuffle/BlockStoreShuffleReader.scala
+@@ -18,7 +18,7 @@
+ package org.apache.spark.shuffle
+ 
+ import org.apache.spark._
+-import org.apache.spark.crypto._
++import org.apache.spark.crypto.CryptoStreamUtils
+ import org.apache.spark.deploy.SparkHadoopUtil
+ import org.apache.spark.serializer.Serializer
+ import org.apache.spark.storage.{BlockManager, ShuffleBlockFetcherIterator}
+@@ -56,12 +56,8 @@ private[spark] class BlockStoreShuffleReader[K, C](
+     // Wrap the streams for compression and encryption based on configuration
+     val wrappedStreams = blockFetcherItr.map { case (blockId, inputStream) =>
+       val sparkConf = blockManager.conf
+-      if (CryptoConf.isShuffleEncryptionEnabled(sparkConf)) {
+-        val cis = CryptoStreamUtils.createCryptoInputStream(inputStream, sparkConf)
+-        blockManager.wrapForCompression(blockId, cis)
+-      } else {
+-        blockManager.wrapForCompression(blockId, inputStream)
+-      }
++      blockManager.wrapForCompression(blockId,
++        CryptoStreamUtils.wrapForEncryption(inputStream, sparkConf))
+     }
+ 
+     // Create a key/value iterator for each stream
+diff --git a/core/src/main/scala/org/apache/spark/storage/DiskBlockObjectWriter.scala b/core/src/main/scala/org/apache/spark/storage/DiskBlockObjectWriter.scala
+index 1802650..0a5ecfd 100644
+--- a/core/src/main/scala/org/apache/spark/storage/DiskBlockObjectWriter.scala
++++ b/core/src/main/scala/org/apache/spark/storage/DiskBlockObjectWriter.scala
+@@ -21,7 +21,7 @@ import java.io.{BufferedOutputStream, FileOutputStream, File, OutputStream}
+ import java.nio.channels.FileChannel
+ 
+ import org.apache.spark.{Logging, SparkConf}
+-import org.apache.spark.crypto._
++import org.apache.spark.crypto.CryptoStreamUtils
+ import org.apache.spark.serializer.{SerializerInstance, SerializationStream}
+ import org.apache.spark.executor.ShuffleWriteMetrics
+ import org.apache.spark.util.Utils
+@@ -100,14 +100,11 @@ private[spark] class DiskBlockObjectWriter(
+       throw new IllegalStateException("Writer already closed. Cannot be reopened.")
+     }
+     fos = new FileOutputStream(file, true)
+-    if (CryptoConf.isShuffleEncryptionEnabled(sparkConf)) {
+-      val cos = CryptoStreamUtils.createCryptoOutputStream(fos, sparkConf)
+-      ts = new TimeTrackingOutputStream(writeMetrics, cos)
+-    } else {
+-      ts = new TimeTrackingOutputStream(writeMetrics, fos)
+-    }
+     channel = fos.getChannel()
+-    bs = compressStream(new BufferedOutputStream(ts, bufferSize))
++    ts = new TimeTrackingOutputStream(writeMetrics, fos)
++
++    val buffered = new BufferedOutputStream(ts, bufferSize)
++    bs = compressStream(CryptoStreamUtils.wrapForEncryption(buffered, sparkConf))
+     objOut = serializerInstance.serializeStream(bs)
+     initialized = true
+     this
+diff --git a/core/src/main/scala/org/apache/spark/util/collection/ExternalSorter.scala b/core/src/main/scala/org/apache/spark/util/collection/ExternalSorter.scala
+index f8b720d..7230aff 100644
+--- a/core/src/main/scala/org/apache/spark/util/collection/ExternalSorter.scala
++++ b/core/src/main/scala/org/apache/spark/util/collection/ExternalSorter.scala
+@@ -26,7 +26,7 @@ import scala.collection.mutable
+ import com.google.common.io.ByteStreams
+ 
+ import org.apache.spark._
+-import org.apache.spark.crypto.{CryptoConf, CryptoStreamUtils}
++import org.apache.spark.crypto.CryptoStreamUtils
+ import org.apache.spark.memory.TaskMemoryManager
+ import org.apache.spark.serializer._
+ import org.apache.spark.executor.ShuffleWriteMetrics
+@@ -535,13 +535,9 @@ private[spark] class ExternalSorter[K, V, C](
+         val bufferedStream = new BufferedInputStream(ByteStreams.limit(fileStream, end - start))
+ 
+         val sparkConf = SparkEnv.get.conf
+-        val maybeEncryptedStream = if (CryptoConf.isShuffleEncryptionEnabled(sparkConf)) {
+-          CryptoStreamUtils.createCryptoInputStream(bufferedStream, sparkConf)
+-        } else {
+-          bufferedStream
+-        }
+-        val compressedStream = blockManager.wrapForCompression(spill.blockId, maybeEncryptedStream)
+-        serInstance.deserializeStream(compressedStream)
++        val stream = blockManager.wrapForCompression(spill.blockId,
++          CryptoStreamUtils.wrapForEncryption(bufferedStream, sparkConf))
++        serInstance.deserializeStream(stream)
+       } else {
+         // No more batches left
+         cleanup()
+diff --git a/core/src/test/scala/org/apache/spark/crypto/ShuffleEncryptionSuite.scala b/core/src/test/scala/org/apache/spark/crypto/ShuffleEncryptionSuite.scala
+index 12b199d..6e0d992 100644
+--- a/core/src/test/scala/org/apache/spark/crypto/ShuffleEncryptionSuite.scala
++++ b/core/src/test/scala/org/apache/spark/crypto/ShuffleEncryptionSuite.scala
+@@ -16,18 +16,18 @@
+  */
+ package org.apache.spark.crypto
+ 
+-import java.security.PrivilegedExceptionAction
++import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
++import java.nio.charset.StandardCharsets.UTF_8
+ 
+-import org.apache.hadoop.security.{Credentials, UserGroupInformation}
++import com.google.common.io.ByteStreams
+ 
+-import org.apache.spark.{SparkConf, SparkFunSuite}
++import org.apache.spark.{SparkConf, SparkContext, SparkEnv, SparkFunSuite}
+ import org.apache.spark.crypto.CryptoConf._
+ import org.apache.spark.crypto.CryptoStreamUtils._
+ 
+ private[spark] class ShuffleEncryptionSuite extends SparkFunSuite {
+-  val ugi = UserGroupInformation.createUserForTesting("testuser", Array("testgroup"))
+ 
+-  test("Test Chimera configuration conversion") {
++  test("chimera configuration conversion") {
+     val sparkKey1 = s"${SPARK_CHIMERA_CONF_PREFIX}a.b.c"
+     val sparkVal1 = "val1"
+     val chimeraKey1 = s"${CHIMERA_CONF_PREFIX}a.b.c"
+@@ -45,65 +45,59 @@ private[spark] class ShuffleEncryptionSuite extends SparkFunSuite {
+     assert(!props.contains(chimeraKey2))
+   }
+ 
+-  test("Test shuffle encryption is disabled by default"){
+-    ugi.doAs(new PrivilegedExceptionAction[Unit]() {
+-      override def run(): Unit = {
+-        val credentials = UserGroupInformation.getCurrentUser.getCredentials()
+-        val conf = new SparkConf()
+-        initCredentials(conf, credentials)
+-        assert(credentials.getSecretKey(SPARK_SHUFFLE_TOKEN) === null)
+-      }
+-    })
++  test("shuffle encryption key length should be 128 by default") {
++    val conf = createConf()
++    var key = CryptoStreamUtils.createKey(conf)
++    val actual = key.length * (java.lang.Byte.SIZE)
++    assert(actual === 128)
+   }
+ 
+-  test("Test shuffle encryption key length should be 128 by default") {
+-    ugi.doAs(new PrivilegedExceptionAction[Unit]() {
+-      override def run(): Unit = {
+-        val credentials = UserGroupInformation.getCurrentUser.getCredentials()
+-        val conf = new SparkConf()
+-        conf.set(SPARK_SHUFFLE_ENCRYPTION_ENABLED, true.toString)
+-        initCredentials(conf, credentials)
+-        var key = credentials.getSecretKey(SPARK_SHUFFLE_TOKEN)
+-        assert(key !== null)
+-        val actual = key.length * (java.lang.Byte.SIZE)
+-        assert(actual === DEFAULT_SPARK_SHUFFLE_ENCRYPTION_KEY_SIZE_BITS)
+-      }
+-    })
+-  }
+-
+-  test("Test initial credentials with key length in 256") {
+-    ugi.doAs(new PrivilegedExceptionAction[Unit]() {
+-      override def run(): Unit = {
+-        val credentials = UserGroupInformation.getCurrentUser.getCredentials()
+-        val conf = new SparkConf()
+-        conf.set(SPARK_SHUFFLE_ENCRYPTION_KEY_SIZE_BITS, 256.toString)
+-        conf.set(SPARK_SHUFFLE_ENCRYPTION_ENABLED, true.toString)
+-        initCredentials(conf, credentials)
+-        var key = credentials.getSecretKey(SPARK_SHUFFLE_TOKEN)
+-        assert(key !== null)
+-        val actual = key.length * (java.lang.Byte.SIZE)
+-        assert(actual === 256)
+-      }
+-    })
++  test("create 256-bit key") {
++    val conf = createConf(SPARK_SHUFFLE_ENCRYPTION_KEY_SIZE_BITS -> "256")
++    var key = CryptoStreamUtils.createKey(conf)
++    val actual = key.length * (java.lang.Byte.SIZE)
++    assert(actual === 256)
+   }
+ 
+   test("Test initial credentials with invalid key length") {
+-    ugi.doAs(new PrivilegedExceptionAction[Unit]() {
+-      override def run(): Unit = {
+-        val credentials = UserGroupInformation.getCurrentUser.getCredentials()
+-        val conf = new SparkConf()
+-        conf.set(SPARK_SHUFFLE_ENCRYPTION_KEY_SIZE_BITS, 328.toString)
+-        conf.set(SPARK_SHUFFLE_ENCRYPTION_ENABLED, true.toString)
+-        val thrown = intercept[IllegalArgumentException] {
+-          initCredentials(conf, credentials)
+-        }
+-      }
+-    })
++    intercept[IllegalArgumentException] {
++      val conf = createConf(
++        SPARK_SHUFFLE_ENCRYPTION_KEYGEN_ALGORITHM -> "AES",
++        SPARK_SHUFFLE_ENCRYPTION_KEY_SIZE_BITS -> "328")
++      CryptoStreamUtils.createKey(conf)
++    }
+   }
+ 
+-  private[this] def initCredentials(conf: SparkConf, credentials: Credentials): Unit = {
+-    if (CryptoConf.isShuffleEncryptionEnabled(conf)) {
+-      CryptoConf.initSparkShuffleCredentials(conf, credentials)
++  test("encryption key propagation to executors") {
++    val conf = createConf().setAppName("Crypto Test").setMaster("local-cluster[1,1,1024]")
++    val sc = new SparkContext(conf)
++    try {
++      val content = "This is the content to be encrypted."
++      val encrypted = sc.parallelize(Seq(1))
++        .map { str =>
++          val bytes = new ByteArrayOutputStream()
++          val out = CryptoStreamUtils.wrapForEncryption(bytes, SparkEnv.get.conf)
++          out.write(content.getBytes(UTF_8))
++          out.close()
++          bytes.toByteArray()
++        }.collect()(0)
++
++      assert(content != encrypted)
++
++      val in = CryptoStreamUtils.wrapForEncryption(new ByteArrayInputStream(encrypted),
++        sc.conf)
++      val decrypted = new String(ByteStreams.toByteArray(in), UTF_8)
++      assert(content === decrypted)
++    } finally {
++      sc.stop()
+     }
+   }
++
++  private def createConf(extra: (String, String)*): SparkConf = {
++    val conf = new SparkConf()
++    extra.foreach { case (k, v) => conf.set(k, v) }
++    conf.set(SPARK_SHUFFLE_ENCRYPTION_ENABLED, true.toString)
++    conf
++  }
++
+ }
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
+index e87c51e..e0ab365 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
+@@ -878,12 +878,7 @@ private[spark] class Client(
+     val securityManager = new SecurityManager(sparkConf)
+     amContainer.setApplicationACLs(
+       YarnSparkHadoopUtil.getApplicationAclsForYarn(securityManager).asJava)
+-
+-    if (CryptoConf.isShuffleEncryptionEnabled(sparkConf)) {
+-      CryptoConf.initSparkShuffleCredentials(sparkConf, credentials)
+-    }
+     setupSecurityToken(amContainer)
+-
+     amContainer
+   }
+ 
+diff --git a/yarn/src/test/scala/org/apache/spark/deploy/yarn/YarnShuffleEncryptionSuite.scala b/yarn/src/test/scala/org/apache/spark/deploy/yarn/YarnShuffleEncryptionSuite.scala
+deleted file mode 100644
+index 4053984..0000000
+--- a/yarn/src/test/scala/org/apache/spark/deploy/yarn/YarnShuffleEncryptionSuite.scala
++++ /dev/null
+@@ -1,297 +0,0 @@
+-/*
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.
+- * The ASF licenses this file to You under the Apache License, Version 2.0
+- * (the "License"); you may not use this file except in compliance with
+- * the License.  You may obtain a copy of the License at
+- *
+- *    http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package org.apache.spark.deploy.yarn
+-
+-import java.io._
+-import java.nio.ByteBuffer
+-import java.security.PrivilegedExceptionAction
+-import java.util.{ArrayList => JArrayList, LinkedList => JLinkedList, UUID}
+-
+-import scala.runtime.AbstractFunction1
+-
+-import com.google.common.collect.HashMultiset
+-import com.google.common.io.ByteStreams
+-import org.apache.hadoop.security.{Credentials, UserGroupInformation}
+-import org.junit.Assert.assertEquals
+-import org.mockito.Mock
+-import org.mockito.MockitoAnnotations
+-import org.mockito.invocation.InvocationOnMock
+-import org.mockito.stubbing.Answer
+-import org.mockito.Answers.RETURNS_SMART_NULLS
+-import org.mockito.Matchers.{eq => meq, _}
+-import org.mockito.Mockito._
+-import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach, Matchers}
+-
+-import org.apache.spark._
+-import org.apache.spark.crypto.CryptoConf
+-import org.apache.spark.crypto.CryptoConf._
+-import org.apache.spark.deploy.SparkHadoopUtil
+-import org.apache.spark.executor.{ShuffleWriteMetrics, TaskMetrics}
+-import org.apache.spark.io.CompressionCodec
+-import org.apache.spark.memory.{TaskMemoryManager, TestMemoryManager}
+-import org.apache.spark.network.buffer.NioManagedBuffer
+-import org.apache.spark.serializer.{KryoSerializer, SerializerInstance}
+-import org.apache.spark.shuffle.{BaseShuffleHandle, BlockStoreShuffleReader,
+-  IndexShuffleBlockResolver, RecordingManagedBuffer}
+-import org.apache.spark.shuffle.sort.{SerializedShuffleHandle, UnsafeShuffleWriter}
+-import org.apache.spark.storage._
+-import org.apache.spark.util.Utils
+-
+-private[spark] class YarnShuffleEncryptionSuite extends SparkFunSuite with Matchers with
+-                                                        BeforeAndAfterAll with BeforeAndAfterEach {
+-
+-  @Mock(answer = RETURNS_SMART_NULLS) private[this] var blockManager: BlockManager = _
+-  @Mock(answer = RETURNS_SMART_NULLS) private[this] var blockResolver: IndexShuffleBlockResolver = _
+-  @Mock(answer = RETURNS_SMART_NULLS) private[this] var diskBlockManager: DiskBlockManager = _
+-  @Mock(answer = RETURNS_SMART_NULLS) private[this] var taskContext: TaskContext = _
+-  @Mock(
+-    answer = RETURNS_SMART_NULLS) private[this] var shuffleDep: ShuffleDependency[Int, Int, Int] = _
+-
+-  private[this] val NUM_MAPS = 1
+-  private[this] val NUM_PARTITITONS = 4
+-  private[this] val REDUCE_ID = 1
+-  private[this] val SHUFFLE_ID = 0
+-  private[this] val conf = new SparkConf()
+-  private[this] val memoryManager = new TestMemoryManager(conf)
+-  private[this] val hashPartitioner = new HashPartitioner(NUM_PARTITITONS)
+-  private[this] val serializer = new KryoSerializer(conf)
+-  private[this] val spillFilesCreated = new JLinkedList[File]()
+-  private[this] val taskMemoryManager = new TaskMemoryManager(memoryManager, 0)
+-  private[this] val taskMetrics = new TaskMetrics()
+-
+-  private[this] var tempDir: File = _
+-  private[this] var mergedOutputFile: File = _
+-  private[this] var partitionSizesInMergedFile: Array[Long] = _
+-  private[this] val ugi = UserGroupInformation.createUserForTesting("testuser", Array("testgroup"))
+-
+-  // Create a mocked shuffle handle to pass into HashShuffleReader.
+-  private[this] val shuffleHandle = {
+-    val dependency = mock(classOf[ShuffleDependency[Int, Int, Int]])
+-    when(dependency.serializer).thenReturn(Some(serializer))
+-    when(dependency.aggregator).thenReturn(None)
+-    when(dependency.keyOrdering).thenReturn(None)
+-    new BaseShuffleHandle(SHUFFLE_ID, NUM_MAPS, dependency)
+-  }
+-
+-  // Make a mocked MapOutputTracker for the shuffle reader to use to determine what
+-  // shuffle data to read.
+-  private[this] val mapOutputTracker = mock(classOf[MapOutputTracker])
+-  private[this] val sparkEnv = mock(classOf[SparkEnv])
+-
+-  override def beforeAll(): Unit = {
+-    when(sparkEnv.conf).thenReturn(conf)
+-    SparkEnv.set(sparkEnv)
+-
+-    System.setProperty("SPARK_YARN_MODE", "true")
+-    ugi.doAs(new PrivilegedExceptionAction[Unit]() {
+-      override def run(): Unit = {
+-        conf.set(SPARK_SHUFFLE_ENCRYPTION_ENABLED, true.toString)
+-        val creds = new Credentials()
+-        CryptoConf.initSparkShuffleCredentials(conf, creds)
+-        SparkHadoopUtil.get.addCurrentUserCredentials(creds)
+-      }
+-    })
+-  }
+-
+-  override def afterAll(): Unit = {
+-    SparkEnv.set(null)
+-  }
+-
+-  override def beforeEach(): Unit = {
+-    super.beforeEach()
+-    MockitoAnnotations.initMocks(this)
+-    tempDir = Utils.createTempDir()
+-    mergedOutputFile = File.createTempFile("mergedoutput", "", tempDir)
+-  }
+-
+-  override def afterEach(): Unit = {
+-    super.afterEach()
+-    conf.set("spark.shuffle.compress", false.toString)
+-    Utils.deleteRecursively(tempDir)
+-    val leakedMemory = taskMemoryManager.cleanUpAllAllocatedMemory()
+-    if (leakedMemory != 0) {
+-      fail("Test leaked " + leakedMemory + " bytes of managed memory")
+-    }
+-  }
+-
+-  test("yarn shuffle encryption read and write") {
+-    ugi.doAs(new PrivilegedExceptionAction[Unit] {
+-      override def run(): Unit = {
+-        testYarnShuffleEncryptionWriteRead()
+-      }
+-    })
+-  }
+-
+-  test("yarn shuffle encryption read and write with shuffle compression enabled") {
+-    ugi.doAs(new PrivilegedExceptionAction[Unit] {
+-      override def run(): Unit = {
+-        conf.set("spark.shuffle.compress", true.toString)
+-        testYarnShuffleEncryptionWriteRead()
+-      }
+-    })
+-  }
+-
+-  private[this] def testYarnShuffleEncryptionWriteRead(): Unit = {
+-    val dataToWrite = new JArrayList[Product2[Int, Int]]()
+-    for (i <- 0 to NUM_PARTITITONS) {
+-      dataToWrite.add((i, i))
+-    }
+-    val shuffleWriter = createWriter()
+-    shuffleWriter.write(dataToWrite.iterator())
+-    shuffleWriter.stop(true)
+-
+-    val shuffleReader = createReader()
+-    val iter = shuffleReader.read()
+-    val recordsList = new JArrayList[(Int, Int)]()
+-    while (iter.hasNext) {
+-      recordsList.add(iter.next().asInstanceOf[(Int, Int)])
+-    }
+-
+-    assertEquals(HashMultiset.create(dataToWrite), HashMultiset.create(recordsList))
+-  }
+-
+-  private[this] def createWriter(): UnsafeShuffleWriter[Int, Int] = {
+-    initialMocksForWriter()
+-    new UnsafeShuffleWriter[Int, Int](
+-      blockManager,
+-      blockResolver,
+-      taskMemoryManager,
+-      new SerializedShuffleHandle[Int, Int](SHUFFLE_ID, NUM_MAPS, shuffleDep),
+-      0, // map id
+-      taskContext,
+-      conf
+-    )
+-  }
+-
+-  private[this] def createReader(): BlockStoreShuffleReader[Int, Int] = {
+-    initialMocksForReader()
+-    new BlockStoreShuffleReader(
+-      shuffleHandle,
+-      REDUCE_ID,
+-      REDUCE_ID + 1,
+-      TaskContext.empty(),
+-      blockManager,
+-      mapOutputTracker)
+-  }
+-
+-  private[this] def initialMocksForWriter(): Unit = {
+-    when(blockManager.diskBlockManager).thenReturn(diskBlockManager)
+-    when(blockManager.conf).thenReturn(conf)
+-    when(blockManager.getDiskWriter(any(classOf[BlockId]), any(classOf[File]),
+-      any(classOf[SerializerInstance]), anyInt, any(classOf[ShuffleWriteMetrics]))).thenAnswer(
+-          new Answer[DiskBlockObjectWriter]() {
+-            override def answer(invocationOnMock: InvocationOnMock): DiskBlockObjectWriter = {
+-              val args = invocationOnMock.getArguments
+-              new DiskBlockObjectWriter(args(1).asInstanceOf[File],
+-                args(2).asInstanceOf[SerializerInstance],
+-                args(3).asInstanceOf[Integer], new CompressStream(), false,
+-                args(4).asInstanceOf[ShuffleWriteMetrics], args(0).asInstanceOf[BlockId],
+-                conf)
+-            }
+-          })
+-
+-    when(blockResolver.getDataFile(anyInt(), anyInt())).thenReturn(mergedOutputFile)
+-    doAnswer(new Answer[Unit]() {
+-      override def answer(invocationOnMock: InvocationOnMock): Unit = {
+-        partitionSizesInMergedFile = invocationOnMock.getArguments()(2).asInstanceOf[Array[Long]]
+-        val tmp = invocationOnMock.getArguments()(3)
+-        mergedOutputFile.delete()
+-        tmp.asInstanceOf[File].renameTo(mergedOutputFile)
+-      }
+-    }).when(blockResolver).writeIndexFileAndCommit(anyInt(), anyInt(), any(classOf[Array[Long]]),
+-         any(classOf[File]))
+-
+-    when(diskBlockManager.createTempShuffleBlock()).thenAnswer(
+-      new Answer[(TempShuffleBlockId, File)]() {
+-        override def answer(invocationOnMock: InvocationOnMock): (TempShuffleBlockId, File) = {
+-          val blockId = new TempShuffleBlockId(UUID.randomUUID())
+-          val file = File.createTempFile("spillFile", ".spill", tempDir)
+-          spillFilesCreated.add(file)
+-          (blockId, file)
+-        }
+-      })
+-
+-    when(taskContext.taskMetrics()).thenReturn(taskMetrics)
+-    when(shuffleDep.serializer).thenReturn(Option.apply(serializer))
+-    when(shuffleDep.partitioner).thenReturn(hashPartitioner)
+-    when(taskContext.taskMetrics()).thenReturn(taskMetrics)
+-    when(taskContext.internalMetricsToAccumulators).thenReturn(null)
+-  }
+-
+-  private[this] def initialMocksForReader(): Unit = {
+-    // Create a return function to use for the mocked wrapForCompression method to initial a
+-    // compressed input stream if spark.shuffle.compress is enabled
+-    val compressionFunction = new Answer[InputStream] {
+-      override def answer(invocation: InvocationOnMock): InputStream = {
+-        if (conf.getBoolean("spark.shuffle.compress", false)) {
+-          CompressionCodec.createCodec(conf).compressedInputStream(
+-            invocation.getArguments()(1).asInstanceOf[InputStream])
+-        } else {
+-          invocation.getArguments()(1).asInstanceOf[InputStream]
+-        }
+-      }
+-    }
+-
+-    // Setup the mocked BlockManager to return RecordingManagedBuffers.
+-    val localBlockManagerId = BlockManagerId("test-client", "test-client", 1)
+-    when(blockManager.blockManagerId).thenReturn(localBlockManagerId)
+-
+-    var startOffset = 0L
+-    for (mapId <- 0 until NUM_PARTITITONS) {
+-      val bytes = new Array[Byte](partitionSizesInMergedFile(mapId).toInt)
+-      val in = new FileInputStream(mergedOutputFile)
+-      try {
+-        ByteStreams.skipFully(in, startOffset)
+-        in.read(bytes)
+-      } finally {
+-        in.close()
+-      }
+-      // Create a ManagedBuffer with the shuffle data.
+-      val nioBuffer = new NioManagedBuffer(ByteBuffer.wrap(bytes))
+-      val managedBuffer = new RecordingManagedBuffer(nioBuffer)
+-      startOffset += partitionSizesInMergedFile(mapId)
+-      // Setup the blockManager mock so the buffer gets returned when the shuffle code tries to
+-      // fetch shuffle data.
+-      val shuffleBlockId = ShuffleBlockId(SHUFFLE_ID, mapId, REDUCE_ID)
+-      when(blockManager.getBlockData(shuffleBlockId)).thenReturn(managedBuffer)
+-      when(blockManager.wrapForCompression(meq(shuffleBlockId), isA(classOf[InputStream])))
+-        .thenAnswer(compressionFunction)
+-    }
+-
+-    // Test a scenario where all data is local, to avoid creating a bunch of additional mocks
+-    // for the code to read data over the network.
+-    val shuffleBlockIdsAndSizes = (0 until NUM_PARTITITONS).map { mapId =>
+-      val shuffleBlockId = ShuffleBlockId(SHUFFLE_ID, mapId, REDUCE_ID)
+-      (shuffleBlockId, partitionSizesInMergedFile(mapId))
+-    }
+-    val mapSizesByExecutorId = Seq((localBlockManagerId, shuffleBlockIdsAndSizes))
+-    when(mapOutputTracker.getMapSizesByExecutorId(SHUFFLE_ID, REDUCE_ID, REDUCE_ID + 1)).thenReturn
+-    {
+-      mapSizesByExecutorId
+-    }
+-  }
+-
+-  private[this] final class CompressStream extends AbstractFunction1[OutputStream, OutputStream] {
+-    override def apply(stream: OutputStream): OutputStream = {
+-      if (conf.getBoolean("spark.shuffle.compress", false)) {
+-        CompressionCodec.createCodec(conf).compressedOutputStream(stream)
+-      } else {
+-        stream
+-      }
+-    }
+-  }
+-}
+-- 
+1.7.9.5
+

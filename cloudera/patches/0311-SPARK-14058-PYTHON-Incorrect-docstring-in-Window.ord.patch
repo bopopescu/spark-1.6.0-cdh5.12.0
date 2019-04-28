@@ -1,0 +1,41 @@
+From d287a4a3074daefa481fffac6a161920ab56c9aa Mon Sep 17 00:00:00 2001
+From: zero323 <matthew.szymkiewicz@gmail.com>
+Date: Mon, 21 Mar 2016 23:52:33 -0700
+Subject: [PATCH 311/517] [SPARK-14058][PYTHON] Incorrect docstring in
+ Window.order
+
+## What changes were proposed in this pull request?
+
+Replaces current docstring ("Creates a :class:`WindowSpec` with the partitioning defined.") with "Creates a :class:`WindowSpec` with the ordering defined."
+
+## How was this patch tested?
+
+PySpark unit tests (no regression introduced). No changes to the code.
+
+Author: zero323 <matthew.szymkiewicz@gmail.com>
+
+Closes #11877 from zero323/order-by-description.
+
+(cherry picked from commit 8193a266b50460078f64f59c63eae53cdbceeace)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit f9221ad79b18a94b0525c0e4cf993d9e9f0e8791)
+---
+ python/pyspark/sql/window.py |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/python/pyspark/sql/window.py b/python/pyspark/sql/window.py
+index 57bbe34..46663f6 100644
+--- a/python/pyspark/sql/window.py
++++ b/python/pyspark/sql/window.py
+@@ -60,7 +60,7 @@ class Window(object):
+     @since(1.4)
+     def orderBy(*cols):
+         """
+-        Creates a :class:`WindowSpec` with the partitioning defined.
++        Creates a :class:`WindowSpec` with the ordering defined.
+         """
+         sc = SparkContext._active_spark_context
+         jspec = sc._jvm.org.apache.spark.sql.expressions.Window.orderBy(_to_java_cols(cols))
+-- 
+1.7.9.5
+

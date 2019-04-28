@@ -1,0 +1,250 @@
+From c83474651154372054a2de72723db365072f8a20 Mon Sep 17 00:00:00 2001
+From: Salil Surendran <salilsurendran@cloudera.com>
+Date: Sun, 12 Feb 2017 22:36:48 -0800
+Subject: [PATCH 477/517] CLOUDERA-BUILD. CDH-50079. Lineage should correctly
+ handle hive tables when a parquet file is
+ registered as a temp table and joined with it
+
+If a parquet file is registered as a temp table and joined with a hive table then lineage should output metadata related to the hive table rather that it's underlying hdfs file
+---
+ .../spark/lineage/ClouderaNavigatorListener.scala  |    2 +-
+ .../spark/sql/query/analysis/QueryAnalysis.scala   |   44 ++++++++++++++++++--
+ .../spark/lineage/LineageElementSuite.scala        |   19 +++++++--
+ .../query/analysis/HiveQueryAnalysisSuite.scala    |   23 +++++-----
+ .../datasources/parquet/ParquetRelation.scala      |    2 +-
+ 5 files changed, 67 insertions(+), 23 deletions(-)
+
+diff --git a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+index 34f74c9..01a70bc 100644
+--- a/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
++++ b/lineage/src/main/scala/com/cloudera/spark/lineage/ClouderaNavigatorListener.scala
+@@ -107,7 +107,7 @@ private[lineage] class ClouderaNavigatorListener
+       queryDetails: QueryDetails,
+       qe: QueryExecution): QueryDetails = {
+     if (queryDetails.dataSourceType == DataSourceType.HIVE) {
+-      queryDetails.hiveMetastoreLocation = qe.sqlContext.getConf("hive.metastore.uris")
++      queryDetails.hiveMetastoreLocation = Some(qe.sqlContext.getConf("hive.metastore.uris"))
+     }
+     queryDetails
+   }
+diff --git a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+index c90bbc9..6b00343 100644
+--- a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
++++ b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+@@ -16,20 +16,24 @@
+  */
+ package org.apache.spark.sql.query.analysis
+ 
+-import com.cloudera.spark.lineage.DataSourceType.DataSourceType
+-import com.cloudera.spark.lineage.{DataSourceType, FieldDetails, QueryDetails}
++import com.fasterxml.jackson.module.scala.JsonScalaEnumeration
++import com.fasterxml.jackson.core.`type`.TypeReference
++
+ import org.apache.hadoop.fs.Path
+ import org.apache.spark.SparkContext
+ import org.apache.spark.sql.catalyst.TableIdentifier
+ import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, NamedExpression}
+ import org.apache.spark.sql.catalyst.plans.logical.{UnaryNode, _}
+ import org.apache.spark.sql.execution.QueryExecution
++import org.apache.spark.sql.execution.datasources.parquet.ParquetRelation
+ import org.apache.spark.sql.execution.datasources.{
+   CreateTableUsing,
+   CreateTableUsingAsSelect,
+   LogicalRelation
+ }
+ import org.apache.spark.sql.hive.MetastoreRelation
++import org.apache.spark.sql.query.analysis.DataSourceFormat.DataSourceFormat
++import org.apache.spark.sql.query.analysis.DataSourceType.DataSourceType
+ import org.apache.spark.sql.sources.HadoopFsRelation
+ 
+ import scala.collection.mutable
+@@ -61,10 +65,10 @@ object QueryAnalysis {
+       case None => {
+         qe.optimizedPlan match {
+           case CreateTableUsing(t, _, _, _, _, _, _) =>
+-            Some(new QueryDetails(getQualifiedDBName(qe, t), fields.to[ListBuffer],
++            Some(QueryDetails(getQualifiedDBName(qe, t), fields.to[ListBuffer],
+                 DataSourceType.HIVE))
+           case CreateTableUsingAsSelect(t, _, _, _, _, _, _) =>
+-            Some(new QueryDetails(getQualifiedDBName(qe, t), fields.to[ListBuffer],
++            Some(QueryDetails(getQualifiedDBName(qe, t), fields.to[ListBuffer],
+                 DataSourceType.HIVE))
+           case _ => None
+         }
+@@ -94,6 +98,7 @@ object QueryAnalysis {
+ 
+   /**
+    * Extracts the input metadata from the @see [[QueryExecution]] object.
++   *
+    * @param qe
+    * @return
+    */
+@@ -123,6 +128,7 @@ object QueryAnalysis {
+ 
+   /**
+    * Converts the list of input metadata into a map of format [table -> fields read from table]
++   *
+    * @param list
+    * @return
+    */
+@@ -210,3 +216,33 @@ object QueryAnalysis {
+     }
+   }
+ }
++
++case class QueryDetails(
++    source: String,
++    fields: ListBuffer[String],
++    @JsonScalaEnumeration(classOf[DataSourceTypeType]) dataSourceType: DataSourceType =
++      DataSourceType.UNKNOWN,
++    @JsonScalaEnumeration(classOf[DataSourceFormatType]) dataSourceFormat: DataSourceFormat =
++      DataSourceFormat.UNKNOWN) {
++  var dataQuery: String = _
++  var hiveMetastoreLocation: Option[String] = _
++}
++
++case class FieldDetails(
++    source: Seq[String],
++    field: String,
++    sourceType: DataSourceType = DataSourceType.UNKNOWN,
++    format: DataSourceFormat = DataSourceFormat.UNKNOWN)
++
++object DataSourceType extends Enumeration {
++  type DataSourceType = Value
++  val HIVE, HDFS, S3, LOCAL, UNKNOWN = Value
++}
++
++object DataSourceFormat extends Enumeration {
++  type DataSourceFormat = Value
++  val JSON, CSV, PARQUET, AVRO, UNKNOWN = Value
++}
++
++class DataSourceTypeType extends TypeReference[DataSourceType.type]
++class DataSourceFormatType extends TypeReference[DataSourceFormat.type]
+diff --git a/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala b/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala
+index a34d01f..e90d1a8 100644
+--- a/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala
++++ b/lineage/src/test/scala/com/cloudera/spark/lineage/LineageElementSuite.scala
+@@ -31,6 +31,8 @@ import org.scalatest.FunSuite
+ class LineageElementSuite extends FunSuite {
+   // scalastyle:on
+ 
++  val hiveMetaStoreLocation: String = "thrift://localhost:8090/hive_location"
++
+   test("Test the LineageElement is serialzied and deserialized into json properly") {
+     val mySparkApp = "MySparkApp"
+     val myExecutionId: String = "MyExecutionID"
+@@ -52,10 +54,14 @@ class LineageElementSuite extends FunSuite {
+     lineageElement.timestamp = timestamp
+     lineageElement.duration = duration
+     lineageElement.user = user
+-    lineageElement.addInput(new QueryDetails(inputTable, List(col1, col2).to[ListBuffer],
+-        DataSourceType.HIVE, DataSourceFormat.PARQUET))
+-    lineageElement.addInput(new QueryDetails(inputTable2, List(col3, col4).to[ListBuffer],
+-        DataSourceType.HIVE, DataSourceFormat.AVRO))
++    val qd1 = new QueryDetails(inputTable, List(col1, col2).to[ListBuffer],
++      DataSourceType.HIVE, DataSourceFormat.PARQUET)
++    qd1.hiveMetastoreLocation = Some(hiveMetaStoreLocation)
++    lineageElement.addInput(qd1)
++    val qd2 = new QueryDetails(inputTable2, List(col3, col4).to[ListBuffer],
++      DataSourceType.HIVE, DataSourceFormat.AVRO)
++    qd2.hiveMetastoreLocation = Some(hiveMetaStoreLocation)
++    lineageElement.addInput(qd2)
+     lineageElement
+       .addOutput(new QueryDetails(outputFile, List(outputCol1, outputCol2).to[ListBuffer],
+           DataSourceType.HDFS, DataSourceFormat.JSON))
+@@ -92,5 +98,10 @@ class LineageElementSuite extends FunSuite {
+     assert(fields.forall(cols.contains(_)))
+     assert(elem.get("dataSourceType").get === dataSourceType)
+     assert(elem.get("dataSourceFormat").get === dataSourceFormat)
++    if(dataSourceType == "HIVE") {
++      assert(elem.get("hiveMetastoreLocation").get === hiveMetaStoreLocation)
++    } else {
++      assert(!elem.get("hiveMetaStoreLocation").isDefined)
++    }
+   }
+ }
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+index 81fd483..80999d3 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+@@ -19,21 +19,18 @@ package org.apache.spark.sql.query.analysis
+ 
+ import java.io.File
+ 
+-import com.cloudera.spark.lineage.{DataSourceFormat, DataSourceType, FieldDetails}
+-import org.apache.spark.sql.QueryTest
+-import org.apache.spark.sql.hive.test.TestHive._
++import org.apache.spark.SparkFunSuite
+ import org.apache.spark.sql.hive.test.TestHiveSingleton
+ import org.apache.spark.sql.test.SQLTestUtils
+-import org.scalatest.BeforeAndAfterAll
++import org.apache.spark.sql.hive.test.TestHive._
++import org.apache.spark.sql.query.analysis.TestUtils._
++
+ 
+ /**
+  * Tests that check that reading and writing to Hive tables produce the desired lineage data
+  */
+-class HiveQueryAnalysisSuite
+-    extends QueryTest
+-    with TestHiveSingleton
+-    with SQLTestUtils
+-    with BeforeAndAfterAll {
++class HiveQueryAnalysisSuite extends SparkFunSuite with TestHiveSingleton with SQLTestUtils
++  with ParquetHDFSTest {
+ 
+   protected override def beforeAll(): Unit = {
+     super.beforeAll()
+@@ -53,7 +50,7 @@ class HiveQueryAnalysisSuite
+   }
+ 
+   test("QueryAnalysis.getInputMetadata returns back InputMetadata for simple queries") {
+-    val df = sqlContext.sql("select code, description, salary from test_table_1")
++    val df = hiveContext.sql("select code, description, salary from test_table_1")
+     val inputMetadata = QueryAnalysis.getInputMetadata(df.queryExecution)
+     assert(inputMetadata.length === 3)
+     assertHiveFieldExists(inputMetadata, "test_table_1", "code")
+@@ -62,7 +59,7 @@ class HiveQueryAnalysisSuite
+   }
+ 
+   test("QueryAnalysis.getInputMetadata return back InputMetadata for complex joins") {
+-    var df2 = sqlContext.sql(
++    var df2 = hiveContext.sql(
+         "select code, sal from (select o.code as code,c.description as desc," +
+           "c.salary as sal from test_table_1 c join test_table_2 o on (c.code = o.code)"
+           + " where c.salary > 170000 sort by sal)t1 limit 3")
+@@ -81,7 +78,7 @@ class HiveQueryAnalysisSuite
+   }
+ 
+   test("QueryAnalysis.getInputMetadata returns back InputMetadata for * queries") {
+-    val df = sqlContext.sql("select * from test_table_1")
++    val df = hiveContext.sql("select * from test_table_1")
+     val inputMetadata = QueryAnalysis.getInputMetadata(df.queryExecution)
+     assert(inputMetadata.length === 4)
+     assertHiveFieldExists(inputMetadata, "test_table_1", "code")
+@@ -112,7 +109,7 @@ class HiveQueryAnalysisSuite
+     }
+   }
+ 
+-  test("CDH-50079 : a hive table registered as a temp table is listed correctly") {
++  test("CDH-50079 : a hive table joined with a parquet temp table is listed correctly") {
+     withParquetHDFSFile((1 to 4).map(i => Customer(i, i.toString))) { prq =>
+       sqlContext.read.parquet(prq).registerTempTable("customers")
+       sqlContext
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetRelation.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetRelation.scala
+index efef9ad..36778ab 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetRelation.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetRelation.scala
+@@ -107,7 +107,7 @@ private[sql] class ParquetRelation(
+     // This is for metastore conversion.
+     private val maybePartitionSpec: Option[PartitionSpec],
+     override val userDefinedPartitionColumns: Option[StructType],
+-    parameters: Map[String, String])(
++    val parameters: Map[String, String])(
+     val sqlContext: SQLContext)
+   extends HadoopFsRelation(maybePartitionSpec, parameters)
+   with Logging {
+-- 
+1.7.9.5
+

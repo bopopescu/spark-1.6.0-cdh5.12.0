@@ -1,0 +1,55 @@
+From 96558b2ac32660dc35aadfe4fb4048ffebb7e7a1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jos=C3=A9=20Antonio?= <joseanmunoz@gmail.com>
+Date: Sat, 25 Jun 2016 09:11:25 +0100
+Subject: [PATCH 380/517] [MLLIB] org.apache.spark.mllib.util.SVMDataGenerator
+ generates ArrayIndexOutOfBoundsException. I have
+ found the bug and tested the solution.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+## What changes were proposed in this pull request?
+
+Just adjust the size of an array in line 58 so it does not cause an ArrayOutOfBoundsException in line 66.
+
+## How was this patch tested?
+
+Manual tests. I have recompiled the entire project with the fix, it has been built successfully and I have run the code, also with good results.
+
+line 66: val yD = blas.ddot(trueWeights.length, x, 1, trueWeights, 1) + rnd.nextGaussian() * 0.1
+crashes because trueWeights has length "nfeatures + 1" while "x" has length "features", and they should have the same length.
+
+To fix this just make trueWeights be the same length as x.
+
+I have recompiled the project with the change and it is working now:
+[spark-1.6.1]$ spark-submit --master local[*] --class org.apache.spark.mllib.util.SVMDataGenerator mllib/target/spark-mllib_2.11-1.6.1.jar local /home/user/test
+
+And it generates the data successfully now in the specified folder.
+
+Author: José Antonio <joseanmunoz@gmail.com>
+
+Closes #13895 from j4munoz/patch-2.
+
+(cherry picked from commit a3c7b4187bad00dad87df7e3b5929a44d29568ed)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 24d59fb64770fb8951794df9ee6398329838359a)
+---
+ .../apache/spark/mllib/util/SVMDataGenerator.scala |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/util/SVMDataGenerator.scala b/mllib/src/main/scala/org/apache/spark/mllib/util/SVMDataGenerator.scala
+index cde5979..c946860 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/util/SVMDataGenerator.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/util/SVMDataGenerator.scala
+@@ -55,7 +55,7 @@ object SVMDataGenerator {
+     val sc = new SparkContext(sparkMaster, "SVMGenerator")
+ 
+     val globalRnd = new Random(94720)
+-    val trueWeights = Array.fill[Double](nfeatures + 1)(globalRnd.nextGaussian())
++    val trueWeights = Array.fill[Double](nfeatures)(globalRnd.nextGaussian())
+ 
+     val data: RDD[LabeledPoint] = sc.parallelize(0 until nexamples, parts).map { idx =>
+       val rnd = new Random(42 + idx)
+-- 
+1.7.9.5
+

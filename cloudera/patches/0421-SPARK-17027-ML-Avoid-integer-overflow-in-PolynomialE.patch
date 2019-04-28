@@ -1,0 +1,89 @@
+From 25c9c5ba6150ad0553448a1a8ec2a7667de6018e Mon Sep 17 00:00:00 2001
+From: zero323 <zero323@users.noreply.github.com>
+Date: Sun, 14 Aug 2016 11:59:24 +0100
+Subject: [PATCH 421/517] [SPARK-17027][ML] Avoid integer overflow in
+ PolynomialExpansion.getPolySize
+
+Replaces custom choose function with o.a.commons.math3.CombinatoricsUtils.binomialCoefficient
+
+Spark unit tests
+
+Author: zero323 <zero323@users.noreply.github.com>
+
+Closes #14614 from zero323/SPARK-17027.
+
+(cherry picked from commit 0ebf7c1bff736cf54ec47957d71394d5b75b47a7)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit b54a586af4b8ca7e8b97311bf5e75e00797de899)
+---
+ .../spark/ml/feature/PolynomialExpansion.scala     |   10 ++++----
+ .../ml/feature/PolynomialExpansionSuite.scala      |   24 ++++++++++++++++++++
+ 2 files changed, 30 insertions(+), 4 deletions(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/ml/feature/PolynomialExpansion.scala b/mllib/src/main/scala/org/apache/spark/ml/feature/PolynomialExpansion.scala
+index 0861059..684f71f 100644
+--- a/mllib/src/main/scala/org/apache/spark/ml/feature/PolynomialExpansion.scala
++++ b/mllib/src/main/scala/org/apache/spark/ml/feature/PolynomialExpansion.scala
+@@ -19,6 +19,8 @@ package org.apache.spark.ml.feature
+ 
+ import scala.collection.mutable
+ 
++import org.apache.commons.math3.util.CombinatoricsUtils
++
+ import org.apache.spark.annotation.{Since, Experimental}
+ import org.apache.spark.ml.UnaryTransformer
+ import org.apache.spark.ml.param.{ParamMap, IntParam, ParamValidators}
+@@ -80,12 +82,12 @@ class PolynomialExpansion(override val uid: String)
+ @Since("1.6.0")
+ object PolynomialExpansion extends DefaultParamsReadable[PolynomialExpansion] {
+ 
+-  private def choose(n: Int, k: Int): Int = {
+-    Range(n, n - k, -1).product / Range(k, 1, -1).product
++  private def getPolySize(numFeatures: Int, degree: Int): Int = {
++    val n = CombinatoricsUtils.binomialCoefficient(numFeatures + degree, degree)
++    require(n <= Integer.MAX_VALUE)
++    n.toInt
+   }
+ 
+-  private def getPolySize(numFeatures: Int, degree: Int): Int = choose(numFeatures + degree, degree)
+-
+   private def expandDense(
+       values: Array[Double],
+       lastIdx: Int,
+diff --git a/mllib/src/test/scala/org/apache/spark/ml/feature/PolynomialExpansionSuite.scala b/mllib/src/test/scala/org/apache/spark/ml/feature/PolynomialExpansionSuite.scala
+index 70892dc..9b062fe 100644
+--- a/mllib/src/test/scala/org/apache/spark/ml/feature/PolynomialExpansionSuite.scala
++++ b/mllib/src/test/scala/org/apache/spark/ml/feature/PolynomialExpansionSuite.scala
+@@ -108,5 +108,29 @@ class PolynomialExpansionSuite
+       .setDegree(3)
+     testDefaultReadWrite(t)
+   }
++
++  test("SPARK-17027. Integer overflow in PolynomialExpansion.getPolySize") {
++    val data: Array[(Vector, Int, Int)] = Array(
++      (Vectors.dense(1.0, 2.0, 3.0, 4.0, 5.0), 3002, 4367),
++      (Vectors.sparse(5, Seq((0, 1.0), (4, 5.0))), 3002, 4367),
++      (Vectors.dense(1.0, 2.0, 3.0, 4.0, 5.0, 6.0), 8007, 12375)
++    )
++
++    val df = spark.createDataFrame(data)
++      .toDF("features", "expectedPoly10size", "expectedPoly11size")
++
++    val t = new PolynomialExpansion()
++      .setInputCol("features")
++      .setOutputCol("polyFeatures")
++
++    for (i <- Seq(10, 11)) {
++      val transformed = t.setDegree(i)
++        .transform(df)
++        .select(s"expectedPoly${i}size", "polyFeatures")
++        .rdd.map { case Row(expected: Int, v: Vector) => expected == v.size }
++
++      assert(transformed.collect.forall(identity))
++    }
++  }
+ }
+ 
+-- 
+1.7.9.5
+

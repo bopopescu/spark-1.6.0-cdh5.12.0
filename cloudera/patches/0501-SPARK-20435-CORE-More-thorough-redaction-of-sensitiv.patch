@@ -1,0 +1,196 @@
+From 50b343b7ea364a5d7100364b425fef7ded9200d5 Mon Sep 17 00:00:00 2001
+From: Mark Grover <mark@apache.org>
+Date: Wed, 26 Apr 2017 17:06:21 -0700
+Subject: [PATCH 501/517] [SPARK-20435][CORE] More thorough redaction of
+ sensitive information
+
+This change does a more thorough redaction of sensitive information from logs and UI
+Add unit tests that ensure that no regressions happen that leak sensitive information to the logs.
+
+The motivation for this change was appearance of password like so in `SparkListenerEnvironmentUpdate` in event logs under some JVM configurations:
+`"sun.java.command":"org.apache.spark.deploy.SparkSubmit ... --conf spark.executorEnv.HADOOP_CREDSTORE_PASSWORD=secret_password ..."
+`
+Previously redaction logic was only checking if the key matched the secret regex pattern, it'd redact it's value. That worked for most cases. However, in the above case, the key (sun.java.command) doesn't tell much, so the value needs to be searched. This PR expands the check to check for values as well.
+
+New unit tests added that ensure that no sensitive information is present in the event logs or the yarn logs. Old unit test in UtilsSuite was modified because the test was asserting that a non-sensitive property's value won't be redacted. However, the non-sensitive value had the literal "secret" in it which was causing it to redact. Simply updating the non-sensitive property's value to another arbitrary value (that didn't have "secret" in it) fixed it.
+
+Author: Mark Grover <mark@apache.org>
+
+Closes #17725 from markgrover/spark-20435.
+
+(cherry picked from commit 66636ef0b046e5d1f340c3b8153d7213fa9d19c7)
+---
+ .../spark/scheduler/EventLoggingListener.scala     |   16 ++++++---
+ .../main/scala/org/apache/spark/util/Utils.scala   |   22 ++++++++++---
+ .../org/apache/spark/deploy/SparkSubmitSuite.scala |   34 ++++++++++++++++++++
+ .../scala/org/apache/spark/util/UtilsSuite.scala   |   10 ++++--
+ docs/configuration.md                              |    4 +--
+ 5 files changed, 72 insertions(+), 14 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/EventLoggingListener.scala b/core/src/main/scala/org/apache/spark/scheduler/EventLoggingListener.scala
+index a2e7ebb..13c9be5 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/EventLoggingListener.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/EventLoggingListener.scala
+@@ -259,11 +259,17 @@ private[spark] class EventLoggingListener(
+ 
+   private[spark] def redactEvent(
+       event: SparkListenerEnvironmentUpdate): SparkListenerEnvironmentUpdate = {
+-    // "Spark Properties" entry will always exist because the map is always populated with it.
+-    val redactedProps = Utils.redact(sparkConf, event.environmentDetails("Spark Properties"))
+-    val redactedEnvironmentDetails = event.environmentDetails +
+-      ("Spark Properties" -> redactedProps)
+-    SparkListenerEnvironmentUpdate(redactedEnvironmentDetails)
++    // environmentDetails maps a string descriptor to a set of properties
++    // Similar to:
++    // "JVM Information" -> jvmInformation,
++    // "Spark Properties" -> sparkProperties,
++    // ...
++    // where jvmInformation, sparkProperties, etc. are sequence of tuples.
++    // We go through the various  of properties and redact sensitive information from them.
++    val redactedProps = event.environmentDetails.map{ case (name, props) =>
++      name -> Utils.redact(sparkConf, props)
++    }
++    SparkListenerEnvironmentUpdate(redactedProps)
+   }
+ 
+ }
+diff --git a/core/src/main/scala/org/apache/spark/util/Utils.scala b/core/src/main/scala/org/apache/spark/util/Utils.scala
+index 1ae7b00..3dfbadd 100644
+--- a/core/src/main/scala/org/apache/spark/util/Utils.scala
++++ b/core/src/main/scala/org/apache/spark/util/Utils.scala
+@@ -2314,10 +2314,24 @@ private[spark] object Utils extends Logging {
+   }
+ 
+   private def redact(redactionPattern: Regex, kvs: Seq[(String, String)]): Seq[(String, String)] = {
+-    kvs.map { kv =>
+-      redactionPattern.findFirstIn(kv._1)
+-        .map { _ => (kv._1, REDACTION_REPLACEMENT_TEXT) }
+-        .getOrElse(kv)
++    // If the sensitive information regex matches with either the key or the value, redact the value
++    // While the original intent was to only redact the value if the key matched with the regex,
++    // we've found that especially in verbose mode, the value of the property may contain sensitive
++    // information like so:
++    // "sun.java.command":"org.apache.spark.deploy.SparkSubmit ... \
++    // --conf spark.executorEnv.HADOOP_CREDSTORE_PASSWORD=secret_password ...
++    //
++    // And, in such cases, simply searching for the sensitive information regex in the key name is
++    // not sufficient. The values themselves have to be searched as well and redacted if matched.
++    // This does mean we may be accounting more false positives - for example, if the value of an
++    // arbitrary property contained the term 'password', we may redact the value from the UI and
++    // logs. In order to work around it, user would have to make the spark.redaction.regex property
++    // more specific.
++    kvs.map { case (key, value) =>
++      redactionPattern.findFirstIn(key)
++        .orElse(redactionPattern.findFirstIn(value))
++        .map { _ => (key, REDACTION_REPLACEMENT_TEXT) }
++        .getOrElse((key, value))
+     }
+   }
+ 
+diff --git a/core/src/test/scala/org/apache/spark/deploy/SparkSubmitSuite.scala b/core/src/test/scala/org/apache/spark/deploy/SparkSubmitSuite.scala
+index 6135a91..56e7c03 100644
+--- a/core/src/test/scala/org/apache/spark/deploy/SparkSubmitSuite.scala
++++ b/core/src/test/scala/org/apache/spark/deploy/SparkSubmitSuite.scala
+@@ -20,9 +20,11 @@ package org.apache.spark.deploy
+ import java.io._
+ 
+ import scala.collection.mutable.ArrayBuffer
++import scala.io.Source
+ 
+ import com.google.common.base.Charsets.UTF_8
+ import com.google.common.io.ByteStreams
++import org.apache.hadoop.fs.Path
+ import org.scalatest.{BeforeAndAfterEach, Matchers}
+ import org.scalatest.concurrent.Timeouts
+ import org.scalatest.time.SpanSugar._
+@@ -31,6 +33,7 @@ import org.apache.spark._
+ import org.apache.spark.api.r.RUtils
+ import org.apache.spark.deploy.SparkSubmit._
+ import org.apache.spark.deploy.SparkSubmitUtils.MavenCoordinate
++import org.apache.spark.scheduler.EventLoggingListener
+ import org.apache.spark.util.{ResetSystemProperties, Utils}
+ 
+ // Note: this suite mixes in ResetSystemProperties because SparkSubmit.main() sets a bunch
+@@ -333,6 +336,37 @@ class SparkSubmitSuite
+     runSparkSubmit(args)
+   }
+ 
++  test("launch simple application with spark-submit with redaction") {
++    val testDir = Utils.createTempDir()
++    testDir.deleteOnExit()
++    val testDirPath = new Path(testDir.getAbsolutePath())
++    val unusedJar = TestUtils.createJarWithClasses(Seq.empty)
++    val fileSystem = Utils.getHadoopFileSystem("/",
++      SparkHadoopUtil.get.newConfiguration(new SparkConf()))
++    try {
++      val args = Seq(
++        "--class", SimpleApplicationTest.getClass.getName.stripSuffix("$"),
++        "--name", "testApp",
++        "--master", "local",
++        "--conf", "spark.ui.enabled=false",
++        "--conf", "spark.master.rest.enabled=false",
++        "--conf", "spark.executorEnv.HADOOP_CREDSTORE_PASSWORD=secret_password",
++        "--conf", "spark.eventLog.enabled=true",
++        "--conf", "spark.eventLog.testing=true",
++        "--conf", s"spark.eventLog.dir=${testDirPath.toUri.toString}",
++        "--conf", "spark.hadoop.fs.defaultFS=unsupported://example.com",
++        unusedJar.toString)
++      runSparkSubmit(args)
++      val listStatus = fileSystem.listStatus(testDirPath)
++      val logData = EventLoggingListener.openEventLog(listStatus.last.getPath, fileSystem)
++      Source.fromInputStream(logData).getLines().foreach { line =>
++        assert(!line.contains("secret_password"))
++      }
++    } finally {
++      Utils.deleteRecursively(testDir)
++    }
++  }
++
+   test("includes jars passed in through --jars") {
+     val unusedJar = TestUtils.createJarWithClasses(Seq.empty)
+     val jar1 = TestUtils.createJarWithClasses(Seq("SparkSubmitClassA"))
+diff --git a/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala b/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
+index 038e010..02bcfe9 100644
+--- a/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
++++ b/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
+@@ -848,15 +848,19 @@ class UtilsSuite extends SparkFunSuite with ResetSystemProperties with Logging {
+       "spark.executorEnv.HADOOP_CREDSTORE_PASSWORD",
+       "spark.my.password",
+       "spark.my.sECreT")
+-    secretKeys.foreach { key => sparkConf.set(key, "secret_password") }
++    secretKeys.foreach { key => sparkConf.set(key, "sensitive_value") }
+     // Set a non-secret key
+-    sparkConf.set("spark.regular.property", "not_a_secret")
++    sparkConf.set("spark.regular.property", "regular_value")
++    // Set a property with a regular key but secret in the value
++    sparkConf.set("spark.sensitive.property", "has_secret_in_value")
+ 
+     // Redact sensitive information
+     val redactedConf = Utils.redact(sparkConf, sparkConf.getAll).toMap
+ 
+     // Assert that secret information got redacted while the regular property remained the same
+     secretKeys.foreach { key => assert(redactedConf(key) === Utils.REDACTION_REPLACEMENT_TEXT) }
+-    assert(redactedConf("spark.regular.property") === "not_a_secret")
++    assert(redactedConf("spark.regular.property") === "regular_value")
++    assert(redactedConf("spark.sensitive.property") === Utils.REDACTION_REPLACEMENT_TEXT)
++
+   }
+ }
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 96ab4f3..273907b 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -331,8 +331,8 @@ Apart from these, the following properties are also available, and may be useful
+   <td>(?i)secret|password</td>
+   <td>
+     Regex to decide which Spark configuration properties and environment variables in driver and
+-    executor environments contain sensitive information. When this regex matches a property, its
+-    value is redacted from the environment UI and various logs like YARN and event logs.
++    executor environments contain sensitive information. When this regex matches a property key or
++    value, the value is redacted from the environment UI and various logs like YARN and event logs.
+   </td>
+ </tr>
+ <tr>
+-- 
+1.7.9.5
+

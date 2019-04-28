@@ -1,0 +1,29 @@
+From af427be2093ce136a83b0ad856f0d5d4604f6377 Mon Sep 17 00:00:00 2001
+From: Yin Huai <yhuai@databricks.com>
+Date: Wed, 9 Mar 2016 18:41:38 -0800
+Subject: [PATCH 301/517] Revert "[SPARK-13760][SQL] Fix BigDecimal
+ constructor for FloatType"
+
+This reverts commit 926e9c45a21c5b71ef0832d63b8dae7d4f3d8826.
+
+(cherry picked from commit 60cb27040c3cae531f71985f84f4c0321aa91c94)
+---
+ .../sql/catalyst/expressions/mathExpressions.scala |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala
+index 4825bd2..28f616f 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala
+@@ -739,7 +739,7 @@ case class Round(child: Expression, scale: Expression)
+         if (f.isNaN || f.isInfinite) {
+           f
+         } else {
+-          BigDecimal.decimal(f).setScale(_scale, HALF_UP).toFloat
++          BigDecimal(f).setScale(_scale, HALF_UP).toFloat
+         }
+       case DoubleType =>
+         val d = input1.asInstanceOf[Double]
+-- 
+1.7.9.5
+

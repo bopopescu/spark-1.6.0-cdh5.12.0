@@ -1,0 +1,44 @@
+From e014a05ee2dbb4098888c2dfa7000a2f8625faea Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=9D=A8=E6=B5=A9?= <yanghaogn@163.com>
+Date: Mon, 27 Jun 2016 08:31:52 +0100
+Subject: [PATCH 382/517] [SPARK-16214][EXAMPLES] fix the denominator of
+ SparkPi
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+## What changes were proposed in this pull request?
+
+reduce the denominator of SparkPi by 1
+
+## How was this patch tested?
+
+  integration tests
+
+Author: 杨浩 <yanghaogn@163.com>
+
+Closes #13910 from yanghaogn/patch-1.
+
+(cherry picked from commit b452026324da20f76f7d8b78e5ba1c007712e585)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 22a496d2a12e24f97977d324c38f5aa6ff260588)
+---
+ .../scala/org/apache/spark/examples/SparkPi.scala  |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/examples/src/main/scala/org/apache/spark/examples/SparkPi.scala b/examples/src/main/scala/org/apache/spark/examples/SparkPi.scala
+index 818d4f2..ead8f46 100644
+--- a/examples/src/main/scala/org/apache/spark/examples/SparkPi.scala
++++ b/examples/src/main/scala/org/apache/spark/examples/SparkPi.scala
+@@ -34,7 +34,7 @@ object SparkPi {
+       val y = random * 2 - 1
+       if (x*x + y*y < 1) 1 else 0
+     }.reduce(_ + _)
+-    println("Pi is roughly " + 4.0 * count / n)
++    println("Pi is roughly " + 4.0 * count / (n - 1))
+     spark.stop()
+   }
+ }
+-- 
+1.7.9.5
+

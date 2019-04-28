@@ -1,0 +1,99 @@
+From 375ea79acec8aaf969a91104b05d22b8a63e453c Mon Sep 17 00:00:00 2001
+From: Yin Huai <yhuai@databricks.com>
+Date: Fri, 26 Feb 2016 12:34:03 -0800
+Subject: [PATCH 282/517] [SPARK-13454][SQL] Allow users to drop a table with
+ a name starting with an underscore.
+
+## What changes were proposed in this pull request?
+
+This change adds a workaround to allow users to drop a table with a name starting with an underscore. Without this patch, we can create such a table, but we cannot drop it. The reason is that Hive's parser unquote an quoted identifier (see https://github.com/apache/hive/blob/release-1.2.1/ql/src/java/org/apache/hadoop/hive/ql/parse/HiveLexer.g#L453). So, when we issue a drop table command to Hive, a table name starting with an underscore is actually not quoted. Then, Hive will complain about it because it does not support a table name starting with an underscore without using backticks (underscores are allowed as long as it is not the first char though).
+
+## How was this patch tested?
+
+Add a test to make sure we can drop a table with a name starting with an underscore.
+
+https://issues.apache.org/jira/browse/SPARK-13454
+
+Author: Yin Huai <yhuai@databricks.com>
+
+Closes #11349 from yhuai/fixDropTable.
+
+(cherry picked from commit a57f87ee4aafdb97c15f4076e20034ea34c7e2e5)
+---
+ .../apache/spark/sql/hive/execution/commands.scala |   20 +++++++++++++++++--
+ .../spark/sql/hive/HiveMetastoreCatalogSuite.scala |   21 ++++++++++++++++++++
+ 2 files changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/commands.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/commands.scala
+index 94210a5..6b16d59 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/commands.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/commands.scala
+@@ -20,7 +20,7 @@ package org.apache.spark.sql.hive.execution
+ import org.apache.hadoop.hive.metastore.MetaStoreUtils
+ 
+ import org.apache.spark.sql._
+-import org.apache.spark.sql.catalyst.TableIdentifier
++import org.apache.spark.sql.catalyst.{SqlParser, TableIdentifier}
+ import org.apache.spark.sql.catalyst.analysis.EliminateSubQueries
+ import org.apache.spark.sql.catalyst.expressions.Attribute
+ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+@@ -70,7 +70,23 @@ case class DropTable(
+       case e: Throwable => log.warn(s"${e.getMessage}", e)
+     }
+     hiveContext.invalidateTable(tableName)
+-    hiveContext.runSqlHive(s"DROP TABLE $ifExistsClause$tableName")
++    val tableNameForHive = {
++      // Hive's parser will unquote an identifier (see the rule of QuotedIdentifier in
++      // HiveLexer.g of Hive 1.2.1). For the DROP TABLE command that we pass in Hive, we
++      // will use the quoted form (db.tableName) if the table name starts with a _.
++      // Otherwise, we keep the unquoted form (`db`.`tableName`), which is the same as tableName
++      // passed into this DropTable class. Please note that although QuotedIdentifier rule
++      // allows backticks appearing in an identifier, Hive does not actually allow such
++      // an identifier be a table name. So, we do not check if a table name part has
++      // any backtick or not.
++      //
++      // This change is at here because this patch is just for 1.6 branch and we try to
++      // avoid of affecting normal cases (tables do not use _ as the first character of
++      // their name).
++      val identifier = SqlParser.parseTableIdentifier(tableName)
++      if (identifier.table.startsWith("_")) identifier.quotedString else identifier.unquotedString
++    }
++    hiveContext.runSqlHive(s"DROP TABLE $ifExistsClause$tableNameForHive")
+     hiveContext.catalog.unregisterTable(TableIdentifier(tableName))
+     Seq.empty[Row]
+   }
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala
+index 9ed6c93..c4f0ebb 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala
+@@ -47,6 +47,27 @@ class HiveMetastoreCatalogSuite extends SparkFunSuite with TestHiveSingleton {
+     logInfo(df.queryExecution.toString)
+     df.as('a).join(df.as('b), $"a.key" === $"b.key")
+   }
++
++  test("SPARK-13454: drop a table with a name starting with underscore") {
++    hiveContext.range(10).write.saveAsTable("_spark13454")
++    hiveContext.range(20).registerTempTable("_spark13454")
++    // This will drop both metastore table and temp table.
++    hiveContext.sql("drop table `_spark13454`")
++    assert(hiveContext.tableNames().filter(name => name == "_spark13454").length === 0)
++
++    hiveContext.range(10).write.saveAsTable("_spark13454")
++    hiveContext.range(20).registerTempTable("_spark13454")
++    hiveContext.sql("drop table default.`_spark13454`")
++    // This will drop the metastore table but keep the temptable.
++    assert(hiveContext.tableNames().filter(name => name == "_spark13454").length === 1)
++    // Make sure it is the temp table.
++    assert(hiveContext.table("_spark13454").count() === 20)
++    hiveContext.sql("drop table if exists `_spark13454`")
++    assert(hiveContext.tableNames().filter(name => name == "_spark13454").length === 0)
++
++    hiveContext.range(10).write.saveAsTable("spark13454")
++    hiveContext.sql("drop table spark13454")
++  }
+ }
+ 
+ class DataSourceWithHiveMetastoreCatalogSuite
+-- 
+1.7.9.5
+

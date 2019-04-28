@@ -1,0 +1,51 @@
+From 1e97f49c6ece22ec1a0fb18c59236f6c2eb2381b Mon Sep 17 00:00:00 2001
+From: Davies Liu <davies@databricks.com>
+Date: Thu, 3 Mar 2016 17:46:28 -0800
+Subject: [PATCH 287/517] [SPARK-13601] [TESTS] use 1 partition in tests to
+ avoid race conditions
+
+Fix race conditions when cleanup files.
+
+Existing tests.
+
+Author: Davies Liu <davies@databricks.com>
+
+Closes #11507 from davies/flaky.
+
+(cherry picked from commit d062587dd2c4ed13998ee8bcc9d08f29734df228)
+Signed-off-by: Davies Liu <davies.liu@gmail.com>
+
+Conflicts:
+	sql/hive/src/test/scala/org/apache/spark/sql/sources/CommitFailureTestRelationSuite.scala
+
+(cherry picked from commit b3a512965d9c27a7078448a6e8eae9ecfcaf1553)
+---
+ .../sources/CommitFailureTestRelationSuite.scala   |    5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/sources/CommitFailureTestRelationSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/sources/CommitFailureTestRelationSuite.scala
+index 793be8d..8438349 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/sources/CommitFailureTestRelationSuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/sources/CommitFailureTestRelationSuite.scala
+@@ -51,7 +51,7 @@ class CommitFailureTestRelationSuite extends SQLTestUtils with TestHiveSingleton
+     withTempPath { file =>
+       // fail the job in the middle of writing
+       val divideByZero = udf((x: Int) => { x / (x - 1)})
+-      val df = sqlContext.range(0, 10).select(divideByZero(col("id")))
++      val df = sqlContext.range(0, 10).coalesce(1).select(divideByZero(col("id")))
+ 
+       SimpleTextRelation.callbackCalled = false
+       intercept[SparkException] {
+@@ -67,7 +67,8 @@ class CommitFailureTestRelationSuite extends SQLTestUtils with TestHiveSingleton
+   test("call failure callbacks before close writer - partitioned") {
+     SimpleTextRelation.failCommitter = false
+     withTempPath { file =>
+-      val df = sqlContext.range(0, 10).select(col("id").mod(2).as("key"), col("id"))
++      // fail the job in the middle of writing
++      val df = sqlContext.range(0, 10).coalesce(1).select(col("id").mod(2).as("key"), col("id"))
+ 
+       SimpleTextRelation.callbackCalled = false
+       SimpleTextRelation.failWriter = true
+-- 
+1.7.9.5
+

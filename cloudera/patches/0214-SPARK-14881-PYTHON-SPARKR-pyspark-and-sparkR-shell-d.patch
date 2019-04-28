@@ -1,0 +1,149 @@
+From 9b720b7804e767798585b84283cfe0ad603e3490 Mon Sep 17 00:00:00 2001
+From: felixcheung <felixcheung_m@hotmail.com>
+Date: Sun, 24 Apr 2016 22:51:18 -0700
+Subject: [PATCH 214/517] [SPARK-14881] [PYTHON] [SPARKR] pyspark and sparkR
+ shell default log level should match
+ spark-shell/Scala
+
+Cloudera-only: includes certain parts of the fix for SPARK-13626 (8301fadd) which
+expose the needed APIs in Logging.scala.
+
+Change default logging to WARN for pyspark shell and sparkR shell for a much cleaner environment.
+
+Manually running pyspark and sparkR shell
+
+Author: felixcheung <felixcheung_m@hotmail.com>
+
+Closes #12648 from felixcheung/pylogging.
+
+(cherry picked from commit c752b6c5ec488b87c3aaaa86902dd4da9b4b406f)
+---
+ core/src/main/scala/org/apache/spark/Logging.scala |   12 ++++++------
+ .../spark/api/python/PythonGatewayServer.scala     |    2 ++
+ .../scala/org/apache/spark/api/r/RBackend.scala    |    3 +++
+ .../main/scala/org/apache/spark/util/Utils.scala   |    9 ---------
+ .../main/scala/org/apache/spark/repl/Main.scala    |    6 +++++-
+ 5 files changed, 16 insertions(+), 16 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/Logging.scala b/core/src/main/scala/org/apache/spark/Logging.scala
+index e35e158..ba9e79e 100644
+--- a/core/src/main/scala/org/apache/spark/Logging.scala
++++ b/core/src/main/scala/org/apache/spark/Logging.scala
+@@ -47,7 +47,7 @@ trait Logging {
+   // Method to get or create the logger for this object
+   protected def log: Logger = {
+     if (log_ == null) {
+-      initializeIfNecessary()
++      initializeLogIfNecessary(false)
+       log_ = LoggerFactory.getLogger(logName)
+     }
+     log_
+@@ -99,17 +99,17 @@ trait Logging {
+     log.isTraceEnabled
+   }
+ 
+-  private def initializeIfNecessary() {
++  protected def initializeLogIfNecessary(isInterpreter: Boolean): Unit = {
+     if (!Logging.initialized) {
+       Logging.initLock.synchronized {
+         if (!Logging.initialized) {
+-          initializeLogging()
++          initializeLogging(isInterpreter)
+         }
+       }
+     }
+   }
+ 
+-  private def initializeLogging() {
++  protected def initializeLogging(isInterpreter: Boolean): Unit = {
+     // Don't use a logger in here, as this is itself occurring during initialization of a logger
+     // If Log4j 1.2 is being used, but is not initialized, load a default properties file
+     val binderClass = StaticLoggerBinder.getSingleton.getLoggerFactoryClassStr
+@@ -131,11 +131,11 @@ trait Logging {
+         }
+       }
+ 
+-      if (Utils.isInInterpreter) {
++      if (isInterpreter) {
+         // Use the repl's main class to define the default log level when running the shell,
+         // overriding the root logger's config if they're different.
+         val rootLogger = LogManager.getRootLogger()
+-        val replLogger = LogManager.getLogger("org.apache.spark.repl.Main")
++        val replLogger = LogManager.getLogger(logName)
+         val replLevel = Option(replLogger.getLevel()).getOrElse(Level.WARN)
+         if (replLevel != rootLogger.getEffectiveLevel()) {
+           System.err.printf("Setting default log level to \"%s\".\n", replLevel)
+diff --git a/core/src/main/scala/org/apache/spark/api/python/PythonGatewayServer.scala b/core/src/main/scala/org/apache/spark/api/python/PythonGatewayServer.scala
+index 164e950..5d8e536 100644
+--- a/core/src/main/scala/org/apache/spark/api/python/PythonGatewayServer.scala
++++ b/core/src/main/scala/org/apache/spark/api/python/PythonGatewayServer.scala
+@@ -32,6 +32,8 @@ import org.apache.spark.util.Utils
+  * This process is launched (via SparkSubmit) by the PySpark driver (see java_gateway.py).
+  */
+ private[spark] object PythonGatewayServer extends Logging {
++  initializeLogIfNecessary(true)
++
+   def main(args: Array[String]): Unit = Utils.tryOrExit {
+     // Start a GatewayServer on an ephemeral port
+     val gatewayServer: GatewayServer = new GatewayServer(null, 0)
+diff --git a/core/src/main/scala/org/apache/spark/api/r/RBackend.scala b/core/src/main/scala/org/apache/spark/api/r/RBackend.scala
+index 8b3be0d..9e9266f 100644
+--- a/core/src/main/scala/org/apache/spark/api/r/RBackend.scala
++++ b/core/src/main/scala/org/apache/spark/api/r/RBackend.scala
+@@ -93,6 +93,8 @@ private[spark] class RBackend {
+ }
+ 
+ private[spark] object RBackend extends Logging {
++  initializeLogIfNecessary(true)
++
+   def main(args: Array[String]): Unit = {
+     if (args.length < 1) {
+       // scalastyle:off println
+@@ -100,6 +102,7 @@ private[spark] object RBackend extends Logging {
+       // scalastyle:on println
+       System.exit(-1)
+     }
++
+     val sparkRBackend = new RBackend()
+     try {
+       // bind to random port
+diff --git a/core/src/main/scala/org/apache/spark/util/Utils.scala b/core/src/main/scala/org/apache/spark/util/Utils.scala
+index 842a77c..08deeb7 100644
+--- a/core/src/main/scala/org/apache/spark/util/Utils.scala
++++ b/core/src/main/scala/org/apache/spark/util/Utils.scala
+@@ -1797,15 +1797,6 @@ private[spark] object Utils extends Logging {
+     }
+   }
+ 
+-  lazy val isInInterpreter: Boolean = {
+-    try {
+-      val interpClass = classForName("org.apache.spark.repl.Main")
+-      interpClass.getMethod("interp").invoke(null) != null
+-    } catch {
+-      case _: ClassNotFoundException => false
+-    }
+-  }
+-
+   /**
+    * Return a well-formed URI for the file described by a user input string.
+    *
+diff --git a/repl/scala-2.10/src/main/scala/org/apache/spark/repl/Main.scala b/repl/scala-2.10/src/main/scala/org/apache/spark/repl/Main.scala
+index 14b448d..810f6ce 100644
+--- a/repl/scala-2.10/src/main/scala/org/apache/spark/repl/Main.scala
++++ b/repl/scala-2.10/src/main/scala/org/apache/spark/repl/Main.scala
+@@ -19,7 +19,11 @@ package org.apache.spark.repl
+ 
+ import scala.collection.mutable.Set
+ 
+-object Main {
++import org.apache.spark.Logging
++
++object Main extends Logging {
++  initializeLogIfNecessary(true)
++
+   private var _interp: SparkILoop = _
+ 
+   def interp = _interp
+-- 
+1.7.9.5
+

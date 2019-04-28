@@ -1,0 +1,59 @@
+From 477ac454769a21d7da888dbc9aee3932f7e7ce73 Mon Sep 17 00:00:00 2001
+From: prigarg <prigarg@adobe.com>
+Date: Fri, 14 Oct 2016 11:28:16 -0700
+Subject: [PATCH 443/517] [SPARK-17884][SQL] To resolve Null pointer exception
+ when casting from  empty string to interval type
+
+## What changes were proposed in this pull request?
+This change adds a check in castToInterval method of Cast expression , such that if converted value is null , then isNull variable should be set to true.
+
+Earlier, the expression Cast(Literal(), CalendarIntervalType) was throwing NullPointerException because of the above mentioned reason.
+
+## How was this patch tested?
+Added test case in CastSuite.scala
+
+jira entry for detail: https://issues.apache.org/jira/browse/SPARK-17884
+
+Author: prigarg <prigarg@adobe.com>
+
+Closes #15479 from priyankagargnitk/cast_empty_string_bug.
+
+(cherry picked from commit 745c5e70fb4be0cdd3006e88dbf3ba42d729e421)
+---
+ .../spark/sql/catalyst/expressions/Cast.scala      |    7 ++++++-
+ .../spark/sql/catalyst/expressions/CastSuite.scala |    1 +
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/Cast.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/Cast.scala
+index c53e84d..f35be3d 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/Cast.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/Cast.scala
+@@ -656,7 +656,12 @@ case class Cast(child: Expression, dataType: DataType)
+   private[this] def castToIntervalCode(from: DataType): CastFunction = from match {
+     case StringType =>
+       (c, evPrim, evNull) =>
+-        s"$evPrim = CalendarInterval.fromString($c.toString());"
++        s"""$evPrim = CalendarInterval.fromString($c.toString());
++           if(${evPrim} == null) {
++             ${evNull} = true;
++           }
++         """.stripMargin
++
+   }
+ 
+   private[this] def decimalToTimestampCode(d: String): String =
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/CastSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/CastSuite.scala
+index a98e16c..b6352fa 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/CastSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/CastSuite.scala
+@@ -764,6 +764,7 @@ class CastSuite extends SparkFunSuite with ExpressionEvalHelper {
+   test("cast between string and interval") {
+     import org.apache.spark.unsafe.types.CalendarInterval
+ 
++    checkEvaluation(Cast(Literal(""), CalendarIntervalType), null)
+     checkEvaluation(Cast(Literal("interval -3 month 7 hours"), CalendarIntervalType),
+       new CalendarInterval(-3, 7 * CalendarInterval.MICROS_PER_HOUR))
+     checkEvaluation(Cast(Literal.create(
+-- 
+1.7.9.5
+

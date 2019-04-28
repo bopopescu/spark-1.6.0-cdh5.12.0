@@ -1,0 +1,46 @@
+From 413abd611cfb5cbb1860194b2e685f066c24e3dc Mon Sep 17 00:00:00 2001
+From: Jacek Laskowski <jacek@japila.pl>
+Date: Mon, 11 Jan 2016 11:29:15 -0800
+Subject: [PATCH 264/517] [STREAMING][MINOR] Typo fixes
+
+Author: Jacek Laskowski <jacek@japila.pl>
+
+Closes #10698 from jaceklaskowski/streaming-kafka-typo-fixes.
+
+(cherry picked from commit b313badaa049f847f33663c61cd70ee2f2cbebac)
+Signed-off-by: Shixiong Zhu <shixiong@databricks.com>
+(cherry picked from commit ce906b33de64f55653b52376316aa2625fd86b47)
+---
+ .../spark/streaming/kafka/KafkaCluster.scala       |    2 +-
+ .../apache/spark/streaming/kafka/KafkaRDD.scala    |    2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaCluster.scala b/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaCluster.scala
+index 8465432..e3a2e57 100644
+--- a/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaCluster.scala
++++ b/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaCluster.scala
+@@ -382,7 +382,7 @@ object KafkaCluster {
+     val seedBrokers: Array[(String, Int)] = brokers.split(",").map { hp =>
+       val hpa = hp.split(":")
+       if (hpa.size == 1) {
+-        throw new SparkException(s"Broker not the in correct format of <host>:<port> [$brokers]")
++        throw new SparkException(s"Broker not in the correct format of <host>:<port> [$brokers]")
+       }
+       (hpa(0), hpa(1).toInt)
+     }
+diff --git a/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaRDD.scala b/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaRDD.scala
+index ea5f842..4dbaf4f 100644
+--- a/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaRDD.scala
++++ b/external/kafka/src/main/scala/org/apache/spark/streaming/kafka/KafkaRDD.scala
+@@ -156,7 +156,7 @@ class KafkaRDD[
+     var requestOffset = part.fromOffset
+     var iter: Iterator[MessageAndOffset] = null
+ 
+-    // The idea is to use the provided preferred host, except on task retry atttempts,
++    // The idea is to use the provided preferred host, except on task retry attempts,
+     // to minimize number of kafka metadata requests
+     private def connectLeader: SimpleConsumer = {
+       if (context.attemptNumber > 0) {
+-- 
+1.7.9.5
+

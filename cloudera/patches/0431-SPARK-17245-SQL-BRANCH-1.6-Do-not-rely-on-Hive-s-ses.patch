@@ -1,0 +1,37 @@
+From 1a86bf3392e2176f8afb5568ab145c8cebbffe49 Mon Sep 17 00:00:00 2001
+From: Yin Huai <yhuai@databricks.com>
+Date: Wed, 7 Sep 2016 21:55:08 +0800
+Subject: [PATCH 431/517] [SPARK-17245][SQL][BRANCH-1.6] Do not rely on Hive's
+ session state to retrieve HiveConf
+
+## What changes were proposed in this pull request?
+Right now, we rely on Hive's `SessionState.get()` to retrieve the HiveConf used by ClientWrapper. However, this conf is actually the HiveConf set with the `state`. There is a small chance that we are trying to use the Hive client in a new thread while the global client has not been created yet. In this case, `SessionState.get()` will return a `null`, which causes a NPE when we call `SessionState.get(). getConf `. Since the conf that we want is actually the conf we set to `state`. I am changing the code to just call `state.getConf` (this is also what Spark 2.0 does).
+
+## How was this patch tested?
+I have not figured out a good way to reproduce this.
+
+Author: Yin Huai <yhuai@databricks.com>
+
+Closes #14816 from yhuai/SPARK-17245.
+
+(cherry picked from commit 047bc3f13ae193aa49571b6e417f2b5001698bbd)
+---
+ .../spark/sql/hive/client/ClientWrapper.scala      |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/ClientWrapper.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/ClientWrapper.scala
+index d93b0a9..02f68bb 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/ClientWrapper.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/ClientWrapper.scala
+@@ -213,7 +213,7 @@ private[hive] class ClientWrapper(
+   }
+ 
+   /** Returns the configuration for the current session. */
+-  def conf: HiveConf = SessionState.get().getConf
++  def conf: HiveConf = state.getConf
+ 
+   override def hiveVariables: JMap[String, String] = SessionState.get().getHiveVariables()
+ 
+-- 
+1.7.9.5
+

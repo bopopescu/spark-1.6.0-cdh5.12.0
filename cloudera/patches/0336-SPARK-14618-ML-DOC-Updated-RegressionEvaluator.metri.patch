@@ -1,0 +1,49 @@
+From 7b7d0f3dc23a4ac99e2227b5fa0de48c39f5def6 Mon Sep 17 00:00:00 2001
+From: "Joseph K. Bradley" <joseph@databricks.com>
+Date: Thu, 14 Apr 2016 12:44:59 -0700
+Subject: [PATCH 336/517] [SPARK-14618][ML][DOC] Updated
+ RegressionEvaluator.metricName param doc
+
+## What changes were proposed in this pull request?
+
+In Spark 1.4, we negated some metrics from RegressionEvaluator since CrossValidator always maximized metrics. This was fixed in 1.5, but the docs were not updated. This PR updates the docs.
+
+## How was this patch tested?
+
+no tests
+
+Author: Joseph K. Bradley <joseph@databricks.com>
+
+Closes #12377 from jkbradley/regeval-doc.
+
+(cherry picked from commit bf65c87f706019d235d7093637341668a13b1be1)
+Signed-off-by: Joseph K. Bradley <joseph@databricks.com>
+(cherry picked from commit 93c9a63ea6b31f1c0208e73f3ce59f255c0460f5)
+---
+ .../spark/ml/evaluation/RegressionEvaluator.scala  |    9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/ml/evaluation/RegressionEvaluator.scala b/mllib/src/main/scala/org/apache/spark/ml/evaluation/RegressionEvaluator.scala
+index b6b25ec..807ab33 100644
+--- a/mllib/src/main/scala/org/apache/spark/ml/evaluation/RegressionEvaluator.scala
++++ b/mllib/src/main/scala/org/apache/spark/ml/evaluation/RegressionEvaluator.scala
+@@ -39,11 +39,12 @@ final class RegressionEvaluator @Since("1.4.0") (@Since("1.4.0") override val ui
+   def this() = this(Identifiable.randomUID("regEval"))
+ 
+   /**
+-   * param for metric name in evaluation (supports `"rmse"` (default), `"mse"`, `"r2"`, and `"mae"`)
++   * Param for metric name in evaluation. Supports:
++   *  - `"rmse"` (default): root mean squared error
++   *  - `"mse"`: mean squared error
++   *  - `"r2"`: R^2^ metric
++   *  - `"mae"`: mean absolute error
+    *
+-   * Because we will maximize evaluation value (ref: `CrossValidator`),
+-   * when we evaluate a metric that is needed to minimize (e.g., `"rmse"`, `"mse"`, `"mae"`),
+-   * we take and output the negative of this metric.
+    * @group param
+    */
+   @Since("1.4.0")
+-- 
+1.7.9.5
+

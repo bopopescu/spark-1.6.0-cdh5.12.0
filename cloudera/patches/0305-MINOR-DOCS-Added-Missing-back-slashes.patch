@@ -1,0 +1,65 @@
+From 02c3eb17c630f67dc0abeed77788c9a408401159 Mon Sep 17 00:00:00 2001
+From: Daniel Santana <mestresan@gmail.com>
+Date: Mon, 14 Mar 2016 12:26:08 -0700
+Subject: [PATCH 305/517] [MINOR][DOCS] Added Missing back slashes
+
+## What changes were proposed in this pull request?
+
+When studying spark many users just copy examples on the documentation and paste on their terminals
+and because of that the missing backlashes lead them run into some shell errors.
+
+The added backslashes avoid that problem for spark users with that behavior.
+
+## How was this patch tested?
+
+I generated the documentation locally using jekyll and checked the generated pages
+
+Author: Daniel Santana <mestresan@gmail.com>
+
+Closes #11699 from danielsan/master.
+
+(cherry picked from commit 9f13f0fc1724e407d3be54152b82150a16395421)
+Signed-off-by: Andrew Or <andrew@databricks.com>
+(cherry picked from commit 13bd122644d2514d76c8899b9585298125cfd6f3)
+---
+ docs/submitting-applications.md |   10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/docs/submitting-applications.md b/docs/submitting-applications.md
+index acbb0f2..616e5ab 100644
+--- a/docs/submitting-applications.md
++++ b/docs/submitting-applications.md
+@@ -30,7 +30,7 @@ dependencies, and can support different cluster managers and deploy modes that S
+ 
+ {% highlight bash %}
+ ./bin/spark-submit \
+-  --class <main-class>
++  --class <main-class> \
+   --master <master-url> \
+   --deploy-mode <deploy-mode> \
+   --conf <key>=<value> \
+@@ -92,8 +92,8 @@ run it with `--help`. Here are a few examples of common options:
+ ./bin/spark-submit \
+   --class org.apache.spark.examples.SparkPi \
+   --master spark://207.184.161.138:7077 \
+-  --deploy-mode cluster
+-  --supervise
++  --deploy-mode cluster \
++  --supervise \
+   --executor-memory 20G \
+   --total-executor-cores 100 \
+   /path/to/examples.jar \
+@@ -120,8 +120,8 @@ export HADOOP_CONF_DIR=XXX
+ ./bin/spark-submit \
+   --class org.apache.spark.examples.SparkPi \
+   --master mesos://207.184.161.138:7077 \
+-  --deploy-mode cluster
+-  --supervise
++  --deploy-mode cluster \
++  --supervise \
+   --executor-memory 20G \
+   --total-executor-cores 100 \
+   http://path/to/examples.jar \
+-- 
+1.7.9.5
+

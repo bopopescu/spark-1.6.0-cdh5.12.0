@@ -1,0 +1,30 @@
+From adbfd8c9f2e1e343638e88782a5a6c81df36960f Mon Sep 17 00:00:00 2001
+From: Sean Owen <sowen@cloudera.com>
+Date: Sat, 13 Aug 2016 16:40:49 +0100
+Subject: [PATCH 420/517] Change check for particular missing file message to
+ accommodate the message that would occur, it seems,
+ only in Hadoop 1.x (and therefore in Spark 1.x)
+
+(cherry picked from commit 8a2b8fcbb05381a5e7de9c1adb85ee167d2fc97e)
+---
+ .../scala/org/apache/spark/sql/SQLQuerySuite.scala |    4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/SQLQuerySuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/SQLQuerySuite.scala
+index be23043..cf98a49 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/SQLQuerySuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/SQLQuerySuite.scala
+@@ -1757,7 +1757,9 @@ class SQLQuerySuite extends QueryTest with SharedSQLContext {
+     val e3 = intercept[AnalysisException] {
+       sql("select * from json.invalid_file")
+     }
+-    assert(e3.message.contains("invalid_file does not exist"))
++    assert(
++      e3.message.contains("invalid_file does not exist") ||
++      e3.message.contains("No input paths specified in job"))
+   }
+ 
+   test("SortMergeJoin returns wrong results when using UnsafeRows") {
+-- 
+1.7.9.5
+

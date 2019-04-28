@@ -1,0 +1,62 @@
+From 925fde5b5aaa383c05606f0275f8755de55a17a3 Mon Sep 17 00:00:00 2001
+From: Davies Liu <davies@databricks.com>
+Date: Fri, 24 Jun 2016 14:35:34 -0700
+Subject: [PATCH 378/517] [SPARK-16077] [PYSPARK] catch the exception from
+ pickle.whichmodule()
+
+## What changes were proposed in this pull request?
+
+In the case that we don't know which module a object came from, will call pickle.whichmodule() to go throught all the loaded modules to find the object, which could fail because some modules, for example, six, see https://bitbucket.org/gutworth/six/issues/63/importing-six-breaks-pickling
+
+We should ignore the exception here, use `__main__` as the module name (it means we can't find the module).
+
+## How was this patch tested?
+
+Manual tested. Can't have a unit test for this.
+
+Author: Davies Liu <davies@databricks.com>
+
+Closes #13788 from davies/whichmodule.
+
+(cherry picked from commit d48935400ca47275f677b527c636976af09332c8)
+Signed-off-by: Davies Liu <davies.liu@gmail.com>
+(cherry picked from commit d7223bb9fdc54edcc1a45cead9a71b5bac49b2ab)
+---
+ python/pyspark/cloudpickle.py |   14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/python/pyspark/cloudpickle.py b/python/pyspark/cloudpickle.py
+index e56e22a..822ae46 100644
+--- a/python/pyspark/cloudpickle.py
++++ b/python/pyspark/cloudpickle.py
+@@ -169,7 +169,12 @@ class CloudPickler(Pickler):
+ 
+         if name is None:
+             name = obj.__name__
+-        modname = pickle.whichmodule(obj, name)
++        try:
++            # whichmodule() could fail, see
++            # https://bitbucket.org/gutworth/six/issues/63/importing-six-breaks-pickling
++            modname = pickle.whichmodule(obj, name)
++        except Exception:
++            modname = None
+         # print('which gives %s %s %s' % (modname, obj, name))
+         try:
+             themodule = sys.modules[modname]
+@@ -326,7 +331,12 @@ class CloudPickler(Pickler):
+ 
+         modname = getattr(obj, "__module__", None)
+         if modname is None:
+-            modname = pickle.whichmodule(obj, name)
++            try:
++                # whichmodule() could fail, see
++                # https://bitbucket.org/gutworth/six/issues/63/importing-six-breaks-pickling
++                modname = pickle.whichmodule(obj, name)
++            except Exception:
++                modname = '__main__'
+ 
+         if modname == '__main__':
+             themodule = None
+-- 
+1.7.9.5
+

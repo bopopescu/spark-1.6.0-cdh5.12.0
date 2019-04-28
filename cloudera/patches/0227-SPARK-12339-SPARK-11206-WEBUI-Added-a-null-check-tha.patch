@@ -1,0 +1,45 @@
+From 0047b97b1bc1969f00eb73d9a7aa60f50e8efce2 Mon Sep 17 00:00:00 2001
+From: Alex Bozarth <ajbozart@us.ibm.com>
+Date: Mon, 21 Dec 2015 14:06:36 -0800
+Subject: [PATCH 227/517] [SPARK-12339][SPARK-11206][WEBUI] Added a null check
+ that was removed in
+
+Updates made in SPARK-11206 missed an edge case which cause's a NullPointerException when a task is killed. In some cases when a task ends in failure taskMetrics is initialized as null (see JobProgressListener.onTaskEnd()). To address this a null check was added. Before the changes in SPARK-11206 this null check was called at the start of the updateTaskAccumulatorValues() function.
+
+Author: Alex Bozarth <ajbozart@us.ibm.com>
+
+Closes #10405 from ajbozarth/spark12339.
+
+(cherry picked from commit b0849b8aeafa801bb0561f1f6e46dc1d56c37c19)
+---
+ .../spark/sql/execution/ui/SQLListener.scala       |   14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SQLListener.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SQLListener.scala
+index e19a1e3..622e01c 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SQLListener.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SQLListener.scala
+@@ -160,12 +160,14 @@ private[sql] class SQLListener(conf: SparkConf) extends SparkListener with Loggi
+   }
+ 
+   override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = synchronized {
+-    updateTaskAccumulatorValues(
+-      taskEnd.taskInfo.taskId,
+-      taskEnd.stageId,
+-      taskEnd.stageAttemptId,
+-      taskEnd.taskMetrics.accumulatorUpdates(),
+-      finishTask = true)
++    if (taskEnd.taskMetrics != null) {
++      updateTaskAccumulatorValues(
++        taskEnd.taskInfo.taskId,
++        taskEnd.stageId,
++        taskEnd.stageAttemptId,
++        taskEnd.taskMetrics.accumulatorUpdates(),
++        finishTask = true)
++    }
+   }
+ 
+   /**
+-- 
+1.7.9.5
+

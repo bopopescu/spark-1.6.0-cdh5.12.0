@@ -1,0 +1,52 @@
+From ab0ce21deceecd8fab928614d2aa57ee6fd26867 Mon Sep 17 00:00:00 2001
+From: Philipp Hoffmann <mail@philipphoffmann.de>
+Date: Mon, 9 May 2016 11:02:13 -0700
+Subject: [PATCH 346/517] [SPARK-15223][DOCS] fix wrongly named config
+ reference
+
+## What changes were proposed in this pull request?
+
+The configuration setting `spark.executor.logs.rolling.size.maxBytes` was changed to `spark.executor.logs.rolling.maxSize` in 1.4 or so.
+
+This commit fixes a remaining reference to the old name in the documentation.
+
+Also the description for `spark.executor.logs.rolling.maxSize` was edited to clearly state that the unit for the size is bytes.
+
+## How was this patch tested?
+
+no tests
+
+Author: Philipp Hoffmann <mail@philipphoffmann.de>
+
+Closes #13001 from philipphoffmann/patch-3.
+
+(cherry picked from commit 518af0796384cd68927b90de8cb33b5a765c2dd0)
+---
+ docs/configuration.md |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 7827759..c0a7bfd 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -284,7 +284,7 @@ Apart from these, the following properties are also available, and may be useful
+   <td><code>spark.executor.logs.rolling.maxSize</code></td>
+   <td>(none)</td>
+   <td>
+-    Set the max size of the file by which the executor logs will be rolled over.
++    Set the max size of the file in bytes by which the executor logs will be rolled over.
+     Rolling is disabled by default. See <code>spark.executor.logs.rolling.maxRetainedFiles</code>
+     for automatic cleaning of old logs.
+   </td>
+@@ -296,7 +296,7 @@ Apart from these, the following properties are also available, and may be useful
+     Set the strategy of rolling of executor logs. By default it is disabled. It can
+     be set to "time" (time-based rolling) or "size" (size-based rolling). For "time",
+     use <code>spark.executor.logs.rolling.time.interval</code> to set the rolling interval.
+-    For "size", use <code>spark.executor.logs.rolling.size.maxBytes</code> to set
++    For "size", use <code>spark.executor.logs.rolling.maxSize</code> to set
+     the maximum file size for rolling.
+   </td>
+ </tr>
+-- 
+1.7.9.5
+

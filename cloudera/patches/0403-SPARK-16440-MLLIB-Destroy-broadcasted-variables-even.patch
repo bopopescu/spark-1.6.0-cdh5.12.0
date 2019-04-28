@@ -1,0 +1,46 @@
+From 6acf46d21d6ce482868dcbca96f4f8457fde6145 Mon Sep 17 00:00:00 2001
+From: Anthony Truchet <a.truchet@criteo.com>
+Date: Wed, 20 Jul 2016 10:39:59 +0100
+Subject: [PATCH 403/517] [SPARK-16440][MLLIB] Destroy broadcasted variables
+ even on driver
+
+## What changes were proposed in this pull request?
+Forgotten broadcasted variables were persisted into a previous #PR 14153). This PR turns those `unpersist()` into `destroy()` so that memory is freed even on the driver.
+
+## How was this patch tested?
+Unit Tests in Word2VecSuite were run locally.
+
+This contribution is done on behalf of Criteo, according to the
+terms of the Apache license 2.0.
+
+Author: Anthony Truchet <a.truchet@criteo.com>
+
+Closes #14268 from AnthonyTruchet/SPARK-16440.
+
+(cherry picked from commit 0dc79ffd1cbb45e69a35e3f5334c9a13290037a0)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit f6e0c17370cfaed766e2f3a4f8ae175e28420c08)
+---
+ .../org/apache/spark/mllib/feature/Word2Vec.scala  |    6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/feature/Word2Vec.scala b/mllib/src/main/scala/org/apache/spark/mllib/feature/Word2Vec.scala
+index c2ed896..859ec86 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/feature/Word2Vec.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/feature/Word2Vec.scala
+@@ -416,9 +416,9 @@ class Word2Vec extends Serializable with Logging {
+       }
+     }
+     newSentences.unpersist()
+-    expTable.unpersist()
+-    bcVocab.unpersist()
+-    bcVocabHash.unpersist()
++    expTable.destroy()
++    bcVocab.destroy()
++    bcVocabHash.destroy()
+ 
+     val wordArray = vocab.map(_.word)
+     new Word2VecModel(wordArray.zipWithIndex.toMap, syn0Global)
+-- 
+1.7.9.5
+

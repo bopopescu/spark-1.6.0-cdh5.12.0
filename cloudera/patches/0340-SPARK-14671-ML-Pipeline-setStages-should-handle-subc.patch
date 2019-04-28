@@ -1,0 +1,66 @@
+From 3e829e56e93ca97168c62d6ba85aa611cc8ced17 Mon Sep 17 00:00:00 2001
+From: "Joseph K. Bradley" <joseph@databricks.com>
+Date: Wed, 27 Apr 2016 16:11:12 -0700
+Subject: [PATCH 340/517] [SPARK-14671][ML] Pipeline setStages should handle
+ subclasses of PipelineStage
+
+Pipeline.setStages failed for some code examples which worked in 1.5 but fail in 1.6.  This tends to occur when using a mix of transformers from ml.feature. It is because Java Arrays are non-covariant and the addition of MLWritable to some transformers means the stages0/1 arrays above are not of type Array[PipelineStage].  This PR modifies the following to accept subclasses of PipelineStage:
+* Pipeline.setStages()
+* Params.w()
+
+Unit test which fails to compile before this fix.
+
+Author: Joseph K. Bradley <joseph@databricks.com>
+
+Closes #12430 from jkbradley/pipeline-setstages.
+
+(cherry picked from commit f5ebb18c45ffdee2756a80f64239cb9158df1a11)
+Signed-off-by: Joseph K. Bradley <joseph@databricks.com>
+
+Conflicts:
+	mllib/src/main/scala/org/apache/spark/ml/Pipeline.scala
+	mllib/src/test/scala/org/apache/spark/ml/PipelineSuite.scala
+
+(cherry picked from commit 5e53d4a8dc68390d0cc2722fc4a5b4f341b8125f)
+---
+ .../main/scala/org/apache/spark/ml/Pipeline.scala  |    5 ++++-
+ .../scala/org/apache/spark/ml/PipelineSuite.scala  |    7 +++++++
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/ml/Pipeline.scala b/mllib/src/main/scala/org/apache/spark/ml/Pipeline.scala
+index 4b2b3f8..eb57ac8 100644
+--- a/mllib/src/main/scala/org/apache/spark/ml/Pipeline.scala
++++ b/mllib/src/main/scala/org/apache/spark/ml/Pipeline.scala
+@@ -99,7 +99,10 @@ class Pipeline(override val uid: String) extends Estimator[PipelineModel] with M
+   val stages: Param[Array[PipelineStage]] = new Param(this, "stages", "stages of the pipeline")
+ 
+   /** @group setParam */
+-  def setStages(value: Array[PipelineStage]): this.type = { set(stages, value); this }
++  def setStages(value: Array[_ <: PipelineStage]): this.type = {
++    set(stages, value.asInstanceOf[Array[PipelineStage]])
++    this
++  }
+ 
+   // Below, we clone stages so that modifications to the list of stages will not change
+   // the Param value in the Pipeline.
+diff --git a/mllib/src/test/scala/org/apache/spark/ml/PipelineSuite.scala b/mllib/src/test/scala/org/apache/spark/ml/PipelineSuite.scala
+index 8c86767..9749df6 100644
+--- a/mllib/src/test/scala/org/apache/spark/ml/PipelineSuite.scala
++++ b/mllib/src/test/scala/org/apache/spark/ml/PipelineSuite.scala
+@@ -174,6 +174,13 @@ class PipelineSuite extends SparkFunSuite with MLlibTestSparkContext with Defaul
+       }
+     }
+   }
++
++  test("Pipeline.setStages should handle Java Arrays being non-covariant") {
++    val stages0 = Array(new UnWritableStage("b"))
++    val stages1 = Array(new WritableStage("a"))
++    val steps = stages0 ++ stages1
++    val p = new Pipeline().setStages(steps)
++  }
+ }
+ 
+ 
+-- 
+1.7.9.5
+

@@ -1,0 +1,85 @@
+From 5489f7b46348e6247764614232ba6eb3779540b3 Mon Sep 17 00:00:00 2001
+From: Sital Kedia <skedia@fb.com>
+Date: Fri, 18 Mar 2016 12:56:06 -0700
+Subject: [PATCH 310/517] =?UTF-8?q?[SPARK-13958]=20Executor=20OOM=20due=20to?=
+ =?UTF-8?q?=20unbounded=20growth=20of=20pointer=20array=20in=E2=80=A6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+## What changes were proposed in this pull request?
+
+This change fixes the executor OOM which was recently introduced in PR apache/spark#11095
+(Please fill in changes proposed in this fix)
+
+## How was this patch tested?
+Tested by running a spark job on the cluster.
+(Please explain how this patch was tested. E.g. unit tests, integration tests, manual tests)
+
+(If this patch involves UI changes, please attach a screenshot; otherwise, remove this)
+
+… Sorter
+
+Author: Sital Kedia <skedia@fb.com>
+
+Closes #11794 from sitalkedia/SPARK-13958.
+
+(cherry picked from commit 2e0c5284fd88ba89f53f93dcf1eb26bca2be49c5)
+Signed-off-by: Davies Liu <davies.liu@gmail.com>
+(cherry picked from commit 022e06d18471bf54954846c815c8a3666aef9fc3)
+---
+ .../spark/shuffle/sort/ShuffleExternalSorter.java  |   13 ++++++++++++-
+ .../unsafe/sort/UnsafeExternalSorter.java          |   13 ++++++++++++-
+ 2 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/core/src/main/java/org/apache/spark/shuffle/sort/ShuffleExternalSorter.java b/core/src/main/java/org/apache/spark/shuffle/sort/ShuffleExternalSorter.java
+index bce6570..22348c0 100644
+--- a/core/src/main/java/org/apache/spark/shuffle/sort/ShuffleExternalSorter.java
++++ b/core/src/main/java/org/apache/spark/shuffle/sort/ShuffleExternalSorter.java
+@@ -322,7 +322,18 @@ final class ShuffleExternalSorter extends MemoryConsumer {
+     assert(inMemSorter != null);
+     if (!inMemSorter.hasSpaceForAnotherRecord()) {
+       long used = inMemSorter.getMemoryUsage();
+-      LongArray array = allocateArray(used / 8 * 2);
++      LongArray array;
++      try {
++        // could trigger spilling
++        array = allocateArray(used / 8 * 2);
++      } catch (OutOfMemoryError e) {
++        // should have trigger spilling
++        if (!inMemSorter.hasSpaceForAnotherRecord()) {
++          logger.error("Unable to grow the pointer array");
++          throw e;
++        }
++        return;
++      }
+       // check if spilling is triggered or not
+       if (inMemSorter.hasSpaceForAnotherRecord()) {
+         freeArray(array);
+diff --git a/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/UnsafeExternalSorter.java b/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/UnsafeExternalSorter.java
+index a181718..de38c2d 100644
+--- a/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/UnsafeExternalSorter.java
++++ b/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/UnsafeExternalSorter.java
+@@ -295,7 +295,18 @@ public final class UnsafeExternalSorter extends MemoryConsumer {
+     assert(inMemSorter != null);
+     if (!inMemSorter.hasSpaceForAnotherRecord()) {
+       long used = inMemSorter.getMemoryUsage();
+-      LongArray array = allocateArray(used / 8 * 2);
++      LongArray array;
++      try {
++        // could trigger spilling
++        array = allocateArray(used / 8 * 2);
++      } catch (OutOfMemoryError e) {
++        // should have trigger spilling
++        if (!inMemSorter.hasSpaceForAnotherRecord()) {
++          logger.error("Unable to grow the pointer array");
++          throw e;
++        }
++        return;
++      }
+       // check if spilling is triggered or not
+       if (inMemSorter.hasSpaceForAnotherRecord()) {
+         freeArray(array);
+-- 
+1.7.9.5
+

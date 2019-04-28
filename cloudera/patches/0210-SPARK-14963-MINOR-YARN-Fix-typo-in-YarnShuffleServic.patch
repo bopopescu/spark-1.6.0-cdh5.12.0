@@ -1,0 +1,42 @@
+From 65a4d0244241f4ae52f907f69775edd50d2ba5ac Mon Sep 17 00:00:00 2001
+From: jerryshao <sshao@hortonworks.com>
+Date: Thu, 14 Jul 2016 08:31:04 -0500
+Subject: [PATCH 210/517] [SPARK-14963][MINOR][YARN] Fix typo in
+ YarnShuffleService recovery file name
+
+## What changes were proposed in this pull request?
+
+Due to the changes of [SPARK-14963](https://issues.apache.org/jira/browse/SPARK-14963), external shuffle recovery file name is changed mistakenly, so here change it back to the previous file name.
+
+This only affects the master branch, branch-2.0 is correct [here](https://github.com/apache/spark/blob/branch-2.0/common/network-yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java#L195).
+
+## How was this patch tested?
+
+N/A
+
+Author: jerryshao <sshao@hortonworks.com>
+
+Closes #14197 from jerryshao/fix-typo-file-name.
+
+(cherry picked from commit c4bc2ed844ea045d2e8218154690b5b2b023f1e5)
+(cherry picked from commit 5377df1dcb0b470d6d13fadf050c20ff0c9b717e)
+---
+ .../spark/network/yarn/YarnShuffleService.java     |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java b/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java
+index 9807383..8a05628 100644
+--- a/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java
++++ b/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java
+@@ -68,7 +68,7 @@ public class YarnShuffleService extends AuxiliaryService {
+   private static final String SPARK_AUTHENTICATE_KEY = "spark.authenticate";
+   private static final boolean DEFAULT_SPARK_AUTHENTICATE = false;
+ 
+-  private static final String RECOVERY_FILE_NAME = "registeredExecutor.ldb";
++  private static final String RECOVERY_FILE_NAME = "registeredExecutors.ldb";
+ 
+   // An entity that manages the shuffle secret per application
+   // This is used only if authentication is enabled
+-- 
+1.7.9.5
+

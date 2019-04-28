@@ -1,0 +1,83 @@
+From 76fbae278cd2e90717133bb1798910ce7beed384 Mon Sep 17 00:00:00 2001
+From: Sean Zhong <seanzhong@databricks.com>
+Date: Tue, 6 Sep 2016 20:07:44 +0800
+Subject: [PATCH 429/517] [SPARK-17356][SQL][1.6] Fix out of memory issue when
+ generating JSON for TreeNode
+
+This is a backport of PR https://github.com/apache/spark/pull/14915 to branch 1.6.
+
+## What changes were proposed in this pull request?
+
+class `org.apache.spark.sql.types.Metadata` is widely used in mllib to store some ml attributes. `Metadata` is commonly stored in `Alias` expression.
+
+```
+case class Alias(child: Expression, name: String)(
+    val exprId: ExprId = NamedExpression.newExprId,
+    val qualifier: Option[String] = None,
+    val explicitMetadata: Option[Metadata] = None,
+    override val isGenerated: java.lang.Boolean = false)
+```
+
+The `Metadata` can take a big memory footprint since the number of attributes is big ( in scale of million). When `toJSON` is called on `Alias` expression, the `Metadata` will also be converted to a big JSON string.
+If a plan contains many such kind of `Alias` expressions, it may trigger out of memory error when `toJSON` is called, since converting all `Metadata` references to JSON will take huge memory.
+
+With this PR, we will skip scanning Metadata when doing JSON conversion. For a reproducer of the OOM, and analysis, please look at jira https://issues.apache.org/jira/browse/SPARK-17356.
+
+## How was this patch tested?
+
+Existing tests.
+
+Author: Sean Zhong <seanzhong@databricks.com>
+
+Closes #14973 from clockfly/json_oom_1.6.
+
+(cherry picked from commit e6480a670dd091f02bbe6eb27fca4f78d14dd252)
+---
+ .../apache/spark/sql/catalyst/trees/TreeNode.scala |    4 +++-
+ .../scala/org/apache/spark/sql/QueryTest.scala     |    8 ++++++++
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/trees/TreeNode.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/trees/TreeNode.scala
+index c97dc2d..68d340b 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/trees/TreeNode.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/trees/TreeNode.scala
+@@ -530,7 +530,9 @@ abstract class TreeNode[BaseType <: TreeNode[BaseType]] extends Product {
+     case s: String => JString(s)
+     case u: UUID => JString(u.toString)
+     case dt: DataType => dt.jsonValue
+-    case m: Metadata => m.jsonValue
++    // SPARK-17356: In usage of mllib, Metadata may store a huge vector of data, transforming
++    // it to JSON may trigger OutOfMemoryError.
++    case m: Metadata => Metadata.empty.jsonValue
+     case s: StorageLevel =>
+       ("useDisk" -> s.useDisk) ~ ("useMemory" -> s.useMemory) ~ ("useOffHeap" -> s.useOffHeap) ~
+         ("deserialized" -> s.deserialized) ~ ("replication" -> s.replication)
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala b/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala
+index 4d7dbd6..c93eac4 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala
+@@ -30,6 +30,7 @@ import org.apache.spark.sql.catalyst.expressions._
+ import org.apache.spark.sql.execution.columnar.InMemoryRelation
+ import org.apache.spark.sql.execution.datasources.LogicalRelation
+ import org.apache.spark.sql.execution.{LogicalRDD, Queryable}
++import org.apache.spark.sql.types.Metadata
+ 
+ abstract class QueryTest extends PlanTest {
+ 
+@@ -224,6 +225,13 @@ abstract class QueryTest extends PlanTest {
+     val normalized1 = logicalPlan.transformAllExpressions {
+       case udf: ScalaUDF => udf.copy(function = null)
+       case gen: UserDefinedGenerator => gen.copy(function = null)
++      // After SPARK-17356: the JSON representation no longer has the Metadata. We need to remove
++      // the Metadata from the normalized plan so that we can compare this plan with the
++      // JSON-deserialzed plan.
++      case a @ Alias(child, name) if a.explicitMetadata.isDefined =>
++        Alias(child, name)(a.exprId, a.qualifiers, Some(Metadata.empty))
++      case a: AttributeReference if a.metadata != Metadata.empty =>
++        AttributeReference(a.name, a.dataType, a.nullable, Metadata.empty)(a.exprId, a.qualifiers)
+     }
+ 
+     // RDDs/data are not serializable to JSON, so we need to collect LogicalPlans that contains
+-- 
+1.7.9.5
+

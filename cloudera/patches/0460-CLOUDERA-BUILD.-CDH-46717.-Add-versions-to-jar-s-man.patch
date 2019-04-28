@@ -1,0 +1,37 @@
+From 85c52dd8614e842859a0522f552a63bc23b2984b Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Mon, 9 Jan 2017 16:37:42 -0800
+Subject: [PATCH 460/517] CLOUDERA-BUILD. CDH-46717. Add versions to jar's
+ manifest.
+
+This restores functionality that is available in Apache's root pom
+but is missing from CDH's pom, and which some downstream
+dependencies like Oozie want.
+
+(cherry picked from commit 6c6a16a4291dfb15917b490c23c1dbca56d7f9ec)
+---
+ pom.xml |    8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/pom.xml b/pom.xml
+index 5d9f4a6..02b2488 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -2141,6 +2141,14 @@
+           <groupId>org.apache.maven.plugins</groupId>
+           <artifactId>maven-jar-plugin</artifactId>
+           <version>2.6</version>
++          <configuration>
++            <archive>
++              <manifest>
++                <addDefaultSpecificationEntries>true</addDefaultSpecificationEntries>
++                <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
++              </manifest>
++            </archive>
++          </configuration>
+         </plugin>
+         <plugin>
+           <groupId>org.apache.maven.plugins</groupId>
+-- 
+1.7.9.5
+

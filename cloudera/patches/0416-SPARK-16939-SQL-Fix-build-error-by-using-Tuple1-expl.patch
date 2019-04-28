@@ -1,0 +1,52 @@
+From 0c1099d77879450a9ca76a7e4a83e5f69207ab6c Mon Sep 17 00:00:00 2001
+From: Dongjoon Hyun <dongjoon@apache.org>
+Date: Sun, 7 Aug 2016 20:51:54 +0100
+Subject: [PATCH 416/517] [SPARK-16939][SQL] Fix build error by using `Tuple1`
+ explicitly in StringFunctionsSuite
+
+## What changes were proposed in this pull request?
+
+This PR aims to fix a build error on branch 1.6 at https://github.com/apache/spark/commit/8d8725208771a8815a60160a5a30dc6ea87a7e6a, but I think we had better have this consistently in master branch, too. It's because there exist other ongoing PR (https://github.com/apache/spark/pull/14525) about this.
+
+https://amplab.cs.berkeley.edu/jenkins/job/spark-branch-1.6-compile-maven-with-yarn-2.3/286/console
+
+```scala
+[error] /home/jenkins/workspace/spark-branch-1.6-compile-maven-with-yarn-2.3/sql/core/src/test/scala/org/apache/spark/sql/StringFunctionsSuite.scala:82: value toDF is not a member of Seq[String]
+[error]     val df = Seq("aaaac").toDF("s")
+[error]                           ^
+```
+
+## How was this patch tested?
+
+After passing Jenkins, run compilation test on branch 1.6.
+```
+build/mvn -DskipTests -Pyarn -Phadoop-2.3 -Pkinesis-asl -Phive -Phive-thriftserver install
+```
+
+Author: Dongjoon Hyun <dongjoon@apache.org>
+
+Closes #14526 from dongjoon-hyun/SPARK-16939.
+
+(cherry picked from commit a16983c97b4c6539f97e5d26f163fed49872df2b)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit a3b06ae0bbd1b7b0e73abdb9fefe9d0bddec0ea9)
+---
+ .../apache/spark/sql/StringFunctionsSuite.scala    |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/StringFunctionsSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/StringFunctionsSuite.scala
+index edd66ca..4e08005 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/StringFunctionsSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/StringFunctionsSuite.scala
+@@ -79,7 +79,7 @@ class StringFunctionsSuite extends QueryTest with SharedSQLContext {
+   }
+ 
+   test("non-matching optional group") {
+-    val df = Seq("aaaac").toDF("s")
++    val df = Seq(Tuple1("aaaac")).toDF("s")
+     checkAnswer(
+       df.select(regexp_extract($"s", "(a+)(b)?(c)", 2)),
+       Row("")
+-- 
+1.7.9.5
+

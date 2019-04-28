@@ -1,0 +1,39 @@
+From 757c97eb18a3fe039b1e3aa3f09decc6bcd5796e Mon Sep 17 00:00:00 2001
+From: trueyao <501663994@qq.com>
+Date: Thu, 17 Mar 2016 09:45:06 +0000
+Subject: [PATCH 309/517] [SPARK-13901][CORE] correct the logDebug information
+ when jump to the next locality level
+
+JIRA Issue:https://issues.apache.org/jira/browse/SPARK-13901
+In getAllowedLocalityLevel method of TaskSetManager,we get wrong logDebug information when jump to the next locality level.So we should fix it.
+
+Author: trueyao <501663994@qq.com>
+
+Closes #11719 from trueyao/logDebug-localityWait.
+
+(cherry picked from commit ea9ca6f04ce1fb83612f907d6d0996d6fb362bd2)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 1fcd17f84ac497caaf1540f6fa5f32f23b93e657)
+---
+ .../apache/spark/scheduler/TaskSetManager.scala    |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/TaskSetManager.scala b/core/src/main/scala/org/apache/spark/scheduler/TaskSetManager.scala
+index 62c3ffc..41e5c47 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/TaskSetManager.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/TaskSetManager.scala
+@@ -576,9 +576,9 @@ private[spark] class TaskSetManager(
+         // Jump to the next locality level, and reset lastLaunchTime so that the next locality
+         // wait timer doesn't immediately expire
+         lastLaunchTime += localityWaits(currentLocalityIndex)
+-        currentLocalityIndex += 1
+-        logDebug(s"Moving to ${myLocalityLevels(currentLocalityIndex)} after waiting for " +
++        logDebug(s"Moving to ${myLocalityLevels(currentLocalityIndex + 1)} after waiting for " +
+           s"${localityWaits(currentLocalityIndex)}ms")
++        currentLocalityIndex += 1
+       } else {
+         return myLocalityLevels(currentLocalityIndex)
+       }
+-- 
+1.7.9.5
+

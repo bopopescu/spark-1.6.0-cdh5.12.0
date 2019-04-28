@@ -1,0 +1,93 @@
+From db9e5b0ef7e96a1af3ac6a87f0f37cd1e01c7126 Mon Sep 17 00:00:00 2001
+From: Sean Zhong <seanzhong@databricks.com>
+Date: Wed, 21 Sep 2016 16:53:34 +0800
+Subject: [PATCH 435/517] [SPARK-17617][SQL] Remainder(%) expression.eval
+ returns incorrect result on double value
+
+## What changes were proposed in this pull request?
+
+Remainder(%) expression's `eval()` returns incorrect result when the dividend is a big double. The reason is that Remainder converts the double dividend to decimal to do "%", and that lose precision.
+
+This bug only affects the `eval()` that is used by constant folding, the codegen path is not impacted.
+
+### Before change
+```
+scala> -5083676433652386516D % 10
+res2: Double = -6.0
+
+scala> spark.sql("select -5083676433652386516D % 10 as a").show
++---+
+|  a|
++---+
+|0.0|
++---+
+```
+
+### After change
+```
+scala> spark.sql("select -5083676433652386516D % 10 as a").show
++----+
+|   a|
++----+
+|-6.0|
++----+
+```
+
+## How was this patch tested?
+
+Unit test.
+
+Author: Sean Zhong <seanzhong@databricks.com>
+
+Closes #15171 from clockfly/SPARK-17617.
+
+(cherry picked from commit 3977223a3268aaf6913a325ee459139a4a302b1c)
+Signed-off-by: Wenchen Fan <wenchen@databricks.com>
+(cherry picked from commit 8f88412c31dc840c15df9822638645381c82a2fe)
+---
+ .../sql/catalyst/expressions/arithmetic.scala      |    6 +++++-
+ .../expressions/ArithmeticExpressionSuite.scala    |   11 +++++++++++
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/arithmetic.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/arithmetic.scala
+index cfae285..7905825 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/arithmetic.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/arithmetic.scala
+@@ -273,7 +273,11 @@ case class Remainder(left: Expression, right: Expression) extends BinaryArithmet
+       if (input1 == null) {
+         null
+       } else {
+-        integral.rem(input1, input2)
++        input1 match {
++          case d: Double => d % input2.asInstanceOf[java.lang.Double]
++          case f: Float => f % input2.asInstanceOf[java.lang.Float]
++          case _ => integral.rem(input1, input2)
++        }
+       }
+     }
+   }
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/ArithmeticExpressionSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/ArithmeticExpressionSuite.scala
+index 72285c6..a5930d4 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/ArithmeticExpressionSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/ArithmeticExpressionSuite.scala
+@@ -172,6 +172,17 @@ class ArithmeticExpressionSuite extends SparkFunSuite with ExpressionEvalHelper
+     // }
+   }
+ 
++  test("SPARK-17617: % (Remainder) double % double on super big double") {
++    val leftDouble = Literal(-5083676433652386516D)
++    val rightDouble = Literal(10D)
++    checkEvaluation(Remainder(leftDouble, rightDouble), -6.0D)
++
++    // Float has smaller precision
++    val leftFloat = Literal(-5083676433652386516F)
++    val rightFloat = Literal(10F)
++    checkEvaluation(Remainder(leftFloat, rightFloat), -2.0F)
++  }
++
+   test("Abs") {
+     testNumericDataTypes { convert =>
+       val input = Literal(convert(1))
+-- 
+1.7.9.5
+

@@ -1,0 +1,95 @@
+From 8a428af15780d974f4e41151c25e0f243789f634 Mon Sep 17 00:00:00 2001
+From: Sun Rui <sunrui2016@gmail.com>
+Date: Tue, 3 May 2016 09:29:49 -0700
+Subject: [PATCH 427/517] [SPARK-15091][SPARKR] Fix warnings and a failure in
+ SparkR test cases with testthat version 1.0.1
+
+Fix warnings and a failure in SparkR test cases with testthat version 1.0.1
+
+SparkR unit test cases.
+
+Author: Sun Rui <sunrui2016@gmail.com>
+
+Closes #12867 from sun-rui/SPARK-15091.
+
+(cherry picked from commit 8b6491fc0b49b4e363887ae4b452ba69fe0290d5)
+Signed-off-by: Shivaram Venkataraman <shivaram@cs.berkeley.edu>
+(cherry picked from commit 21be94b160555fccb390c0c48a401b319d3d45ca)
+---
+ R/pkg/inst/tests/testthat/test_client.R   |    2 +-
+ R/pkg/inst/tests/testthat/test_context.R  |    2 +-
+ R/pkg/inst/tests/testthat/test_sparkSQL.R |   12 +++++++-----
+ 3 files changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/R/pkg/inst/tests/testthat/test_client.R b/R/pkg/inst/tests/testthat/test_client.R
+index a0664f3..28276a0 100644
+--- a/R/pkg/inst/tests/testthat/test_client.R
++++ b/R/pkg/inst/tests/testthat/test_client.R
+@@ -32,7 +32,7 @@ test_that("no package specified doesn't add packages flag", {
+ })
+ 
+ test_that("multiple packages don't produce a warning", {
+-  expect_that(generateSparkSubmitArgs("", "", "", "", c("A", "B")), not(gives_warning()))
++  expect_warning(generateSparkSubmitArgs("", "", "", "", c("A", "B")), NA)
+ })
+ 
+ test_that("sparkJars sparkPackages as character vectors", {
+diff --git a/R/pkg/inst/tests/testthat/test_context.R b/R/pkg/inst/tests/testthat/test_context.R
+index 1707e31..e66e540 100644
+--- a/R/pkg/inst/tests/testthat/test_context.R
++++ b/R/pkg/inst/tests/testthat/test_context.R
+@@ -109,6 +109,6 @@ test_that("sparkJars sparkPackages as comma-separated strings", {
+ 
+   # check normalizePath
+   f <- dir()[[1]]
+-  expect_that(processSparkJars(f), not(gives_warning()))
++  expect_warning(processSparkJars(f), NA)
+   expect_match(processSparkJars(f), f)
+ })
+diff --git a/R/pkg/inst/tests/testthat/test_sparkSQL.R b/R/pkg/inst/tests/testthat/test_sparkSQL.R
+index 61acaef..278ef24 100644
+--- a/R/pkg/inst/tests/testthat/test_sparkSQL.R
++++ b/R/pkg/inst/tests/testthat/test_sparkSQL.R
+@@ -1119,9 +1119,9 @@ test_that("date functions on a DataFrame", {
+                c(as.POSIXlt("2012-12-13 21:34:00 UTC"), as.POSIXlt("2014-12-15 10:24:34 UTC")))
+   expect_equal(collect(select(df2, to_utc_timestamp(df2$b, "JST")))[, 1],
+                c(as.POSIXlt("2012-12-13 03:34:00 UTC"), as.POSIXlt("2014-12-14 16:24:34 UTC")))
+-  expect_more_than(collect(select(df2, unix_timestamp()))[1, 1], 0)
+-  expect_more_than(collect(select(df2, unix_timestamp(df2$b)))[1, 1], 0)
+-  expect_more_than(collect(select(df2, unix_timestamp(lit("2015-01-01"), "yyyy-MM-dd")))[1, 1], 0)
++  expect_gt(collect(select(df2, unix_timestamp()))[1, 1], 0)
++  expect_gt(collect(select(df2, unix_timestamp(df2$b)))[1, 1], 0)
++  expect_gt(collect(select(df2, unix_timestamp(lit("2015-01-01"), "yyyy-MM-dd")))[1, 1], 0)
+ 
+   l3 <- list(list(a = 1000), list(a = -1000))
+   df3 <- createDataFrame(sqlContext, l3)
+@@ -1389,7 +1389,6 @@ test_that("toJSON() returns an RDD of the correct values", {
+ 
+ test_that("showDF()", {
+   df <- read.json(sqlContext, jsonPath)
+-  s <- capture.output(showDF(df))
+   expected <- paste("+----+-------+\n",
+                     "| age|   name|\n",
+                     "+----+-------+\n",
+@@ -1397,7 +1396,7 @@ test_that("showDF()", {
+                     "|  30|   Andy|\n",
+                     "|  19| Justin|\n",
+                     "+----+-------+\n", sep = "")
+-  expect_output(s, expected)
++  expect_output(showDF(df), expected)
+ })
+ 
+ test_that("isLocal()", {
+@@ -1749,6 +1748,9 @@ test_that("Method as.data.frame as a synonym for collect()", {
+   expect_equal(as.data.frame(irisDF), collect(irisDF))
+   irisDF2 <- irisDF[irisDF$Species == "setosa", ]
+   expect_equal(as.data.frame(irisDF2), collect(irisDF2))
++
++  # Make sure as.data.frame in the R base package is not covered
++  expect_error(as.data.frame(c(1, 2)), NA)
+ })
+ 
+ test_that("attach() on a DataFrame", {
+-- 
+1.7.9.5
+

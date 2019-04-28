@@ -1,0 +1,41 @@
+From d98d3beebbe791f9398e6541829ca2a98df5ad59 Mon Sep 17 00:00:00 2001
+From: Shixiong Zhu <shixiong@databricks.com>
+Date: Tue, 6 Sep 2016 16:49:06 -0700
+Subject: [PATCH 430/517] [SPARK-17316][CORE] Fix the 'ask' type parameter in
+ 'removeExecutor'
+
+## What changes were proposed in this pull request?
+
+Fix the 'ask' type parameter in 'removeExecutor' to eliminate a lot of error logs `Cannot cast java.lang.Boolean to scala.runtime.Nothing$`
+
+## How was this patch tested?
+
+Jenkins
+
+Author: Shixiong Zhu <shixiong@databricks.com>
+
+Closes #14983 from zsxwing/SPARK-17316-3.
+
+(cherry picked from commit 175b4344112b376cbbbd05265125ed0e1b87d507)
+Signed-off-by: Shixiong Zhu <shixiong@databricks.com>
+(cherry picked from commit 3f797dd87e11e1aa44a063d6faa7e423e291dc2d)
+---
+ .../cluster/CoarseGrainedSchedulerBackend.scala    |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+index 35481aa..5db4997 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+@@ -395,7 +395,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+    */
+   protected def removeExecutor(executorId: String, reason: ExecutorLossReason): Unit = {
+     // Only log the failure since we don't care about the result.
+-    driverEndpoint.ask(RemoveExecutor(executorId, reason)).onFailure { case t =>
++    driverEndpoint.ask[Boolean](RemoveExecutor(executorId, reason)).onFailure { case t =>
+       logError(t.getMessage, t)
+     }(ThreadUtils.sameThread)
+   }
+-- 
+1.7.9.5
+

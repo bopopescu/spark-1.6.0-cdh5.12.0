@@ -1,0 +1,44 @@
+From cdc2b81238bf31aff1ccc5d2e25cc70d9ecb2536 Mon Sep 17 00:00:00 2001
+From: Peter Ableda <abledapeter@gmail.com>
+Date: Thu, 23 Jun 2016 09:00:31 -0500
+Subject: [PATCH 512/517] [SPARK-16138] Try to cancel executor requests only
+ if we have at least 1
+
+Adding additional check to if statement
+
+I built and deployed to internal cluster to observe behaviour. After the change the invalid logging is gone:
+
+```
+16/06/22 08:46:36 INFO yarn.YarnAllocator: Driver requested a total number of 1 executor(s).
+16/06/22 08:46:36 INFO yarn.YarnAllocator: Canceling requests for 1 executor container(s) to have a new desired total 1 executors.
+16/06/22 08:46:36 INFO yarn.YarnAllocator: Driver requested a total number of 0 executor(s).
+16/06/22 08:47:36 INFO yarn.ApplicationMaster$AMEndpoint: Driver requested to kill executor(s) 1.
+```
+
+Author: Peter Ableda <abledapeter@gmail.com>
+
+Closes #13850 from peterableda/patch-2.
+
+(cherry picked from commit 5bf2889bfcfd776e7ee1369443a0474421a800bd)
+
+Cloudera ID: CDH-53104
+---
+ .../apache/spark/deploy/yarn/YarnAllocator.scala   |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala
+index 874a2d5..2730044 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala
+@@ -314,7 +314,7 @@ private[yarn] class YarnAllocator(
+       if (unlocalized > 0) {
+           logInfo(s"Submitted $unlocalized unlocalized container requests.")
+       }
+-    } else if (missing < 0) {
++    } else if (numPendingAllocate > 0 && missing < 0) {
+       val numToCancel = math.min(numPendingAllocate, -missing)
+       logInfo(s"Canceling requests for $numToCancel executor containers")
+ 
+-- 
+1.7.9.5
+

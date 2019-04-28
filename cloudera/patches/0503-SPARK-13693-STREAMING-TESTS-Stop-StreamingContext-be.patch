@@ -1,0 +1,44 @@
+From 5ad4b20f5804197355163c2ce495b58f3d1075fb Mon Sep 17 00:00:00 2001
+From: Shixiong Zhu <shixiong@databricks.com>
+Date: Sat, 5 Mar 2016 15:26:27 -0800
+Subject: [PATCH 503/517] [SPARK-13693][STREAMING][TESTS] Stop
+ StreamingContext before deleting checkpoint dir
+
+## What changes were proposed in this pull request?
+
+Stop StreamingContext before deleting checkpoint dir to avoid the race condition that deleting the checkpoint dir and writing checkpoint happen at the same time.
+
+The flaky test log is here: https://amplab.cs.berkeley.edu/jenkins/job/spark-master-test-sbt-hadoop-2.7/256/testReport/junit/org.apache.spark.streaming/MapWithStateSuite/_It_is_not_a_test_/
+
+## How was this patch tested?
+
+unit tests
+
+Author: Shixiong Zhu <shixiong@databricks.com>
+
+Closes #11531 from zsxwing/SPARK-13693.
+
+(cherry picked from commit 8290004d94760c22d6d3ca8dda3003ac8644422f)
+---
+ .../apache/spark/streaming/MapWithStateSuite.scala |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/streaming/src/test/scala/org/apache/spark/streaming/MapWithStateSuite.scala b/streaming/src/test/scala/org/apache/spark/streaming/MapWithStateSuite.scala
+index 6b21433..c32289b 100644
+--- a/streaming/src/test/scala/org/apache/spark/streaming/MapWithStateSuite.scala
++++ b/streaming/src/test/scala/org/apache/spark/streaming/MapWithStateSuite.scala
+@@ -42,10 +42,10 @@ class MapWithStateSuite extends SparkFunSuite
+   }
+ 
+   after {
++    StreamingContext.getActive().foreach { _.stop(stopSparkContext = false) }
+     if (checkpointDir != null) {
+       Utils.deleteRecursively(checkpointDir)
+     }
+-    StreamingContext.getActive().foreach { _.stop(stopSparkContext = false) }
+   }
+ 
+   override def beforeAll(): Unit = {
+-- 
+1.7.9.5
+

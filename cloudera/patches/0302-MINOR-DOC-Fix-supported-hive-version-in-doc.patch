@@ -1,0 +1,52 @@
+From a8df053a0a40a07b3234a02ddab2c28bde698523 Mon Sep 17 00:00:00 2001
+From: Dongjoon Hyun <dongjoon@apache.org>
+Date: Thu, 10 Mar 2016 17:07:18 -0800
+Subject: [PATCH 302/517] [MINOR][DOC] Fix supported hive version in doc
+
+## What changes were proposed in this pull request?
+
+Today, Spark 1.6.1 and updated docs are release. Unfortunately, there is obsolete hive version information on docs: [Building Spark](http://spark.apache.org/docs/latest/building-spark.html#building-with-hive-and-jdbc-support). This PR fixes the following two lines.
+```
+-By default Spark will build with Hive 0.13.1 bindings.
++By default Spark will build with Hive 1.2.1 bindings.
+-# Apache Hadoop 2.4.X with Hive 13 support
++# Apache Hadoop 2.4.X with Hive 1.2.1 support
+```
+`sql/README.md` file also describe
+
+## How was this patch tested?
+
+Manual.
+
+(If this patch involves UI changes, please attach a screenshot; otherwise, remove this)
+
+Author: Dongjoon Hyun <dongjoon@apache.org>
+
+Closes #11639 from dongjoon-hyun/fix_doc_hive_version.
+
+(cherry picked from commit 88fa866620b85522bae2f71601cebb744c09ba7e)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit 078c714666a750b9a3530f380d9b2ffd881f3a46)
+---
+ docs/building-spark.md |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/docs/building-spark.md b/docs/building-spark.md
+index 3d38edb..5f694dc 100644
+--- a/docs/building-spark.md
++++ b/docs/building-spark.md
+@@ -117,9 +117,9 @@ mvn -Pyarn -Phadoop-2.3 -Dhadoop.version=2.3.0 -Dyarn.version=2.2.0 -DskipTests
+ # Building With Hive and JDBC Support
+ To enable Hive integration for Spark SQL along with its JDBC server and CLI,
+ add the `-Phive` and `Phive-thriftserver` profiles to your existing build options.
+-By default Spark will build with Hive 0.13.1 bindings.
++By default Spark will build with Hive 1.2.1 bindings.
+ {% highlight bash %}
+-# Apache Hadoop 2.4.X with Hive 13 support
++# Apache Hadoop 2.4.X with Hive 1.2.1 support
+ mvn -Pyarn -Phadoop-2.4 -Dhadoop.version=2.4.0 -Phive -Phive-thriftserver -DskipTests clean package
+ {% endhighlight %}
+ 
+-- 
+1.7.9.5
+

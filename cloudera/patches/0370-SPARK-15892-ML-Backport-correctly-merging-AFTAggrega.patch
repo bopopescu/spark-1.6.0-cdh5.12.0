@@ -1,0 +1,78 @@
+From 185eaa28fc2834d173799223614ff9437726b85d Mon Sep 17 00:00:00 2001
+From: hyukjinkwon <gurwls223@gmail.com>
+Date: Fri, 17 Jun 2016 21:04:24 -0700
+Subject: [PATCH 370/517] [SPARK-15892][ML] Backport correctly merging
+ AFTAggregators to branch 1.6
+
+## What changes were proposed in this pull request?
+
+This PR backports https://github.com/apache/spark/pull/13619.
+
+The original test added in branch-2.0 was failed in branch-1.6.
+
+This seems because the behaviour was changed in https://github.com/apache/spark/commit/101663f1ae222a919fc40510aa4f2bad22d1be6f. This was failure while calculating Euler's number which ends up with a infinity regardless of this path.
+
+So, I brought the dataset from `AFTSurvivalRegressionExample` to make sure this is working and then wrote the test.
+
+I ran the test before/after creating empty partitions. `model.scale` becomes `1.0` with empty partitions and becames `1.547` without them.
+
+After this patch, this becomes always `1.547`.
+
+## How was this patch tested?
+
+Unit test in `AFTSurvivalRegressionSuite`.
+
+Author: hyukjinkwon <gurwls223@gmail.com>
+
+Closes #13725 from HyukjinKwon/SPARK-15892-1-6.
+
+(cherry picked from commit fd053892c4f456c2ab6d4d8993704e3cc5013f13)
+---
+ .../ml/regression/AFTSurvivalRegression.scala      |    2 +-
+ .../ml/regression/AFTSurvivalRegressionSuite.scala |   17 +++++++++++++++++
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/ml/regression/AFTSurvivalRegression.scala b/mllib/src/main/scala/org/apache/spark/ml/regression/AFTSurvivalRegression.scala
+index aedfb48..cc1d19e 100644
+--- a/mllib/src/main/scala/org/apache/spark/ml/regression/AFTSurvivalRegression.scala
++++ b/mllib/src/main/scala/org/apache/spark/ml/regression/AFTSurvivalRegression.scala
+@@ -496,7 +496,7 @@ private class AFTAggregator(parameters: BDV[Double], fitIntercept: Boolean)
+    * @return This AFTAggregator object.
+    */
+   def merge(other: AFTAggregator): this.type = {
+-    if (totalCnt != 0) {
++    if (other.count != 0) {
+       totalCnt += other.totalCnt
+       lossSum += other.lossSum
+ 
+diff --git a/mllib/src/test/scala/org/apache/spark/ml/regression/AFTSurvivalRegressionSuite.scala b/mllib/src/test/scala/org/apache/spark/ml/regression/AFTSurvivalRegressionSuite.scala
+index d718ef6..70f9693 100644
+--- a/mllib/src/test/scala/org/apache/spark/ml/regression/AFTSurvivalRegressionSuite.scala
++++ b/mllib/src/test/scala/org/apache/spark/ml/regression/AFTSurvivalRegressionSuite.scala
+@@ -346,6 +346,23 @@ class AFTSurvivalRegressionSuite
+     testEstimatorAndModelReadWrite(aft, datasetMultivariate,
+       AFTSurvivalRegressionSuite.allParamSettings, checkModelData)
+   }
++
++  test("SPARK-15892: Incorrectly merged AFTAggregator with zero total count") {
++    // This `dataset` will contain an empty partition because it has five rows but
++    // the parallelism is bigger than that. Because the issue was about `AFTAggregator`s
++    // being merged incorrectly when it has an empty partition, the trained model has
++    // 1.0 scale from Euler's number for 0.
++    val points = sc.parallelize(Seq(
++      AFTPoint(Vectors.dense(1.560, -0.605), 1.218, 1.0),
++      AFTPoint(Vectors.dense(0.346, 2.158), 2.949, 0.0),
++      AFTPoint(Vectors.dense(1.380, 0.231), 3.627, 0.0),
++      AFTPoint(Vectors.dense(0.520, 1.151), 0.273, 1.0),
++      AFTPoint(Vectors.dense(0.795, -0.226), 4.199, 0.0)), numSlices = 6)
++    val dataset = sqlContext.createDataFrame(points)
++    val trainer = new AFTSurvivalRegression()
++    val model = trainer.fit(dataset)
++    assert(model.scale != 1)
++  }
+ }
+ 
+ object AFTSurvivalRegressionSuite {
+-- 
+1.7.9.5
+

@@ -1,0 +1,39 @@
+From 42586a8f32957b00a4e5fe1d181b02fac6db4422 Mon Sep 17 00:00:00 2001
+From: Sean Owen <sowen@cloudera.com>
+Date: Fri, 29 Jul 2016 09:06:34 -0700
+Subject: [PATCH 408/517] [SPARK-16751][HOTFIX] Also update hadoop-1 deps file
+ to reflect derby 10.12.1.1 security fix
+
+## What changes were proposed in this pull request?
+
+See https://github.com/apache/spark/pull/14379 ; I failed to note in back-porting to 1.6 that an additional Hadoop 1 deps file would need to be updated. This makes that change.
+
+## How was this patch tested?
+
+Jenkins tests.
+
+Author: Sean Owen <sowen@cloudera.com>
+
+Closes #14403 from srowen/SPARK-16751.2.
+
+(cherry picked from commit 03913af30bc0f000dcdcff768ba1625952270ef4)
+---
+ dev/deps/spark-deps-hadoop-1 |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dev/deps/spark-deps-hadoop-1 b/dev/deps/spark-deps-hadoop-1
+index a0530c0..ce53890 100644
+--- a/dev/deps/spark-deps-hadoop-1
++++ b/dev/deps/spark-deps-hadoop-1
+@@ -54,7 +54,7 @@ curator-recipes-2.4.0.jar
+ datanucleus-api-jdo-3.2.6.jar
+ datanucleus-core-3.2.10.jar
+ datanucleus-rdbms-3.2.9.jar
+-derby-10.10.1.1.jar
++derby-10.12.1.1.jar
+ eigenbase-properties-1.1.5.jar
+ geronimo-annotation_1.0_spec-1.1.1.jar
+ geronimo-jaspic_1.0_spec-1.0.jar
+-- 
+1.7.9.5
+

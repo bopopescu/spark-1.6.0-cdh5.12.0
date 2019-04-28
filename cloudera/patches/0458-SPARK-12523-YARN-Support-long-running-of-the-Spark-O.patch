@@ -1,0 +1,149 @@
+From ec4ad81377fae8986d1c44d37f106d77dff1e398 Mon Sep 17 00:00:00 2001
+From: huangzhaowei <carlmartinmax@gmail.com>
+Date: Fri, 26 Feb 2016 07:32:07 -0600
+Subject: [PATCH 458/517] [SPARK-12523][YARN] Support long-running of the
+ Spark On HBase and hive meta store.
+
+Obtain the hive metastore and hbase token as well as hdfs token in DelegationToeknRenewer to supoort long-running application of spark on hbase or thriftserver.
+
+Author: huangzhaowei <carlmartinmax@gmail.com>
+
+Closes #10645 from SaintBacchus/SPARK-12523.
+
+(cherry picked from commit 5c3912e5c90ce659146c3056430d100604378b71)
+---
+ .../deploy/yarn/AMDelegationTokenRenewer.scala     |    2 +
+ .../org/apache/spark/deploy/yarn/Client.scala      |   42 +-------------------
+ .../spark/deploy/yarn/YarnSparkHadoopUtil.scala    |   38 ++++++++++++++++++
+ 3 files changed, 42 insertions(+), 40 deletions(-)
+
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/AMDelegationTokenRenewer.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/AMDelegationTokenRenewer.scala
+index 56e4741..a033704 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/AMDelegationTokenRenewer.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/AMDelegationTokenRenewer.scala
+@@ -172,6 +172,8 @@ private[yarn] class AMDelegationTokenRenewer(
+       override def run(): Void = {
+         val nns = YarnSparkHadoopUtil.get.getNameNodesToAccess(sparkConf) + dst
+         hadoopUtil.obtainTokensForNamenodes(nns, freshHadoopConf, tempCreds)
++        hadoopUtil.obtainTokenForHiveMetastore(sparkConf, freshHadoopConf, tempCreds)
++        hadoopUtil.obtainTokenForHBase(sparkConf, freshHadoopConf, tempCreds)
+         null
+       }
+     })
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
+index e4342ef..6e12add 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
+@@ -348,8 +348,8 @@ private[spark] class Client(
+     // multiple times, YARN will fail to launch containers for the app with an internal
+     // error.
+     val distributedUris = new HashSet[String]
+-    obtainTokenForHiveMetastore(sparkConf, hadoopConf, credentials)
+-    obtainTokenForHBase(sparkConf, hadoopConf, credentials)
++    YarnSparkHadoopUtil.get.obtainTokenForHiveMetastore(sparkConf, hadoopConf, credentials)
++    YarnSparkHadoopUtil.get.obtainTokenForHBase(sparkConf, hadoopConf, credentials)
+ 
+     val replication = sparkConf.getInt("spark.yarn.submit.file.replication",
+       fs.getDefaultReplication(dst)).toShort
+@@ -1352,35 +1352,6 @@ object Client extends Logging {
+   }
+ 
+   /**
+-   * Obtains token for the Hive metastore and adds them to the credentials.
+-   */
+-  private def obtainTokenForHiveMetastore(
+-      sparkConf: SparkConf,
+-      conf: Configuration,
+-      credentials: Credentials) {
+-    if (shouldGetTokens(sparkConf, "hive") && UserGroupInformation.isSecurityEnabled) {
+-      YarnSparkHadoopUtil.get.obtainTokenForHiveMetastore(conf).foreach {
+-        credentials.addToken(new Text("hive.server2.delegation.token"), _)
+-      }
+-    }
+-  }
+-
+-  /**
+-   * Obtain a security token for HBase.
+-   */
+-  def obtainTokenForHBase(
+-      sparkConf: SparkConf,
+-      conf: Configuration,
+-      credentials: Credentials): Unit = {
+-    if (shouldGetTokens(sparkConf, "hbase") && UserGroupInformation.isSecurityEnabled) {
+-      YarnSparkHadoopUtil.get.obtainTokenForHBase(conf).foreach { token =>
+-        credentials.addToken(token.getService, token)
+-        logInfo("Added HBase security token to credentials.")
+-      }
+-    }
+-  }
+-
+-  /**
+    * Return whether the two file systems are the same.
+    */
+   private def compareFs(srcFs: FileSystem, destFs: FileSystem): Boolean = {
+@@ -1444,13 +1415,4 @@ object Client extends Logging {
+     components.mkString(Path.SEPARATOR)
+   }
+ 
+-  /**
+-   * Return whether delegation tokens should be retrieved for the given service when security is
+-   * enabled. By default, tokens are retrieved, but that behavior can be changed by setting
+-   * a service-specific configuration.
+-   */
+-  def shouldGetTokens(conf: SparkConf, service: String): Boolean = {
+-    conf.getBoolean(s"spark.yarn.security.tokens.${service}.enabled", true)
+-  }
+-
+ }
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnSparkHadoopUtil.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnSparkHadoopUtil.scala
+index e06919d..e4edb1b 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnSparkHadoopUtil.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnSparkHadoopUtil.scala
+@@ -135,6 +135,44 @@ class YarnSparkHadoopUtil extends SparkHadoopUtil {
+     }
+   }
+ 
++  /**
++    * Obtains token for the Hive metastore and adds them to the credentials.
++    */
++  def obtainTokenForHiveMetastore(
++      sparkConf: SparkConf,
++      conf: Configuration,
++      credentials: Credentials) {
++    if (shouldGetTokens(sparkConf, "hive") && UserGroupInformation.isSecurityEnabled) {
++      YarnSparkHadoopUtil.get.obtainTokenForHiveMetastore(conf).foreach {
++        credentials.addToken(new Text("hive.server2.delegation.token"), _)
++      }
++    }
++  }
++
++  /**
++    * Obtain a security token for HBase.
++    */
++  def obtainTokenForHBase(
++      sparkConf: SparkConf,
++      conf: Configuration,
++      credentials: Credentials): Unit = {
++    if (shouldGetTokens(sparkConf, "hbase") && UserGroupInformation.isSecurityEnabled) {
++      YarnSparkHadoopUtil.get.obtainTokenForHBase(conf).foreach { token =>
++        credentials.addToken(token.getService, token)
++        logInfo("Added HBase security token to credentials.")
++      }
++    }
++  }
++
++  /**
++    * Return whether delegation tokens should be retrieved for the given service when security is
++    * enabled. By default, tokens are retrieved, but that behavior can be changed by setting
++    * a service-specific configuration.
++    */
++  private def shouldGetTokens(conf: SparkConf, service: String): Boolean = {
++    conf.getBoolean(s"spark.yarn.security.tokens.${service}.enabled", true)
++  }
++
+   private[spark] override def startExecutorDelegationTokenRenewer(sparkConf: SparkConf): Unit = {
+     tokenRenewer = Some(new ExecutorDelegationTokenUpdater(sparkConf, conf))
+     tokenRenewer.get.updateCredentialsIfRequired()
+-- 
+1.7.9.5
+

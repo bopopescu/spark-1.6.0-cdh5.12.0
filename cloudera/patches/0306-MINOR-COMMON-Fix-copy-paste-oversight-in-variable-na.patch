@@ -1,0 +1,42 @@
+From a31fb296b122add642c34de31053a9fd4f48119b Mon Sep 17 00:00:00 2001
+From: Bjorn Jonsson <bjornjon@gmail.com>
+Date: Mon, 14 Mar 2016 12:27:49 -0700
+Subject: [PATCH 306/517] [MINOR][COMMON] Fix copy-paste oversight in variable
+ naming
+
+## What changes were proposed in this pull request?
+
+JavaUtils.java has methods to convert time and byte strings for internal use, this change renames a variable used in byteStringAs(), from timeError to byteError.
+
+Author: Bjorn Jonsson <bjornjon@gmail.com>
+
+Closes #11695 from bjornjon/master.
+
+(cherry picked from commit e06493cb7b790623a9106241a8d496ecea703328)
+Signed-off-by: Andrew Or <andrew@databricks.com>
+(cherry picked from commit 589d0420a6e9fb42f18e80695be22ff73cd14c6a)
+---
+ .../org/apache/spark/network/util/JavaUtils.java   |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/network/common/src/main/java/org/apache/spark/network/util/JavaUtils.java b/network/common/src/main/java/org/apache/spark/network/util/JavaUtils.java
+index b3d8e0c..0c01c3c 100644
+--- a/network/common/src/main/java/org/apache/spark/network/util/JavaUtils.java
++++ b/network/common/src/main/java/org/apache/spark/network/util/JavaUtils.java
+@@ -237,11 +237,11 @@ public class JavaUtils {
+       }
+ 
+     } catch (NumberFormatException e) {
+-      String timeError = "Size must be specified as bytes (b), " +
++      String byteError = "Size must be specified as bytes (b), " +
+         "kibibytes (k), mebibytes (m), gibibytes (g), tebibytes (t), or pebibytes(p). " +
+         "E.g. 50b, 100k, or 250m.";
+ 
+-      throw new NumberFormatException(timeError + "\n" + e.getMessage());
++      throw new NumberFormatException(byteError + "\n" + e.getMessage());
+     }
+   }
+ 
+-- 
+1.7.9.5
+

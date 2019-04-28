@@ -1,0 +1,95 @@
+From 50a6246a6032aaaee33e7088c2cde494e65afd10 Mon Sep 17 00:00:00 2001
+From: Shixiong Zhu <shixiong@databricks.com>
+Date: Thu, 7 Jul 2016 10:34:50 -0700
+Subject: [PATCH 394/517] Revert "[SPARK-16372][MLLIB] Retag RDD to
+ tallSkinnyQR of RowMatrix"
+
+This reverts commit 45dda92214191310a56333a2085e2343eba170cd.
+
+(cherry picked from commit bb92788f96426e57555ba5771e256c6425e0e75e)
+---
+ .../spark/mllib/api/python/PythonMLLibAPI.scala    |    2 +-
+ .../spark/mllib/linalg/distributed/RowMatrix.scala |    2 +-
+ .../linalg/distributed/JavaRowMatrixSuite.java     |   44 --------------------
+ 3 files changed, 2 insertions(+), 46 deletions(-)
+ delete mode 100644 mllib/src/test/java/org/apache/spark/mllib/linalg/distributed/JavaRowMatrixSuite.java
+
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/api/python/PythonMLLibAPI.scala b/mllib/src/main/scala/org/apache/spark/mllib/api/python/PythonMLLibAPI.scala
+index a059e38..1714983 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/api/python/PythonMLLibAPI.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/api/python/PythonMLLibAPI.scala
+@@ -1110,7 +1110,7 @@ private[python] class PythonMLLibAPI extends Serializable {
+    * Wrapper around RowMatrix constructor.
+    */
+   def createRowMatrix(rows: JavaRDD[Vector], numRows: Long, numCols: Int): RowMatrix = {
+-    new RowMatrix(rows.rdd, numRows, numCols)
++    new RowMatrix(rows.rdd.retag(classOf[Vector]), numRows, numCols)
+   }
+ 
+   /**
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/linalg/distributed/RowMatrix.scala b/mllib/src/main/scala/org/apache/spark/mllib/linalg/distributed/RowMatrix.scala
+index b941d1f..52c0f19 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/linalg/distributed/RowMatrix.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/linalg/distributed/RowMatrix.scala
+@@ -526,7 +526,7 @@ class RowMatrix @Since("1.0.0") (
+   def tallSkinnyQR(computeQ: Boolean = false): QRDecomposition[RowMatrix, Matrix] = {
+     val col = numCols().toInt
+     // split rows horizontally into smaller matrices, and compute QR for each of them
+-    val blockQRs = rows.retag(classOf[Vector]).glom().map { partRows =>
++    val blockQRs = rows.glom().map { partRows =>
+       val bdm = BDM.zeros[Double](partRows.length, col)
+       var i = 0
+       partRows.foreach { row =>
+diff --git a/mllib/src/test/java/org/apache/spark/mllib/linalg/distributed/JavaRowMatrixSuite.java b/mllib/src/test/java/org/apache/spark/mllib/linalg/distributed/JavaRowMatrixSuite.java
+deleted file mode 100644
+index c01af40..0000000
+--- a/mllib/src/test/java/org/apache/spark/mllib/linalg/distributed/JavaRowMatrixSuite.java
++++ /dev/null
+@@ -1,44 +0,0 @@
+-/*
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.
+- * The ASF licenses this file to You under the Apache License, Version 2.0
+- * (the "License"); you may not use this file except in compliance with
+- * the License.  You may obtain a copy of the License at
+- *
+- *    http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-package org.apache.spark.mllib.linalg.distributed;
+-
+-import java.util.Arrays;
+-
+-import org.junit.Test;
+-
+-import org.apache.spark.SharedSparkSession;
+-import org.apache.spark.api.java.JavaRDD;
+-import org.apache.spark.mllib.linalg.Matrix;
+-import org.apache.spark.mllib.linalg.QRDecomposition;
+-import org.apache.spark.mllib.linalg.Vector;
+-import org.apache.spark.mllib.linalg.Vectors;
+-
+-public class JavaRowMatrixSuite extends SharedSparkSession {
+-
+-  @Test
+-  public void rowMatrixQRDecomposition() {
+-    Vector v1 = Vectors.dense(1.0, 10.0, 100.0);
+-    Vector v2 = Vectors.dense(2.0, 20.0, 200.0);
+-    Vector v3 = Vectors.dense(3.0, 30.0, 300.0);
+-
+-    JavaRDD<Vector> rows = jsc.parallelize(Arrays.asList(v1, v2, v3), 1);
+-    RowMatrix mat = new RowMatrix(rows.rdd());
+-
+-    QRDecomposition<RowMatrix, Matrix> result = mat.tallSkinnyQR(true);
+-  }
+-}
+-- 
+1.7.9.5
+

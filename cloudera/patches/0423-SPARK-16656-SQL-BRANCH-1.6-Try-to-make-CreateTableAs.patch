@@ -1,0 +1,78 @@
+From 3da8eb9b39c2be3cd7df651f0d3e7e81ec28edbe Mon Sep 17 00:00:00 2001
+From: Yin Huai <yhuai@databricks.com>
+Date: Tue, 16 Aug 2016 13:42:58 -0700
+Subject: [PATCH 423/517] [SPARK-16656][SQL][BRANCH-1.6] Try to make
+ CreateTableAsSelectSuite more stable
+
+## What changes were proposed in this pull request?
+
+This PR backports #14289 to branch 1.6
+
+https://amplab.cs.berkeley.edu/jenkins/job/SparkPullRequestBuilder/62593/testReport/junit/org.apache.spark.sql.sources/CreateTableAsSelectSuite/create_a_table__drop_it_and_create_another_one_with_the_same_name/ shows that `create a table, drop it and create another one with the same name` failed. But other runs were good. Seems it is a flaky test. This PR tries to make this test more stable.
+
+Author: Yin Huai <yhuai@databricks.com>
+
+Closes #14668 from yhuai/SPARK-16656-branch1.6.
+
+(cherry picked from commit 5c34029b856efdf80cd139b73bcdb9197fe43e2f)
+---
+ .../sql/sources/CreateTableAsSelectSuite.scala     |   19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/sources/CreateTableAsSelectSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/sources/CreateTableAsSelectSuite.scala
+index 6fc9feb..7275da1 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/sources/CreateTableAsSelectSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/sources/CreateTableAsSelectSuite.scala
+@@ -19,20 +19,23 @@ package org.apache.spark.sql.sources
+ 
+ import java.io.{File, IOException}
+ 
+-import org.scalatest.BeforeAndAfter
++import org.scalatest.BeforeAndAfterEach
+ 
+ import org.apache.spark.sql.AnalysisException
+ import org.apache.spark.sql.execution.datasources.DDLException
+ import org.apache.spark.sql.test.SharedSQLContext
+ import org.apache.spark.util.Utils
+ 
+-class CreateTableAsSelectSuite extends DataSourceTest with SharedSQLContext with BeforeAndAfter {
++class CreateTableAsSelectSuite
++  extends DataSourceTest
++  with SharedSQLContext
++  with BeforeAndAfterEach {
++
+   protected override lazy val sql = caseInsensitiveContext.sql _
+   private var path: File = null
+ 
+   override def beforeAll(): Unit = {
+     super.beforeAll()
+-    path = Utils.createTempDir()
+     val rdd = sparkContext.parallelize((1 to 10).map(i => s"""{"a":$i, "b":"str${i}"}"""))
+     caseInsensitiveContext.read.json(rdd).registerTempTable("jt")
+   }
+@@ -40,13 +43,21 @@ class CreateTableAsSelectSuite extends DataSourceTest with SharedSQLContext with
+   override def afterAll(): Unit = {
+     try {
+       caseInsensitiveContext.dropTempTable("jt")
++      Utils.deleteRecursively(path)
+     } finally {
+       super.afterAll()
+     }
+   }
+ 
+-  after {
++  override def beforeEach(): Unit = {
++    super.beforeEach()
++    path = Utils.createTempDir()
++    path.delete()
++  }
++
++  override def afterEach(): Unit = {
+     Utils.deleteRecursively(path)
++    super.afterEach()
+   }
+ 
+   test("CREATE TEMPORARY TABLE AS SELECT") {
+-- 
+1.7.9.5
+

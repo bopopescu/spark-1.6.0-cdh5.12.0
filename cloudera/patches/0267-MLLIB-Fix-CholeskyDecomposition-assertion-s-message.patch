@@ -1,0 +1,35 @@
+From 9b8c31bb8da4d7c155b0c0695281034939ca5c3c Mon Sep 17 00:00:00 2001
+From: Wojciech Jurczyk <wojtek.jurczyk@gmail.com>
+Date: Tue, 19 Jan 2016 09:36:45 +0000
+Subject: [PATCH 267/517] [MLLIB] Fix CholeskyDecomposition assertion's
+ message
+
+Change assertion's message so it's consistent with the code. The old message says that the invoked method was lapack.dports, where in fact it was lapack.dppsv method.
+
+Author: Wojciech Jurczyk <wojtek.jurczyk@gmail.com>
+
+Closes #10818 from wjur/wjur/rename_error_message.
+
+(cherry picked from commit ebd9ce0f1f55f7d2d3bd3b92c4b0a495c51ac6fd)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 962e618ec159f8cd26543f42b2ce484fd5a5d8c5)
+---
+ .../spark/mllib/linalg/CholeskyDecomposition.scala |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/linalg/CholeskyDecomposition.scala b/mllib/src/main/scala/org/apache/spark/mllib/linalg/CholeskyDecomposition.scala
+index 0cd371e..ffdcdde 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/linalg/CholeskyDecomposition.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/linalg/CholeskyDecomposition.scala
+@@ -37,7 +37,7 @@ private[spark] object CholeskyDecomposition {
+     val info = new intW(0)
+     lapack.dppsv("U", k, 1, A, bx, k, info)
+     val code = info.`val`
+-    assert(code == 0, s"lapack.dpotrs returned $code.")
++    assert(code == 0, s"lapack.dppsv returned $code.")
+     bx
+   }
+ 
+-- 
+1.7.9.5
+

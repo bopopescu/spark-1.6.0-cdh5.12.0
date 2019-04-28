@@ -1,0 +1,54 @@
+From 6e32d4b9f67a7d2e9c7cf5e2dfd5d383bb166d71 Mon Sep 17 00:00:00 2001
+From: Josh Rosen <joshrosen@databricks.com>
+Date: Thu, 16 Jun 2016 14:18:58 -0700
+Subject: [PATCH 368/517] [SPARK-15975] Fix improper Popen retcode code
+ handling in dev/run-tests
+
+In the `dev/run-tests.py` script we check a `Popen.retcode` for success using `retcode > 0`, but this is subtlety wrong because Popen's return code will be negative if the child process was terminated by a signal: https://docs.python.org/2/library/subprocess.html#subprocess.Popen.returncode
+
+In order to properly handle signals, we should change this to check `retcode != 0` instead.
+
+Author: Josh Rosen <joshrosen@databricks.com>
+
+Closes #13692 from JoshRosen/dev-run-tests-return-code-handling.
+
+(cherry picked from commit acef843f67e770f0a2709fb3fbd1a53c200b2bc5)
+Signed-off-by: Andrew Or <andrew@databricks.com>
+(cherry picked from commit 0a8ada5064bec22116363f93ed476352776b49e4)
+---
+ dev/run-tests.py                   |    2 +-
+ dev/sparktestsupport/shellutils.py |    5 ++++-
+ 2 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/dev/run-tests.py b/dev/run-tests.py
+index 4a18d1a..e42e073 100755
+--- a/dev/run-tests.py
++++ b/dev/run-tests.py
+@@ -284,7 +284,7 @@ def exec_sbt(sbt_args=()):
+             print(line, end='')
+     retcode = sbt_proc.wait()
+ 
+-    if retcode > 0:
++    if retcode != 0:
+         exit_from_command_with_retcode(sbt_cmd, retcode)
+ 
+ 
+diff --git a/dev/sparktestsupport/shellutils.py b/dev/sparktestsupport/shellutils.py
+index d280e79..05af871 100644
+--- a/dev/sparktestsupport/shellutils.py
++++ b/dev/sparktestsupport/shellutils.py
+@@ -53,7 +53,10 @@ else:
+ 
+ 
+ def exit_from_command_with_retcode(cmd, retcode):
+-    print("[error] running", ' '.join(cmd), "; received return code", retcode)
++    if retcode < 0:
++        print("[error] running", ' '.join(cmd), "; process was terminated by signal", -retcode)
++    else:
++        print("[error] running", ' '.join(cmd), "; received return code", retcode)
+     sys.exit(int(os.environ.get("CURRENT_BLOCK", 255)))
+ 
+ 
+-- 
+1.7.9.5
+

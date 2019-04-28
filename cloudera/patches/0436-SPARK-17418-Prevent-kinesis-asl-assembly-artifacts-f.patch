@@ -1,0 +1,48 @@
+From 3c291924a32d220f67f369c5a37d477f3d6684eb Mon Sep 17 00:00:00 2001
+From: Josh Rosen <joshrosen@databricks.com>
+Date: Wed, 21 Sep 2016 11:38:10 -0700
+Subject: [PATCH 436/517] [SPARK-17418] Prevent kinesis-asl-assembly artifacts
+ from being published
+
+This patch updates the `kinesis-asl-assembly` build to prevent that module from being published as part of Maven releases and snapshot builds.
+
+The `kinesis-asl-assembly` includes classes from the Kinesis Client Library (KCL) and Kinesis Producer Library (KPL), both of which are licensed under the Amazon Software License and are therefore prohibited from being distributed in Apache releases.
+
+Author: Josh Rosen <joshrosen@databricks.com>
+
+Closes #15167 from JoshRosen/stop-publishing-kinesis-assembly.
+
+(cherry picked from commit ce0a222f56ffaf85273d2935b3e6d02aa9f6fa48)
+---
+ extras/kinesis-asl-assembly/pom.xml |   15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/extras/kinesis-asl-assembly/pom.xml b/extras/kinesis-asl-assembly/pom.xml
+index aa86dee..c5b2d79 100644
+--- a/extras/kinesis-asl-assembly/pom.xml
++++ b/extras/kinesis-asl-assembly/pom.xml
+@@ -132,6 +132,21 @@
+   <outputDirectory>target/scala-${scala.binary.version}/classes</outputDirectory>
+   <testOutputDirectory>target/scala-${scala.binary.version}/test-classes</testOutputDirectory>
+   <plugins>
++    <!-- SPARK-17418: prevent the kinesis-asl-assembly from being published to Maven -->
++    <plugin>
++      <groupId>org.apache.maven.plugins</groupId>
++      <artifactId>maven-deploy-plugin</artifactId>
++      <configuration>
++        <skip>true</skip>
++      </configuration>
++    </plugin>
++    <plugin>
++      <groupId>org.apache.maven.plugins</groupId>
++      <artifactId>maven-install-plugin</artifactId>
++      <configuration>
++        <skip>true</skip>
++      </configuration>
++    </plugin>
+     <plugin>
+       <groupId>org.apache.maven.plugins</groupId>
+       <artifactId>maven-shade-plugin</artifactId>
+-- 
+1.7.9.5
+

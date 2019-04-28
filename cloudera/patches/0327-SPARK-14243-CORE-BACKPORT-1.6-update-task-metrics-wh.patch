@@ -1,0 +1,87 @@
+From 753728b3e35c86c66014eb285d3c86eff34c5bc6 Mon Sep 17 00:00:00 2001
+From: jeanlyn <jeanlyn92@gmail.com>
+Date: Tue, 5 Apr 2016 12:32:03 -0700
+Subject: [PATCH 327/517] [SPARK-14243][CORE][BACKPORT-1.6] update task
+ metrics when removing blocks
+
+## What changes were proposed in this pull request?
+
+This patch try to  update the `updatedBlockStatuses ` when removing blocks, making sure `BlockManager` correctly updates `updatedBlockStatuses`
+
+## How was this patch tested?
+
+test("updated block statuses") in BlockManagerSuite.scala
+
+Author: jeanlyn <jeanlyn92@gmail.com>
+
+Closes #12150 from jeanlyn/updataBlock1.6.
+
+(cherry picked from commit cfe9f02ca81b2c47f8425b3a7c278149caba58d2)
+---
+ .../org/apache/spark/storage/BlockManager.scala    |    7 ++++++-
+ .../apache/spark/storage/BlockManagerSuite.scala   |   21 ++++++++++++++++++++
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/storage/BlockManager.scala b/core/src/main/scala/org/apache/spark/storage/BlockManager.scala
+index fdb3c2a..b7a73a1 100644
+--- a/core/src/main/scala/org/apache/spark/storage/BlockManager.scala
++++ b/core/src/main/scala/org/apache/spark/storage/BlockManager.scala
+@@ -1153,10 +1153,15 @@ private[spark] class BlockManager(
+             "the disk, memory, or external block store")
+         }
+         blockInfo.remove(blockId)
++        val status = getCurrentBlockStatus(blockId, info)
+         if (tellMaster && info.tellMaster) {
+-          val status = getCurrentBlockStatus(blockId, info)
+           reportBlockStatus(blockId, info, status)
+         }
++        Option(TaskContext.get()).foreach { tc =>
++          val metrics = tc.taskMetrics()
++          val lastUpdatedBlocks = metrics.updatedBlocks.getOrElse(Seq[(BlockId, BlockStatus)]())
++          metrics.updatedBlocks = Some(lastUpdatedBlocks ++ Seq((blockId, status)))
++        }
+       }
+     } else {
+       // The block has already been removed; do nothing.
+diff --git a/core/src/test/scala/org/apache/spark/storage/BlockManagerSuite.scala b/core/src/test/scala/org/apache/spark/storage/BlockManagerSuite.scala
+index 1b4c465..dd97286 100644
+--- a/core/src/test/scala/org/apache/spark/storage/BlockManagerSuite.scala
++++ b/core/src/test/scala/org/apache/spark/storage/BlockManagerSuite.scala
+@@ -921,6 +921,17 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
+     val list = List.fill(2)(new Array[Byte](2000))
+     val bigList = List.fill(8)(new Array[Byte](2000))
+ 
++    def getUpdatedBlocks(task: => Unit): Seq[(BlockId, BlockStatus)] = {
++      val context = TaskContext.empty()
++      try {
++        TaskContext.setTaskContext(context)
++        task
++      } finally {
++        TaskContext.unset()
++      }
++      context.taskMetrics.updatedBlocks.getOrElse(Seq[(BlockId, BlockStatus)]())
++    }
++
+     // 1 updated block (i.e. list1)
+     val updatedBlocks1 =
+       store.putIterator("list1", list.iterator, StorageLevel.MEMORY_ONLY, tellMaster = true)
+@@ -980,6 +991,16 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
+     assert(!store.diskStore.contains("list3"), "list3 was in disk store")
+     assert(!store.diskStore.contains("list4"), "list4 was in disk store")
+     assert(!store.diskStore.contains("list5"), "list5 was in disk store")
++
++    // remove block - list2 should be removed from disk
++    val updatedBlocks6 = getUpdatedBlocks {
++      store.removeBlock(
++        "list2", tellMaster = true)
++    }
++    assert(updatedBlocks6.size === 1)
++    assert(updatedBlocks6.head._1 === TestBlockId("list2"))
++    assert(updatedBlocks6.head._2.storageLevel == StorageLevel.NONE)
++    assert(!store.diskStore.contains("list2"), "list2 was in disk store")
+   }
+ 
+   test("query block statuses") {
+-- 
+1.7.9.5
+

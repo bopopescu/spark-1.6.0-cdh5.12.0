@@ -1,0 +1,40 @@
+From 861982911f509d053d9a2281ddcc0724851c129c Mon Sep 17 00:00:00 2001
+From: Dongjoon Hyun <dongjoon@apache.org>
+Date: Fri, 24 Jun 2016 22:30:52 -0700
+Subject: [PATCH 379/517] [SPARK-16173] [SQL] Can't join describe() of
+ DataFrame in Scala 2.10
+
+## What changes were proposed in this pull request?
+
+This PR fixes `DataFrame.describe()` by forcing materialization to make the `Seq` serializable. Currently, `describe()` of `DataFrame` throws `Task not serializable` Spark exceptions when joining in Scala 2.10.
+
+## How was this patch tested?
+
+Manual. (After building with Scala 2.10, test on bin/spark-shell and bin/pyspark.)
+
+Author: Dongjoon Hyun <dongjoon@apache.org>
+
+Closes #13902 from dongjoon-hyun/SPARK-16173-branch-1.6.
+
+(cherry picked from commit b7acc1b71c5d4b163a7451e8c6430afe920a04e0)
+---
+ .../scala/org/apache/spark/sql/DataFrame.scala     |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala b/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
+index 1beb080..8884daa 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/DataFrame.scala
+@@ -1363,7 +1363,8 @@ class DataFrame private[sql](
+     // All columns are string type
+     val schema = StructType(
+       StructField("summary", StringType) :: outputCols.map(StructField(_, StringType))).toAttributes
+-    LocalRelation.fromExternalRows(schema, ret)
++    // `toArray` forces materialization to make the seq serializable
++    LocalRelation.fromExternalRows(schema, ret.toArray.toSeq)
+   }
+ 
+   /**
+-- 
+1.7.9.5
+

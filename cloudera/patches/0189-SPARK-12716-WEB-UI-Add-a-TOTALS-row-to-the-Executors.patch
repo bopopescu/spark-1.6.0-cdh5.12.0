@@ -1,0 +1,127 @@
+From d4c0896fb5e0935be280691412a0b42c7f3ac6fd Mon Sep 17 00:00:00 2001
+From: Alex Bozarth <ajbozart@us.ibm.com>
+Date: Fri, 15 Jan 2016 16:03:21 -0600
+Subject: [PATCH 189/517] [SPARK-12716][WEB UI] Add a TOTALS row to the
+ Executors Web UI
+
+Added a Totals table to the top of the page to display the totals of each applicable column in the executors table.
+
+Old Description:
+~~Created a TOTALS row containing the totals of each column in the executors UI. By default the TOTALS row appears at the top of the table. When a column is sorted the TOTALS row will always sort to either the top or bottom of the table.~~
+
+Author: Alex Bozarth <ajbozart@us.ibm.com>
+
+Closes #10668 from ajbozarth/spark12716.
+
+(cherry picked from commit 61c45876fb532cdb7278dea48cc141208b63737c)
+---
+ .../org/apache/spark/ui/exec/ExecutorsPage.scala   |   74 +++++++++++++++++---
+ 1 file changed, 64 insertions(+), 10 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala b/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala
+index 7072a15..440dfa2 100644
+--- a/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala
++++ b/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala
+@@ -62,9 +62,6 @@ private[ui] class ExecutorsPage(
+       }
+       (_storageStatusList, _execInfo)
+     }
+-    val maxMem = storageStatusList.map(_.maxMem).sum
+-    val memUsed = storageStatusList.map(_.memUsed).sum
+-    val diskUsed = storageStatusList.map(_.diskUsed).sum
+     val execInfoSorted = execInfo.sortBy(_.id)
+     val logsExist = execInfo.filter(_.executorLogs.nonEmpty).nonEmpty
+ 
+@@ -100,18 +97,15 @@ private[ui] class ExecutorsPage(
+       </table>
+ 
+     val content =
+-      <div class="row-fluid">
++      <div class="row">
+         <div class="span12">
+-          <ul class="unstyled">
+-            <li><strong>Memory:</strong>
+-              {Utils.bytesToString(memUsed)} Used
+-              ({Utils.bytesToString(maxMem)} Total) </li>
+-            <li><strong>Disk:</strong> {Utils.bytesToString(diskUsed)} Used </li>
+-          </ul>
++          <h4>Totals for {execInfo.size} Executors</h4>
++          {execSummary(execInfo)}
+         </div>
+       </div>
+       <div class = "row">
+         <div class="span12">
++          <h4>Active Executors</h4>
+           {execTable}
+         </div>
+       </div>;
+@@ -179,6 +173,66 @@ private[ui] class ExecutorsPage(
+     </tr>
+   }
+ 
++  private def execSummary(execInfo: Seq[ExecutorSummary]): Seq[Node] = {
++    val maximumMemory = execInfo.map(_.maxMemory).sum
++    val memoryUsed = execInfo.map(_.memoryUsed).sum
++    val diskUsed = execInfo.map(_.diskUsed).sum
++    val totalDuration = execInfo.map(_.totalDuration).sum
++    val totalInputBytes = execInfo.map(_.totalInputBytes).sum
++    val totalShuffleRead = execInfo.map(_.totalShuffleRead).sum
++    val totalShuffleWrite = execInfo.map(_.totalShuffleWrite).sum
++
++    val sumContent =
++      <tr>
++        <td>{execInfo.map(_.rddBlocks).sum}</td>
++        <td sorttable_customkey={memoryUsed.toString}>
++          {Utils.bytesToString(memoryUsed)} /
++          {Utils.bytesToString(maximumMemory)}
++        </td>
++        <td sorttable_customkey={diskUsed.toString}>
++          {Utils.bytesToString(diskUsed)}
++        </td>
++        <td>{execInfo.map(_.activeTasks).sum}</td>
++        <td>{execInfo.map(_.failedTasks).sum}</td>
++        <td>{execInfo.map(_.completedTasks).sum}</td>
++        <td>{execInfo.map(_.totalTasks).sum}</td>
++        <td sorttable_customkey={totalDuration.toString}>
++          {Utils.msDurationToString(totalDuration)}
++        </td>
++        <td sorttable_customkey={totalInputBytes.toString}>
++          {Utils.bytesToString(totalInputBytes)}
++        </td>
++        <td sorttable_customkey={totalShuffleRead.toString}>
++          {Utils.bytesToString(totalShuffleRead)}
++        </td>
++        <td sorttable_customkey={totalShuffleWrite.toString}>
++          {Utils.bytesToString(totalShuffleWrite)}
++        </td>
++      </tr>;
++
++    <table class={UIUtils.TABLE_CLASS_STRIPED}>
++      <thead>
++        <th>RDD Blocks</th>
++        <th><span data-toggle="tooltip" title={ToolTips.STORAGE_MEMORY}>Storage Memory</span></th>
++        <th>Disk Used</th>
++        <th>Active Tasks</th>
++        <th>Failed Tasks</th>
++        <th>Complete Tasks</th>
++        <th>Total Tasks</th>
++        <th>Task Time</th>
++        <th><span data-toggle="tooltip" title={ToolTips.INPUT}>Input</span></th>
++        <th><span data-toggle="tooltip" title={ToolTips.SHUFFLE_READ}>Shuffle Read</span></th>
++        <th>
++          <span data-toggle="tooltip" data-placement="left" title={ToolTips.SHUFFLE_WRITE}>
++            Shuffle Write
++          </span>
++        </th>
++      </thead>
++      <tbody>
++        {sumContent}
++      </tbody>
++    </table>
++  }
+ }
+ 
+ private[spark] object ExecutorsPage {
+-- 
+1.7.9.5
+

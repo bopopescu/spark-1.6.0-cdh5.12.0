@@ -1,0 +1,130 @@
+From a9338d76350873933056ba444769057fe017d23d Mon Sep 17 00:00:00 2001
+From: Alex Bozarth <ajbozart@us.ibm.com>
+Date: Wed, 3 Feb 2016 15:53:10 -0800
+Subject: [PATCH 191/517] [SPARK-3611][WEB UI] Show number of cores for each
+ executor in application web UI
+
+Added a Cores column in the Executors UI
+
+Author: Alex Bozarth <ajbozart@us.ibm.com>
+
+Closes #11039 from ajbozarth/spark3611.
+
+(cherry picked from commit 3221eddb8f9728f65c579969a3a88baeeb7577a9)
+---
+ .../scala/org/apache/spark/status/api/v1/api.scala |    1 +
+ .../org/apache/spark/ui/exec/ExecutorsPage.scala   |    7 +++++++
+ .../org/apache/spark/ui/exec/ExecutorsTab.scala    |    5 +++--
+ .../executor_list_json_expectation.json            |    1 +
+ 4 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/status/api/v1/api.scala b/core/src/main/scala/org/apache/spark/status/api/v1/api.scala
+index 11010ba..f7779c9 100644
+--- a/core/src/main/scala/org/apache/spark/status/api/v1/api.scala
++++ b/core/src/main/scala/org/apache/spark/status/api/v1/api.scala
+@@ -55,6 +55,7 @@ class ExecutorSummary private[spark](
+     val rddBlocks: Int,
+     val memoryUsed: Long,
+     val diskUsed: Long,
++    val totalCores: Int,
+     val maxTasks: Int,
+     val activeTasks: Int,
+     val failedTasks: Int,
+diff --git a/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala b/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala
+index e36b96b..e1f7549 100644
+--- a/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala
++++ b/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsPage.scala
+@@ -75,6 +75,7 @@ private[ui] class ExecutorsPage(
+           <th>RDD Blocks</th>
+           <th><span data-toggle="tooltip" title={ToolTips.STORAGE_MEMORY}>Storage Memory</span></th>
+           <th>Disk Used</th>
++          <th>Cores</th>
+           <th>Active Tasks</th>
+           <th>Failed Tasks</th>
+           <th>Complete Tasks</th>
+@@ -131,6 +132,7 @@ private[ui] class ExecutorsPage(
+       <td sorttable_customkey={diskUsed.toString}>
+         {Utils.bytesToString(diskUsed)}
+       </td>
++      <td>{info.totalCores}</td>
+       {taskData(info.maxTasks, info.activeTasks, info.failedTasks, info.completedTasks,
+       info.totalTasks, info.totalDuration, info.totalGCTime)}
+       <td sorttable_customkey={info.totalInputBytes.toString}>
+@@ -174,6 +176,7 @@ private[ui] class ExecutorsPage(
+     val maximumMemory = execInfo.map(_.maxMemory).sum
+     val memoryUsed = execInfo.map(_.memoryUsed).sum
+     val diskUsed = execInfo.map(_.diskUsed).sum
++    val totalCores = execInfo.map(_.totalCores).sum
+     val totalInputBytes = execInfo.map(_.totalInputBytes).sum
+     val totalShuffleRead = execInfo.map(_.totalShuffleRead).sum
+     val totalShuffleWrite = execInfo.map(_.totalShuffleWrite).sum
+@@ -188,6 +191,7 @@ private[ui] class ExecutorsPage(
+         <td sorttable_customkey={diskUsed.toString}>
+           {Utils.bytesToString(diskUsed)}
+         </td>
++        <td>{totalCores}</td>
+         {taskData(execInfo.map(_.maxTasks).sum,
+         execInfo.map(_.activeTasks).sum,
+         execInfo.map(_.failedTasks).sum,
+@@ -211,6 +215,7 @@ private[ui] class ExecutorsPage(
+         <th>RDD Blocks</th>
+         <th><span data-toggle="tooltip" title={ToolTips.STORAGE_MEMORY}>Storage Memory</span></th>
+         <th>Disk Used</th>
++        <th>Cores</th>
+         <th>Active Tasks</th>
+         <th>Failed Tasks</th>
+         <th>Complete Tasks</th>
+@@ -305,6 +310,7 @@ private[spark] object ExecutorsPage {
+     val memUsed = status.memUsed
+     val maxMem = status.maxMem
+     val diskUsed = status.diskUsed
++    val totalCores = listener.executorToTotalCores.getOrElse(execId, 0)
+     val maxTasks = listener.executorToTasksMax.getOrElse(execId, 0)
+     val activeTasks = listener.executorToTasksActive.getOrElse(execId, 0)
+     val failedTasks = listener.executorToTasksFailed.getOrElse(execId, 0)
+@@ -323,6 +329,7 @@ private[spark] object ExecutorsPage {
+       rddBlocks,
+       memUsed,
+       diskUsed,
++      totalCores,
+       maxTasks,
+       activeTasks,
+       failedTasks,
+diff --git a/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsTab.scala b/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsTab.scala
+index 504793b..5fe2645 100644
+--- a/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsTab.scala
++++ b/core/src/main/scala/org/apache/spark/ui/exec/ExecutorsTab.scala
+@@ -45,6 +45,7 @@ private[ui] class ExecutorsTab(parent: SparkUI) extends SparkUITab(parent, "exec
+ @DeveloperApi
+ class ExecutorsListener(storageStatusListener: StorageStatusListener, conf: SparkConf)
+     extends SparkListener {
++  val executorToTotalCores = HashMap[String, Int]()
+   val executorToTasksMax = HashMap[String, Int]()
+   val executorToTasksActive = HashMap[String, Int]()
+   val executorToTasksComplete = HashMap[String, Int]()
+@@ -65,8 +66,8 @@ class ExecutorsListener(storageStatusListener: StorageStatusListener, conf: Spar
+   override def onExecutorAdded(executorAdded: SparkListenerExecutorAdded): Unit = synchronized {
+     val eid = executorAdded.executorId
+     executorToLogUrls(eid) = executorAdded.executorInfo.logUrlMap
+-    executorToTasksMax(eid) =
+-      executorAdded.executorInfo.totalCores / conf.getInt("spark.task.cpus", 1)
++    executorToTotalCores(eid) = executorAdded.executorInfo.totalCores
++    executorToTasksMax(eid) = executorToTotalCores(eid) / conf.getInt("spark.task.cpus", 1)
+     executorIdToData(eid) = ExecutorUIData(executorAdded.time)
+   }
+ 
+diff --git a/core/src/test/resources/HistoryServerExpectations/executor_list_json_expectation.json b/core/src/test/resources/HistoryServerExpectations/executor_list_json_expectation.json
+index 94f8aea..9d5d224 100644
+--- a/core/src/test/resources/HistoryServerExpectations/executor_list_json_expectation.json
++++ b/core/src/test/resources/HistoryServerExpectations/executor_list_json_expectation.json
+@@ -4,6 +4,7 @@
+   "rddBlocks" : 8,
+   "memoryUsed" : 28000128,
+   "diskUsed" : 0,
++  "totalCores" : 0,
+   "maxTasks" : 0,
+   "activeTasks" : 0,
+   "failedTasks" : 1,
+-- 
+1.7.9.5
+

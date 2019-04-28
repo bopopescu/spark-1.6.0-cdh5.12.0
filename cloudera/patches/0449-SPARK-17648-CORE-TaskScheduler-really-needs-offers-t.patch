@@ -1,0 +1,287 @@
+From 4440f2a6e3c0c102feeec9a64eeecebc1b6b75a5 Mon Sep 17 00:00:00 2001
+From: Imran Rashid <irashid@cloudera.com>
+Date: Thu, 29 Sep 2016 15:36:40 -0400
+Subject: [PATCH 449/517] [SPARK-17648][CORE] TaskScheduler really needs
+ offers to be an IndexedSeq
+
+The Seq[WorkerOffer] is accessed by index, so it really should be an
+IndexedSeq, otherwise an O(n) operation becomes O(n^2).  In practice
+this hasn't been an issue b/c where these offers are generated, the call
+to `.toSeq` just happens to create an IndexedSeq anyway.I got bitten by
+this in performance tests I was doing, and its better for the types to be
+more precise so eg. a change in Scala doesn't destroy performance.
+
+Unit tests via jenkins.
+
+Author: Imran Rashid <irashid@cloudera.com>
+
+Closes #15221 from squito/SPARK-17648.
+
+(cherry picked from commit 7f779e7439127efa0e3611f7745e1c8423845198)
+---
+ .../apache/spark/scheduler/TaskSchedulerImpl.scala |    4 +--
+ .../cluster/CoarseGrainedSchedulerBackend.scala    |    4 +--
+ .../cluster/mesos/MesosSchedulerBackend.scala      |    2 +-
+ .../spark/scheduler/local/LocalBackend.scala       |    2 +-
+ .../scheduler/SchedulerIntegrationSuite.scala      |    7 ++---
+ .../spark/scheduler/TaskSchedulerImplSuite.scala   |   32 ++++++++++----------
+ .../cluster/mesos/MesosSchedulerBackendSuite.scala |    2 +-
+ 7 files changed, 26 insertions(+), 27 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala b/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala
+index 58aa71c..7afc4e8 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/TaskSchedulerImpl.scala
+@@ -243,7 +243,7 @@ private[spark] class TaskSchedulerImpl(
+       maxLocality: TaskLocality,
+       shuffledOffers: Seq[WorkerOffer],
+       availableCpus: Array[Int],
+-      tasks: Seq[ArrayBuffer[TaskDescription]]) : Boolean = {
++      tasks: IndexedSeq[ArrayBuffer[TaskDescription]]) : Boolean = {
+     var launchedTask = false
+     for (i <- 0 until shuffledOffers.size) {
+       val execId = shuffledOffers(i).executorId
+@@ -277,7 +277,7 @@ private[spark] class TaskSchedulerImpl(
+    * sets for tasks in order of priority. We fill each node with tasks in a round-robin manner so
+    * that tasks are balanced across the cluster.
+    */
+-  def resourceOffers(offers: Seq[WorkerOffer]): Seq[Seq[TaskDescription]] = synchronized {
++  def resourceOffers(offers: IndexedSeq[WorkerOffer]): Seq[Seq[TaskDescription]] = synchronized {
+     // Mark each slave as alive and remember its hostname
+     // Also track if new executor is added
+     var newExecAvail = false
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+index 5db4997..bf518ef 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+@@ -201,7 +201,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+       val activeExecutors = executorDataMap.filterKeys(executorIsAlive)
+       val workOffers = activeExecutors.map { case (id, executorData) =>
+         new WorkerOffer(id, executorData.executorHost, executorData.freeCores)
+-      }.toSeq
++      }.toIndexedSeq
+       launchTasks(scheduler.resourceOffers(workOffers))
+     }
+ 
+@@ -218,7 +218,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+       // Filter out executors under killing
+       if (executorIsAlive(executorId)) {
+         val executorData = executorDataMap(executorId)
+-        val workOffers = Seq(
++        val workOffers = IndexedSeq(
+           new WorkerOffer(executorId, executorData.executorHost, executorData.freeCores))
+         launchTasks(scheduler.resourceOffers(workOffers))
+       }
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/mesos/MesosSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/mesos/MesosSchedulerBackend.scala
+index 281965a..06e3252 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/mesos/MesosSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/mesos/MesosSchedulerBackend.scala
+@@ -276,7 +276,7 @@ private[spark] class MesosSchedulerBackend(
+           o.getSlaveId.getValue,
+           o.getHostname,
+           cpus)
+-      }
++      }.toIndexedSeq
+ 
+       val slaveIdToOffer = usableOffers.map(o => o.getSlaveId.getValue -> o).toMap
+       val slaveIdToWorkerOffer = workerOffers.map(o => o.executorId -> o).toMap
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/local/LocalBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/local/LocalBackend.scala
+index c633d86..c64f663 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/local/LocalBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/local/LocalBackend.scala
+@@ -80,7 +80,7 @@ private[spark] class LocalEndpoint(
+   }
+ 
+   def reviveOffers() {
+-    val offers = Seq(new WorkerOffer(localExecutorId, localExecutorHostname, freeCores))
++    val offers = IndexedSeq(new WorkerOffer(localExecutorId, localExecutorHostname, freeCores))
+     for (task <- scheduler.resourceOffers(offers).flatten) {
+       freeCores -= scheduler.CPUS_PER_TASK
+       executor.launchTask(executorBackend, taskId = task.taskId, attemptNumber = task.attemptNumber,
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/SchedulerIntegrationSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/SchedulerIntegrationSuite.scala
+index c46c4e6..dc0c0c3 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/SchedulerIntegrationSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/SchedulerIntegrationSuite.scala
+@@ -379,13 +379,13 @@ private[spark] abstract class MockBackend(
+    */
+   def executorIdToExecutor: Map[String, ExecutorTaskStatus]
+ 
+-  private def generateOffers(): Seq[WorkerOffer] = {
++  private def generateOffers(): IndexedSeq[WorkerOffer] = {
+     executorIdToExecutor.values.filter { exec =>
+       exec.freeCores > 0
+     }.map { exec =>
+       WorkerOffer(executorId = exec.executorId, host = exec.host,
+         cores = exec.freeCores)
+-    }.toSeq
++    }.toIndexedSeq
+   }
+ 
+   /**
+@@ -394,8 +394,7 @@ private[spark] abstract class MockBackend(
+    * scheduling.
+    */
+   override def reviveOffers(): Unit = {
+-    val offers: Seq[WorkerOffer] = generateOffers()
+-    val newTaskDescriptions = taskScheduler.resourceOffers(offers).flatten
++    val newTaskDescriptions = taskScheduler.resourceOffers(generateOffers()).flatten
+     // get the task now, since that requires a lock on TaskSchedulerImpl, to prevent individual
+     // tests from introducing a race if they need it
+     val newTasks = taskScheduler.synchronized {
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/TaskSchedulerImplSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/TaskSchedulerImplSuite.scala
+index 6ca7716..1c6ee4f 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/TaskSchedulerImplSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/TaskSchedulerImplSuite.scala
+@@ -86,7 +86,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+   test("Scheduler does not always schedule tasks on the same workers") {
+     val taskScheduler = setupScheduler()
+     val numFreeCores = 1
+-    val workerOffers = Seq(new WorkerOffer("executor0", "host0", numFreeCores),
++    val workerOffers = IndexedSeq(new WorkerOffer("executor0", "host0", numFreeCores),
+       new WorkerOffer("executor1", "host1", numFreeCores))
+     // Repeatedly try to schedule a 1-task job, and make sure that it doesn't always
+     // get scheduled on the same executor. While there is a chance this test will fail
+@@ -111,7 +111,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+     val taskCpus = 2
+     val taskScheduler = setupScheduler("spark.task.cpus" -> taskCpus.toString)
+     // Give zero core offers. Should not generate any tasks
+-    val zeroCoreWorkerOffers = Seq(new WorkerOffer("executor0", "host0", 0),
++    val zeroCoreWorkerOffers = IndexedSeq(new WorkerOffer("executor0", "host0", 0),
+       new WorkerOffer("executor1", "host1", 0))
+     val taskSet = FakeTask.createTaskSet(1)
+     taskScheduler.submitTasks(taskSet)
+@@ -120,7 +120,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+ 
+     // No tasks should run as we only have 1 core free.
+     val numFreeCores = 1
+-    val singleCoreWorkerOffers = Seq(new WorkerOffer("executor0", "host0", numFreeCores),
++    val singleCoreWorkerOffers = IndexedSeq(new WorkerOffer("executor0", "host0", numFreeCores),
+       new WorkerOffer("executor1", "host1", numFreeCores))
+     taskScheduler.submitTasks(taskSet)
+     taskDescriptions = taskScheduler.resourceOffers(singleCoreWorkerOffers).flatten
+@@ -128,7 +128,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+ 
+     // Now change the offers to have 2 cores in one executor and verify if it
+     // is chosen.
+-    val multiCoreWorkerOffers = Seq(new WorkerOffer("executor0", "host0", taskCpus),
++    val multiCoreWorkerOffers = IndexedSeq(new WorkerOffer("executor0", "host0", taskCpus),
+       new WorkerOffer("executor1", "host1", numFreeCores))
+     taskScheduler.submitTasks(taskSet)
+     taskDescriptions = taskScheduler.resourceOffers(multiCoreWorkerOffers).flatten
+@@ -143,7 +143,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+     val numFreeCores = 1
+     val taskSet = new TaskSet(
+       Array(new NotSerializableFakeTask(1, 0), new NotSerializableFakeTask(0, 1)), 0, 0, 0, null)
+-    val multiCoreWorkerOffers = Seq(new WorkerOffer("executor0", "host0", taskCpus),
++    val multiCoreWorkerOffers = IndexedSeq(new WorkerOffer("executor0", "host0", taskCpus),
+       new WorkerOffer("executor1", "host1", numFreeCores))
+     taskScheduler.submitTasks(taskSet)
+     var taskDescriptions = taskScheduler.resourceOffers(multiCoreWorkerOffers).flatten
+@@ -183,7 +183,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+     val taskScheduler = setupScheduler()
+ 
+     val numFreeCores = 1
+-    val workerOffers = Seq(new WorkerOffer("executor0", "host0", numFreeCores))
++    val workerOffers = IndexedSeq(new WorkerOffer("executor0", "host0", numFreeCores))
+     val attempt1 = FakeTask.createTaskSet(10)
+ 
+     // submit attempt 1, offer some resources, some tasks get scheduled
+@@ -215,7 +215,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+     val taskScheduler = setupScheduler()
+ 
+     val numFreeCores = 10
+-    val workerOffers = Seq(new WorkerOffer("executor0", "host0", numFreeCores))
++    val workerOffers = IndexedSeq(new WorkerOffer("executor0", "host0", numFreeCores))
+     val attempt1 = FakeTask.createTaskSet(10)
+ 
+     // submit attempt 1, offer some resources, some tasks get scheduled
+@@ -253,8 +253,8 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+   test("tasks are not re-scheduled while executor loss reason is pending") {
+     val taskScheduler = setupScheduler()
+ 
+-    val e0Offers = Seq(new WorkerOffer("executor0", "host0", 1))
+-    val e1Offers = Seq(new WorkerOffer("executor1", "host0", 1))
++    val e0Offers = IndexedSeq(new WorkerOffer("executor0", "host0", 1))
++    val e1Offers = IndexedSeq(new WorkerOffer("executor1", "host0", 1))
+     val attempt1 = FakeTask.createTaskSet(1)
+ 
+     // submit attempt 1, offer resources, task gets scheduled
+@@ -295,7 +295,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+     taskScheduler.submitTasks(taskSet)
+     val tsm = taskScheduler.taskSetManagerForAttempt(taskSet.stageId, taskSet.stageAttemptId).get
+ 
+-    val firstTaskAttempts = taskScheduler.resourceOffers(Seq(
++    val firstTaskAttempts = taskScheduler.resourceOffers(IndexedSeq(
+       new WorkerOffer("executor0", "host0", 1),
+       new WorkerOffer("executor1", "host1", 1)
+     )).flatten
+@@ -312,7 +312,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+     // on that executor, and make sure that the other task (not the failed one) is assigned there
+     taskScheduler.executorLost("executor1", SlaveLost("oops"))
+     val nextTaskAttempts =
+-      taskScheduler.resourceOffers(Seq(new WorkerOffer("executor0", "host0", 1))).flatten
++      taskScheduler.resourceOffers(IndexedSeq(new WorkerOffer("executor0", "host0", 1))).flatten
+     // Note: Its OK if some future change makes this already realize the taskset has become
+     // unschedulable at this point (though in the current implementation, we're sure it will not)
+     assert(nextTaskAttempts.size === 1)
+@@ -322,7 +322,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+ 
+     // now we should definitely realize that our task set is unschedulable, because the only
+     // task left can't be scheduled on any executors due to the blacklist
+-    taskScheduler.resourceOffers(Seq(new WorkerOffer("executor0", "host0", 1)))
++    taskScheduler.resourceOffers(IndexedSeq(new WorkerOffer("executor0", "host0", 1)))
+     sc.listenerBus.waitUntilEmpty(100000)
+     assert(tsm.isZombie)
+     assert(failedTaskSet)
+@@ -347,7 +347,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+     taskScheduler.submitTasks(taskSet)
+     val tsm = taskScheduler.taskSetManagerForAttempt(taskSet.stageId, taskSet.stageAttemptId).get
+ 
+-    val offers = Seq(
++    val offers = IndexedSeq(
+       // each offer has more than enough free cores for the entire task set, so when combined
+       // with the locality preferences, we schedule all tasks on one executor
+       new WorkerOffer("executor0", "host0", 4),
+@@ -379,7 +379,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+       (0 until 2).map { _ => Seq(TaskLocation("host0", "executor2"))}: _*
+     ))
+ 
+-    val taskDescs = taskScheduler.resourceOffers(Seq(
++    val taskDescs = taskScheduler.resourceOffers(IndexedSeq(
+       new WorkerOffer("executor0", "host0", 1),
+       new WorkerOffer("executor1", "host1", 1)
+     )).flatten
+@@ -395,7 +395,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+     // when executor2 is added, we should realize that we can run process-local tasks.
+     // And we should know its alive on the host.
+     val secondTaskDescs = taskScheduler.resourceOffers(
+-      Seq(new WorkerOffer("executor2", "host0", 1))).flatten
++      IndexedSeq(new WorkerOffer("executor2", "host0", 1))).flatten
+     assert(secondTaskDescs.size === 1)
+     assert(mgr.myLocalityLevels.toSet ===
+       Set(TaskLocality.PROCESS_LOCAL, TaskLocality.NODE_LOCAL, TaskLocality.ANY))
+@@ -405,7 +405,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext with B
+     // And even if we don't have anything left to schedule, another resource offer on yet another
+     // executor should also update the set of live executors
+     val thirdTaskDescs = taskScheduler.resourceOffers(
+-      Seq(new WorkerOffer("executor3", "host1", 1))).flatten
++      IndexedSeq(new WorkerOffer("executor3", "host1", 1))).flatten
+     assert(thirdTaskDescs.size === 0)
+     assert(taskScheduler.getExecutorsAliveOnHost("host1") === Some(Set("executor1", "executor3")))
+   }
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/cluster/mesos/MesosSchedulerBackendSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/cluster/mesos/MesosSchedulerBackendSuite.scala
+index c4dc560..148efb7 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/cluster/mesos/MesosSchedulerBackendSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/cluster/mesos/MesosSchedulerBackendSuite.scala
+@@ -245,7 +245,7 @@ class MesosSchedulerBackendSuite extends SparkFunSuite with LocalSparkContext wi
+     mesosOffers2.add(createOffer(1, minMem, minCpu))
+     reset(taskScheduler)
+     reset(driver)
+-    when(taskScheduler.resourceOffers(any(classOf[Seq[WorkerOffer]]))).thenReturn(Seq(Seq()))
++    when(taskScheduler.resourceOffers(any(classOf[IndexedSeq[WorkerOffer]]))).thenReturn(Seq(Seq()))
+     when(taskScheduler.CPUS_PER_TASK).thenReturn(2)
+     when(driver.declineOffer(mesosOffers2.get(0).getId)).thenReturn(Status.valueOf(1))
+ 
+-- 
+1.7.9.5
+

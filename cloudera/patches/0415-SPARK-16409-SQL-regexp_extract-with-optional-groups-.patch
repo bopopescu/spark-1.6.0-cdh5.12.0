@@ -1,0 +1,94 @@
+From 512a85fe9cfcc29e89edc9a535c4bf633bc33246 Mon Sep 17 00:00:00 2001
+From: Sean Owen <sowen@cloudera.com>
+Date: Sun, 7 Aug 2016 12:20:07 +0100
+Subject: [PATCH 415/517] [SPARK-16409][SQL] regexp_extract with optional
+ groups causes NPE
+
+## What changes were proposed in this pull request?
+
+regexp_extract actually returns null when it shouldn't when a regex matches but the requested optional group did not. This makes it return an empty string, as apparently designed.
+
+## How was this patch tested?
+
+Additional unit test
+
+Author: Sean Owen <sowen@cloudera.com>
+
+Closes #14504 from srowen/SPARK-16409.
+
+(cherry picked from commit 8d8725208771a8815a60160a5a30dc6ea87a7e6a)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 1a5e762ffbc0a8b437448b9c119a008642f6d346)
+---
+ python/pyspark/sql/functions.py                    |    3 +++
+ .../catalyst/expressions/regexpExpressions.scala   |   13 +++++++++++--
+ .../apache/spark/sql/StringFunctionsSuite.scala    |    8 ++++++++
+ 3 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/python/pyspark/sql/functions.py b/python/pyspark/sql/functions.py
+index 25594d7..1152954 100644
+--- a/python/pyspark/sql/functions.py
++++ b/python/pyspark/sql/functions.py
+@@ -1299,6 +1299,9 @@ def regexp_extract(str, pattern, idx):
+     >>> df = sqlContext.createDataFrame([('100-200',)], ['str'])
+     >>> df.select(regexp_extract('str', '(\d+)-(\d+)', 1).alias('d')).collect()
+     [Row(d=u'100')]
++    >>> df = spark.createDataFrame([('aaaac',)], ['str'])
++    >>> df.select(regexp_extract('str', '(a+)(b)?(c)', 2).alias('d')).collect()
++    [Row(d=u'')]
+     """
+     sc = SparkContext._active_spark_context
+     jc = sc._jvm.functions.regexp_extract(_to_java_column(str), pattern, idx)
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/regexpExpressions.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/regexpExpressions.scala
+index 154c7a0..22b4ae0 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/regexpExpressions.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/regexpExpressions.scala
+@@ -315,7 +315,12 @@ case class RegExpExtract(subject: Expression, regexp: Expression, idx: Expressio
+     val m = pattern.matcher(s.toString)
+     if (m.find) {
+       val mr: MatchResult = m.toMatchResult
+-      UTF8String.fromString(mr.group(r.asInstanceOf[Int]))
++      val group = mr.group(r.asInstanceOf[Int])
++      if (group == null) { // Pattern matched, but not optional group
++        UTF8String.EMPTY_UTF8
++      } else {
++        UTF8String.fromString(group)
++      }
+     } else {
+       UTF8String.EMPTY_UTF8
+     }
+@@ -353,7 +358,11 @@ case class RegExpExtract(subject: Expression, regexp: Expression, idx: Expressio
+         ${termPattern}.matcher($subject.toString());
+       if (${matcher}.find()) {
+         java.util.regex.MatchResult ${matchResult} = ${matcher}.toMatchResult();
+-        ${ev.value} = UTF8String.fromString(${matchResult}.group($idx));
++        if (${matchResult}.group($idx) == null) {
++          ${ev.value} = UTF8String.EMPTY_UTF8;
++        } else {
++          ${ev.value} = UTF8String.fromString(${matchResult}.group($idx));
++        }
+         $setEvNotNull
+       } else {
+         ${ev.value} = UTF8String.EMPTY_UTF8;
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/StringFunctionsSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/StringFunctionsSuite.scala
+index e2090b0..edd66ca 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/StringFunctionsSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/StringFunctionsSuite.scala
+@@ -78,6 +78,14 @@ class StringFunctionsSuite extends QueryTest with SharedSQLContext {
+       Row("300", "100") :: Row("400", "100") :: Row("400-400", "100") :: Nil)
+   }
+ 
++  test("non-matching optional group") {
++    val df = Seq("aaaac").toDF("s")
++    checkAnswer(
++      df.select(regexp_extract($"s", "(a+)(b)?(c)", 2)),
++      Row("")
++    )
++  }
++
+   test("string ascii function") {
+     val df = Seq(("abc", "")).toDF("a", "b")
+     checkAnswer(
+-- 
+1.7.9.5
+

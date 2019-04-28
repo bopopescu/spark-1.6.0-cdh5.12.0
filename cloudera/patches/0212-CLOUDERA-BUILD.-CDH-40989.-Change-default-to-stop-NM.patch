@@ -1,0 +1,26 @@
+From 13445b55de8d41792dfdf5753e6f4a4d9f7eb516 Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Fri, 15 Jul 2016 18:16:44 -0700
+Subject: [PATCH 212/517] CLOUDERA-BUILD. CDH-40989. Change default to stop NM
+ on service init failure.
+
+---
+ .../spark/network/yarn/YarnShuffleService.java     |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java b/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java
+index df17dac..0c16622 100644
+--- a/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java
++++ b/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java
+@@ -73,7 +73,7 @@ public class YarnShuffleService extends AuxiliaryService {
+   // Whether failure during service initialization should stop the NM.
+   @VisibleForTesting
+   static final String STOP_ON_FAILURE_KEY = "spark.yarn.shuffle.stopOnFailure";
+-  private static final boolean DEFAULT_STOP_ON_FAILURE = false;
++  private static final boolean DEFAULT_STOP_ON_FAILURE = true;
+ 
+   // An entity that manages the shuffle secret per application
+   // This is used only if authentication is enabled
+-- 
+1.7.9.5
+

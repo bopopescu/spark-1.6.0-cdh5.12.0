@@ -1,0 +1,256 @@
+From c5b7149ab01adf0e722c2106d36d0ee5580380b3 Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Thu, 5 Jan 2017 11:37:26 -0800
+Subject: [PATCH 459/517] CLOUDERA-BUILD. CDH-48784. Respect app's SparkConf
+ in YARN cluster mode.
+
+The YARN allocator in cluster mode was ignoring executor core and memory
+configs set by the user code in SparkConf, choosing instead to respect
+only the launch-side configuration. If there was no launch-side config,
+the defaults were used instead.
+
+This change fixes things to make YARN cluster also respect the app's
+SparkConf, and gives preference to it over values set in the launcher
+side. This matches the behavior of client mode.
+
+This was fixed in 2.0 as part of SPARK-12343, but the full diff is
+too risky for backporting to 1.6, so this change is a customized
+version that only applies to executor cores and memory.
+---
+ .../org/apache/spark/deploy/SparkSubmit.scala      |    2 --
+ .../org/apache/spark/deploy/SparkSubmitSuite.scala |    4 ++--
+ .../spark/deploy/yarn/ApplicationMaster.scala      |    6 +++---
+ .../deploy/yarn/ApplicationMasterArguments.scala   |   12 ------------
+ .../org/apache/spark/deploy/yarn/Client.scala      |   18 ++++++++++++------
+ .../apache/spark/deploy/yarn/ClientArguments.scala |   12 ++++--------
+ .../apache/spark/deploy/yarn/YarnAllocator.scala   |    4 ++--
+ .../spark/deploy/yarn/YarnAllocatorSuite.scala     |    4 ++--
+ 8 files changed, 25 insertions(+), 37 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/deploy/SparkSubmit.scala b/core/src/main/scala/org/apache/spark/deploy/SparkSubmit.scala
+index 52d3ab3..41f1924 100644
+--- a/core/src/main/scala/org/apache/spark/deploy/SparkSubmit.scala
++++ b/core/src/main/scala/org/apache/spark/deploy/SparkSubmit.scala
+@@ -461,8 +461,6 @@ object SparkSubmit {
+       OptionAssigner(args.driverMemory, YARN, CLUSTER, clOption = "--driver-memory"),
+       OptionAssigner(args.driverCores, YARN, CLUSTER, clOption = "--driver-cores"),
+       OptionAssigner(args.queue, YARN, CLUSTER, clOption = "--queue"),
+-      OptionAssigner(args.executorMemory, YARN, CLUSTER, clOption = "--executor-memory"),
+-      OptionAssigner(args.executorCores, YARN, CLUSTER, clOption = "--executor-cores"),
+       OptionAssigner(args.files, YARN, CLUSTER, clOption = "--files"),
+       OptionAssigner(args.archives, YARN, CLUSTER, clOption = "--archives"),
+       OptionAssigner(args.jars, YARN, CLUSTER, clOption = "--addJars"),
+diff --git a/core/src/test/scala/org/apache/spark/deploy/SparkSubmitSuite.scala b/core/src/test/scala/org/apache/spark/deploy/SparkSubmitSuite.scala
+index d494b0c..6135a91 100644
+--- a/core/src/test/scala/org/apache/spark/deploy/SparkSubmitSuite.scala
++++ b/core/src/test/scala/org/apache/spark/deploy/SparkSubmitSuite.scala
+@@ -157,9 +157,7 @@ class SparkSubmitSuite
+     val (childArgs, classpath, sysProps, mainClass) = prepareSubmitEnvironment(appArgs)
+     val childArgsStr = childArgs.mkString(" ")
+     childArgsStr should include ("--class org.SomeClass")
+-    childArgsStr should include ("--executor-memory 5g")
+     childArgsStr should include ("--driver-memory 4g")
+-    childArgsStr should include ("--executor-cores 5")
+     childArgsStr should include ("--arg arg1 --arg arg2")
+     childArgsStr should include ("--queue thequeue")
+     childArgsStr should include regex ("--jar .*thejar.jar")
+@@ -171,6 +169,8 @@ class SparkSubmitSuite
+     sysProps("spark.app.name") should be ("beauty")
+     sysProps("spark.ui.enabled") should be ("false")
+     sysProps("SPARK_SUBMIT") should be ("true")
++    sysProps("spark.executor.memory") should be ("5g")
++    sysProps("spark.executor.cores") should be ("5")
+     sysProps.keys should not contain ("spark.jars")
+   }
+ 
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
+index 46e35ae..0952ff0 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
+@@ -289,9 +289,9 @@ private[spark] class ApplicationMaster(
+     // be run up front, to avoid printing this out for every single executor being launched.
+     // Use placeholders for information that changes such as executor IDs.
+     logInfo {
+-      val executorMemory = sparkConf.getSizeAsMb("spark.executor.memory", "1024m").toInt
+-      val executorCores = sparkConf.getInt("spark.executor.cores", 1)
+-      val dummyRunner = new ExecutorRunnable(None, yarnConf, sparkConf, driverUrl, "<executorId>",
++      val executorMemory = _sparkConf.getSizeAsMb("spark.executor.memory", "1024m").toInt
++      val executorCores = _sparkConf.getInt("spark.executor.cores", 1)
++      val dummyRunner = new ExecutorRunnable(None, yarnConf, _sparkConf, driverUrl, "<executorId>",
+         "<hostname>", executorMemory, executorCores, appId, securityMgr)
+       dummyRunner.launchContextDebugInfo()
+     }
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMasterArguments.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMasterArguments.scala
+index 17d9943..5f9699f 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMasterArguments.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMasterArguments.scala
+@@ -27,8 +27,6 @@ class ApplicationMasterArguments(val args: Array[String]) {
+   var primaryPyFile: String = null
+   var primaryRFile: String = null
+   var userArgs: Seq[String] = Nil
+-  var executorMemory = 1024
+-  var executorCores = 1
+   var propertiesFile: String = null
+ 
+   parseArgs(args.toList)
+@@ -62,14 +60,6 @@ class ApplicationMasterArguments(val args: Array[String]) {
+           userArgsBuffer += value
+           args = tail
+ 
+-        case ("--worker-memory" | "--executor-memory") :: MemoryParam(value) :: tail =>
+-          executorMemory = value
+-          args = tail
+-
+-        case ("--worker-cores" | "--executor-cores") :: IntParam(value) :: tail =>
+-          executorCores = value
+-          args = tail
+-
+         case ("--properties-file") :: value :: tail =>
+           propertiesFile = value
+           args = tail
+@@ -105,8 +95,6 @@ class ApplicationMasterArguments(val args: Array[String]) {
+       |                       place on the PYTHONPATH for Python apps.
+       |  --args ARGS          Arguments to be passed to your application's main class.
+       |                       Multiple invocations are possible, each will be passed in order.
+-      |  --executor-cores NUM   Number of cores for the executors (Default: 1)
+-      |  --executor-memory MEM  Memory per executor (e.g. 1000M, 2G) (Default: 1G)
+       |  --properties-file FILE Path to a custom Spark properties file.
+       """.stripMargin)
+     // scalastyle:on println
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
+index 6e12add..44fcec1 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/Client.scala
+@@ -75,7 +75,6 @@ private[spark] class Client(
+   private val yarnConf = new YarnConfiguration(hadoopConf)
+   private var credentials: Credentials = null
+   private val amMemoryOverhead = args.amMemoryOverhead // MB
+-  private val executorMemoryOverhead = args.executorMemoryOverhead // MB
+   private val distCacheMgr = new ClientDistributedCacheManager()
+   private val isClusterMode = args.isClusterMode
+ 
+@@ -276,12 +275,21 @@ private[spark] class Client(
+    * Fail fast if we have requested more resources per container than is available in the cluster.
+    */
+   private def verifyClusterResources(newAppResponse: GetNewApplicationResponse): Unit = {
++    import YarnSparkHadoopUtil._
++
++    // This may not be accurate in cluster mode. If the user is setting the config via SparkConf,
++    // that value is not visible here, so the check might fail (in case the user is setting a
++    // smaller value). But that should be rare.
++    val executorMemory = args.executorMemory.getOrElse(
++      sparkConf.getSizeAsMb("spark.executor.memory", "1g").toInt)
++    val executorMemoryOverhead = sparkConf.getInt("spark.yarn.executor.memoryOverhead",
++      math.max((MEMORY_OVERHEAD_FACTOR * executorMemory).toInt, MEMORY_OVERHEAD_MIN))
++
+     val maxMem = newAppResponse.getMaximumResourceCapability().getMemory()
+     logInfo("Verifying our application has not requested more than the maximum " +
+       s"memory capability of the cluster ($maxMem MB per container)")
+-    val executorMem = args.executorMemory + executorMemoryOverhead
+-    if (executorMem > maxMem) {
+-      throw new IllegalArgumentException(s"Required executor memory (${args.executorMemory}" +
++    if (executorMemory + executorMemoryOverhead > maxMem) {
++      throw new IllegalArgumentException(s"Required executor memory ($executorMemory" +
+         s"+$executorMemoryOverhead MB) is above the max threshold ($maxMem MB) of this cluster! " +
+         "Please check the values of 'yarn.scheduler.maximum-allocation-mb' and/or " +
+         "'yarn.nodemanager.resource.memory-mb'.")
+@@ -845,8 +853,6 @@ private[spark] class Client(
+     val amArgs =
+       Seq(amClass) ++ userClass ++ userJar ++ primaryPyFile ++ primaryRFile ++
+         userArgs ++ Seq(
+-          "--executor-memory", args.executorMemory.toString + "m",
+-          "--executor-cores", args.executorCores.toString,
+           "--properties-file", buildPath(YarnSparkHadoopUtil.expandEnvironment(Environment.PWD),
+             LOCALIZED_CONF_DIR, SPARK_CONF_FILE))
+ 
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ClientArguments.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ClientArguments.scala
+index a9f4374..7c32ef3 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ClientArguments.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ClientArguments.scala
+@@ -34,8 +34,7 @@ private[spark] class ClientArguments(args: Array[String], sparkConf: SparkConf)
+   var primaryPyFile: String = null
+   var primaryRFile: String = null
+   var userArgs: ArrayBuffer[String] = new ArrayBuffer[String]()
+-  var executorMemory = 1024 // MB
+-  var executorCores = 1
++  var executorMemory: Option[Int] = None // MB
+   var numExecutors = DEFAULT_NUMBER_EXECUTORS
+   var amQueue = sparkConf.get("spark.yarn.queue", "default")
+   var amMemory: Int = 512 // MB
+@@ -64,9 +63,6 @@ private[spark] class ClientArguments(args: Array[String], sparkConf: SparkConf)
+   val amMemoryOverhead = sparkConf.getInt(amMemoryOverheadConf,
+     math.max((MEMORY_OVERHEAD_FACTOR * amMemory).toInt, MEMORY_OVERHEAD_MIN))
+ 
+-  val executorMemoryOverhead = sparkConf.getInt("spark.yarn.executor.memoryOverhead",
+-    math.max((MEMORY_OVERHEAD_FACTOR * executorMemory).toInt, MEMORY_OVERHEAD_MIN))
+-
+   /** Load any default arguments provided through environment variables and Spark properties. */
+   private def loadEnvironmentArgs(): Unit = {
+     // For backward compatibility, SPARK_YARN_DIST_{ARCHIVES/FILES} should be resolved to hdfs://,
+@@ -103,7 +99,7 @@ private[spark] class ClientArguments(args: Array[String], sparkConf: SparkConf)
+            |${getUsageMessage()}
+          """.stripMargin)
+     }
+-    if (executorCores < sparkConf.getInt("spark.task.cpus", 1)) {
++    if (sparkConf.getInt("spark.executor.cores", 1) < sparkConf.getInt("spark.task.cpus", 1)) {
+       throw new SparkException("Executor cores must not be less than " +
+         "spark.task.cpus.")
+     }
+@@ -187,14 +183,14 @@ private[spark] class ClientArguments(args: Array[String], sparkConf: SparkConf)
+           if (args(0) == "--worker-memory") {
+             println("--worker-memory is deprecated. Use --executor-memory instead.")
+           }
+-          executorMemory = value
++          executorMemory = Some(value)
+           args = tail
+ 
+         case ("--worker-cores" | "--executor-cores") :: IntParam(value) :: tail =>
+           if (args(0) == "--worker-cores") {
+             println("--worker-cores is deprecated. Use --executor-cores instead.")
+           }
+-          executorCores = value
++          sparkConf.set("spark.executor.cores", value.toString())
+           args = tail
+ 
+         case ("--queue") :: value :: tail =>
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala
+index 8b21a2d..ec3ee5d 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/YarnAllocator.scala
+@@ -109,12 +109,12 @@ private[yarn] class YarnAllocator(
+   private val containerIdToExecutorId = new HashMap[ContainerId, String]
+ 
+   // Executor memory in MB.
+-  protected val executorMemory = args.executorMemory
++  protected val executorMemory = sparkConf.getSizeAsMb("spark.executor.memory", "1g").toInt
+   // Additional memory overhead.
+   protected val memoryOverhead: Int = sparkConf.getInt("spark.yarn.executor.memoryOverhead",
+     math.max((MEMORY_OVERHEAD_FACTOR * executorMemory).toInt, MEMORY_OVERHEAD_MIN))
+   // Number of cores per executor.
+-  protected val executorCores = args.executorCores
++  protected val executorCores = sparkConf.getInt("spark.executor.cores", 1)
+   // Resource capability requested for each executors
+   private[yarn] val resource = Resource.newInstance(executorMemory + memoryOverhead, executorCores)
+ 
+diff --git a/yarn/src/test/scala/org/apache/spark/deploy/yarn/YarnAllocatorSuite.scala b/yarn/src/test/scala/org/apache/spark/deploy/yarn/YarnAllocatorSuite.scala
+index 1ab3831..a0e6457 100644
+--- a/yarn/src/test/scala/org/apache/spark/deploy/yarn/YarnAllocatorSuite.scala
++++ b/yarn/src/test/scala/org/apache/spark/deploy/yarn/YarnAllocatorSuite.scala
+@@ -89,12 +89,12 @@ class YarnAllocatorSuite extends SparkFunSuite with Matchers with BeforeAndAfter
+       maxExecutors: Int = 5,
+       rmClient: AMRMClient[ContainerRequest] = rmClient): YarnAllocator = {
+     val args = Array(
+-      "--executor-cores", "5",
+-      "--executor-memory", "2048",
+       "--jar", "somejar.jar",
+       "--class", "SomeClass")
+     val sparkConfClone = sparkConf.clone()
+     sparkConfClone.set("spark.executor.instances", maxExecutors.toString)
++    sparkConfClone.set("spark.executor.cores", "5")
++    sparkConfClone.set("spark.executor.memory", "2g")
+     new YarnAllocator(
+       "not used",
+       mock(classOf[RpcEndpointRef]),
+-- 
+1.7.9.5
+

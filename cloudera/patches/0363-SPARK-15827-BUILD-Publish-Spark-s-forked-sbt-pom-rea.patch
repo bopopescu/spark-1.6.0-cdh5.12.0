@@ -1,0 +1,79 @@
+From 20f122f3bd5e2b42033d9db086fbbea4c57bb774 Mon Sep 17 00:00:00 2001
+From: Josh Rosen <joshrosen@databricks.com>
+Date: Thu, 9 Jun 2016 11:04:08 -0700
+Subject: [PATCH 363/517] [SPARK-15827][BUILD] Publish Spark's forked
+ sbt-pom-reader to Maven Central
+
+Spark's SBT build currently uses a fork of the sbt-pom-reader plugin but depends on that fork via a SBT subproject which is cloned from https://github.com/scrapcodes/sbt-pom-reader/tree/ignore_artifact_id. This unnecessarily slows down the initial build on fresh machines and is also risky because it risks a build breakage in case that GitHub repository ever changes or is deleted.
+
+In order to address these issues, I have published a pre-built binary of our forked sbt-pom-reader plugin to Maven Central under the `org.spark-project` namespace and have updated Spark's build to use that artifact. This published artifact was built from https://github.com/JoshRosen/sbt-pom-reader/tree/v1.0.0-spark, which contains the contents of ScrapCodes's branch plus an additional patch to configure the build for artifact publication.
+
+/cc srowen ScrapCodes for review.
+
+Author: Josh Rosen <joshrosen@databricks.com>
+
+Closes #13564 from JoshRosen/use-published-fork-of-pom-reader.
+
+(cherry picked from commit f74b77713e17960dddb7459eabfdc19f08f4024b)
+Signed-off-by: Josh Rosen <joshrosen@databricks.com>
+(cherry picked from commit 739d992f041b995fbf44b93cf47bced3d3811ad9)
+---
+ project/plugins.sbt                    |    9 +++++++++
+ project/project/SparkPluginBuild.scala |   28 ----------------------------
+ 2 files changed, 9 insertions(+), 28 deletions(-)
+ delete mode 100644 project/project/SparkPluginBuild.scala
+
+diff --git a/project/plugins.sbt b/project/plugins.sbt
+index 5e23224..1ed4097 100644
+--- a/project/plugins.sbt
++++ b/project/plugins.sbt
+@@ -27,3 +27,12 @@ addSbtPlugin("io.spray" % "sbt-revolver" % "0.7.2")
+ libraryDependencies += "org.ow2.asm"  % "asm" % "5.0.3"
+ 
+ libraryDependencies += "org.ow2.asm"  % "asm-commons" % "5.0.3"
++
++// Spark uses a custom fork of the sbt-pom-reader plugin which contains a patch to fix issues
++// related to test-jar dependencies (https://github.com/sbt/sbt-pom-reader/pull/14). The source for
++// this fork is published at https://github.com/JoshRosen/sbt-pom-reader/tree/v1.0.0-spark
++// and corresponds to commit b160317fcb0b9d1009635a7c5aa05d0f3be61936 in that repository.
++// In the long run, we should try to merge our patch upstream and switch to an upstream version of
++// the plugin; this is tracked at SPARK-14401.
++
++addSbtPlugin("org.spark-project" % "sbt-pom-reader" % "1.0.0-spark")
+diff --git a/project/project/SparkPluginBuild.scala b/project/project/SparkPluginBuild.scala
+deleted file mode 100644
+index cbb88dc..0000000
+--- a/project/project/SparkPluginBuild.scala
++++ /dev/null
+@@ -1,28 +0,0 @@
+-/*
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.
+- * The ASF licenses this file to You under the Apache License, Version 2.0
+- * (the "License"); you may not use this file except in compliance with
+- * the License.  You may obtain a copy of the License at
+- *
+- *    http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-import sbt._
+-import sbt.Keys._
+-
+-/**
+- * This plugin project is there because we use our custom fork of sbt-pom-reader plugin. This is
+- * a plugin project so that this gets compiled first and is available on the classpath for SBT build.
+- */
+-object SparkPluginDef extends Build {
+-  lazy val root = Project("plugins", file(".")) dependsOn(sbtPomReader)
+-  lazy val sbtPomReader = uri("https://github.com/ScrapCodes/sbt-pom-reader.git#ignore_artifact_id")
+-}
+-- 
+1.7.9.5
+

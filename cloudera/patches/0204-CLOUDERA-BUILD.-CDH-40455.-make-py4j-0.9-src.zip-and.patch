@@ -1,0 +1,52 @@
+From 0682457e8e481acd84eb11f7084e263a7ce4a487 Mon Sep 17 00:00:00 2001
+From: Robert Kanter <rkanter@cloudera.com>
+Date: Wed, 25 May 2016 15:56:37 -0700
+Subject: [PATCH 204/517] CLOUDERA-BUILD. CDH-40455. make py4j-0.9-src.zip and
+ pyspark.zip available as Maven artifacts
+
+---
+ assembly/pom.xml |   28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/assembly/pom.xml b/assembly/pom.xml
+index f3ead97..70c2573 100644
+--- a/assembly/pom.xml
++++ b/assembly/pom.xml
+@@ -202,6 +202,34 @@
+           </execution>
+         </executions>
+       </plugin>
++      <!-- CDH-40455 publish pyspark and py4j zip files for Oozie -->
++      <plugin>
++        <groupId>org.codehaus.mojo</groupId>
++        <artifactId>build-helper-maven-plugin</artifactId>
++        <executions>
++          <execution>
++            <id>add-jar</id>
++            <phase>package</phase>
++            <goals>
++              <goal>attach-artifact</goal>
++            </goals>
++            <configuration>
++              <artifacts>
++                <artifact>
++                  <file>${basedir}/../python/lib/pyspark.zip</file>
++                  <type>zip</type>
++                  <classifier>pyspark</classifier>
++                </artifact>
++                <artifact>
++                  <file>${basedir}/../python/lib/py4j-0.9-src.zip</file>
++                  <type>zip</type>
++                  <classifier>py4j</classifier>
++                </artifact>
++              </artifacts>
++            </configuration>
++          </execution>
++        </executions>
++      </plugin>
+     </plugins>
+   </build>
+ 
+-- 
+1.7.9.5
+

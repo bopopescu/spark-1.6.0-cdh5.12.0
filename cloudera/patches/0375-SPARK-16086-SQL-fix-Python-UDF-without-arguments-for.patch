@@ -1,0 +1,70 @@
+From 1f81f9d8907a95848bad18fd8c1de566da33ed43 Mon Sep 17 00:00:00 2001
+From: Davies Liu <davies.liu@gmail.com>
+Date: Mon, 20 Jun 2016 20:50:30 -0700
+Subject: [PATCH 375/517] [SPARK-16086] [SQL] fix Python UDF without arguments
+ (for 1.6)
+
+## What changes were proposed in this pull request?
+
+Fix the bug for Python UDF that does not have any arguments.
+
+## How was this patch tested?
+
+Added regression tests.
+
+Author: Davies Liu <davies.liu@gmail.com>
+
+Closes #13793 from davies/fix_no_arguments.
+
+(cherry picked from commit abe36c53d126bb580e408a45245fd8e81806869c)
+---
+ python/pyspark/sql/tests.py |    5 +++++
+ python/pyspark/sql/types.py |    9 +++------
+ 2 files changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/python/pyspark/sql/tests.py b/python/pyspark/sql/tests.py
+index 0dc4274..43eb6ec 100644
+--- a/python/pyspark/sql/tests.py
++++ b/python/pyspark/sql/tests.py
+@@ -305,6 +305,11 @@ class SQLTests(ReusedPySparkTestCase):
+         [res] = self.sqlCtx.sql("SELECT strlen(a) FROM test WHERE strlen(a) > 1").collect()
+         self.assertEqual(4, res[0])
+ 
++    def test_udf_without_arguments(self):
++        self.sqlCtx.registerFunction("foo", lambda: "bar")
++        [row] = self.sqlCtx.sql("SELECT foo()").collect()
++        self.assertEqual(row[0], "bar")
++
+     def test_udf_with_array_type(self):
+         d = [Row(l=list(range(3)), d={"key": list(range(5))})]
+         rdd = self.sc.parallelize(d)
+diff --git a/python/pyspark/sql/types.py b/python/pyspark/sql/types.py
+index 5bc0773..211b01f 100644
+--- a/python/pyspark/sql/types.py
++++ b/python/pyspark/sql/types.py
+@@ -1195,11 +1195,7 @@ class Row(tuple):
+         if args and kwargs:
+             raise ValueError("Can not use both args "
+                              "and kwargs to create Row")
+-        if args:
+-            # create row class or objects
+-            return tuple.__new__(self, args)
+-
+-        elif kwargs:
++        if kwargs:
+             # create row objects
+             names = sorted(kwargs.keys())
+             row = tuple.__new__(self, [kwargs[n] for n in names])
+@@ -1207,7 +1203,8 @@ class Row(tuple):
+             return row
+ 
+         else:
+-            raise ValueError("No args or kwargs")
++            # create row class or objects
++            return tuple.__new__(self, args)
+ 
+     def asDict(self, recursive=False):
+         """
+-- 
+1.7.9.5
+

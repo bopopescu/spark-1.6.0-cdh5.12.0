@@ -1,0 +1,233 @@
+From 98ace9e1a6931fc0bfc54775afb205e67e560c74 Mon Sep 17 00:00:00 2001
+From: Mark Grover <mark@apache.org>
+Date: Wed, 23 Nov 2016 17:01:28 -0800
+Subject: [PATCH 446/517] CDH-46684, CDH-46209: Preview of SPARK-18535
+
+[SPARK-18535][UI][YARN] Redact sensitive information from Spark logs and UI
+
+This patch adds a new property called spark.secret.redactionPattern that
+allows users to specify a scala regex to decide which Spark configuration
+properties and environment variables in driver and executor environments
+contain sensitive information. When this regex matches the property or
+environment variable name, its value is redacted from the environment UI and
+various logs like YARN and event logs.
+
+This change uses this property to redact information from event logs and YARN
+logs. It also, updates the UI code to adhere to this property instead of
+hardcoding the logic to decipher which properties are sensitive.
+
+Here's an image of the UI post-redaction:
+image
+
+Here's the text in the YARN logs, post-redaction:
+HADOOP_CREDSTORE_PASSWORD -> *********(redacted)
+
+Here's the text in the event logs, post-redaction:
+...,"spark.executorEnv.HADOOP_CREDSTORE_PASSWORD":"*********(redacted)","spark.yarn.appMasterEnv.HADOOP_CREDSTORE_PASSWORD":"*********(redacted)",...
+
+How was this patch tested?
+
+Unit tests are added to ensure that redaction works.
+A YARN job reading data off of S3 with confidential information
+(hadoop credential provider password) being provided in the environment
+variables of driver and executor. And, afterwards, logs were grepped to make
+sure that no mention of secret password was present. It was also ensure that
+the job was able to read the data off of S3 correctly, thereby ensuring that
+the sensitive information was being trickled down to the right places to read
+the data.
+The event logs were checked to make sure no mention of secret password was
+present.
+UI environment tab was checked to make sure there was no secret information
+being displayed.
+---
+ .../spark/scheduler/EventLoggingListener.scala     |   13 ++++++++++++-
+ .../org/apache/spark/ui/env/EnvironmentPage.scala  |   10 ++++------
+ .../org/apache/spark/ui/env/EnvironmentTab.scala   |    1 +
+ .../main/scala/org/apache/spark/util/Utils.scala   |   11 +++++++++++
+ .../scheduler/EventLoggingListenerSuite.scala      |   12 ++++++++++++
+ .../scala/org/apache/spark/util/UtilsSuite.scala   |   20 ++++++++++++++++++++
+ docs/configuration.md                              |    9 +++++++++
+ .../spark/deploy/yarn/ExecutorRunnable.scala       |    2 +-
+ 8 files changed, 70 insertions(+), 8 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/EventLoggingListener.scala b/core/src/main/scala/org/apache/spark/scheduler/EventLoggingListener.scala
+index bb5ee0e..2b408ae 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/EventLoggingListener.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/EventLoggingListener.scala
+@@ -163,7 +163,9 @@ private[spark] class EventLoggingListener(
+ 
+   override def onTaskEnd(event: SparkListenerTaskEnd): Unit = logEvent(event)
+ 
+-  override def onEnvironmentUpdate(event: SparkListenerEnvironmentUpdate): Unit = logEvent(event)
++  override def onEnvironmentUpdate(event: SparkListenerEnvironmentUpdate): Unit = {
++    logEvent(redactEvent(event))
++  }
+ 
+   // Events that trigger a flush
+   override def onStageCompleted(event: SparkListenerStageCompleted): Unit = {
+@@ -239,6 +241,15 @@ private[spark] class EventLoggingListener(
+     }
+   }
+ 
++  private[spark] def redactEvent(
++      event: SparkListenerEnvironmentUpdate): SparkListenerEnvironmentUpdate = {
++    // "Spark Properties" entry will always exist because the map is always populated with it.
++    val redactedProps = Utils.redact(sparkConf, event.environmentDetails("Spark Properties"))
++    val redactedEnvironmentDetails = event.environmentDetails +
++      ("Spark Properties" -> redactedProps)
++    SparkListenerEnvironmentUpdate(redactedEnvironmentDetails)
++  }
++
+ }
+ 
+ private[spark] object EventLoggingListener extends Logging {
+diff --git a/core/src/main/scala/org/apache/spark/ui/env/EnvironmentPage.scala b/core/src/main/scala/org/apache/spark/ui/env/EnvironmentPage.scala
+index 22136a6..b11f8f1 100644
+--- a/core/src/main/scala/org/apache/spark/ui/env/EnvironmentPage.scala
++++ b/core/src/main/scala/org/apache/spark/ui/env/EnvironmentPage.scala
+@@ -22,19 +22,17 @@ import javax.servlet.http.HttpServletRequest
+ import scala.xml.Node
+ 
+ import org.apache.spark.ui.{UIUtils, WebUIPage}
++import org.apache.spark.util.Utils
+ 
+ private[ui] class EnvironmentPage(parent: EnvironmentTab) extends WebUIPage("") {
+   private val listener = parent.listener
+ 
+-  private def removePass(kv: (String, String)): (String, String) = {
+-    if (kv._1.toLowerCase.contains("password")) (kv._1, "******") else kv
+-  }
+-
+   def render(request: HttpServletRequest): Seq[Node] = {
+     val runtimeInformationTable = UIUtils.listingTable(
+       propertyHeader, jvmRow, listener.jvmInformation, fixedWidth = true)
+-    val sparkPropertiesTable = UIUtils.listingTable(
+-      propertyHeader, propertyRow, listener.sparkProperties.map(removePass), fixedWidth = true)
++    val sparkPropertiesTable = UIUtils.listingTable(propertyHeader, propertyRow,
++      Utils.redact(parent.conf, listener.sparkProperties), fixedWidth = true)
++
+     val systemPropertiesTable = UIUtils.listingTable(
+       propertyHeader, propertyRow, listener.systemProperties, fixedWidth = true)
+     val classpathEntriesTable = UIUtils.listingTable(
+diff --git a/core/src/main/scala/org/apache/spark/ui/env/EnvironmentTab.scala b/core/src/main/scala/org/apache/spark/ui/env/EnvironmentTab.scala
+index f62260c..70b3ffd 100644
+--- a/core/src/main/scala/org/apache/spark/ui/env/EnvironmentTab.scala
++++ b/core/src/main/scala/org/apache/spark/ui/env/EnvironmentTab.scala
+@@ -23,6 +23,7 @@ import org.apache.spark.ui._
+ 
+ private[ui] class EnvironmentTab(parent: SparkUI) extends SparkUITab(parent, "environment") {
+   val listener = parent.environmentListener
++  val conf = parent.conf
+   attachPage(new EnvironmentPage(this))
+ }
+ 
+diff --git a/core/src/main/scala/org/apache/spark/util/Utils.scala b/core/src/main/scala/org/apache/spark/util/Utils.scala
+index 2f6db3e..a359dc0 100644
+--- a/core/src/main/scala/org/apache/spark/util/Utils.scala
++++ b/core/src/main/scala/org/apache/spark/util/Utils.scala
+@@ -2295,6 +2295,17 @@ private[spark] object Utils extends Logging {
+     log.info(s"Started daemon with process name: ${Utils.getProcessName()}")
+     SignalLogger.register(log)
+   }
++
++  private[util] val REDACTION_REPLACEMENT_TEXT = "*********(redacted)"
++
++  def redact(conf: SparkConf, kvs: Seq[(String, String)]): Seq[(String, String)] = {
++    val redactionPattern = conf.get("spark.redaction.regex", "(?i)secret|password").r
++    kvs.map { kv =>
++      redactionPattern.findFirstIn(kv._1)
++        .map { ignore => (kv._1, REDACTION_REPLACEMENT_TEXT) }
++        .getOrElse(kv)
++    }
++  }
+ }
+ 
+ /**
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/EventLoggingListenerSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/EventLoggingListenerSuite.scala
+index 5cb2d42..7d07a78 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/EventLoggingListenerSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/EventLoggingListenerSuite.scala
+@@ -94,6 +94,18 @@ class EventLoggingListenerSuite extends SparkFunSuite with LocalSparkContext wit
+     }
+   }
+ 
++  test("Event logging with password redaction") {
++    val key = "spark.executorEnv.HADOOP_CREDSTORE_PASSWORD"
++    val secretPassword = "secret_password"
++    val conf = getLoggingConf(testDirPath, None)
++      .set(key, secretPassword)
++    val eventLogger = new EventLoggingListener("test", None, testDirPath.toUri(), conf)
++    val envDetails = SparkEnv.environmentDetails(conf, "FIFO", Seq.empty, Seq.empty)
++    val event = SparkListenerEnvironmentUpdate(envDetails)
++    val redactedProps = eventLogger.redactEvent(event).environmentDetails("Spark Properties").toMap
++    assert(redactedProps(key) == "*********(redacted)")
++  }
++
+   test("Log overwriting") {
+     val logUri = EventLoggingListener.getLogPath(testDir.toURI, "test", None)
+     val logPath = new URI(logUri).getPath
+diff --git a/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala b/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
+index 4c3f18c..038e010 100644
+--- a/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
++++ b/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
+@@ -839,4 +839,24 @@ class UtilsSuite extends SparkFunSuite with ResetSystemProperties with Logging {
+       }
+     }
+   }
++
++  test("redact sensitive information") {
++    val sparkConf = new SparkConf
++
++    // Set some secret keys
++    val secretKeys = Seq(
++      "spark.executorEnv.HADOOP_CREDSTORE_PASSWORD",
++      "spark.my.password",
++      "spark.my.sECreT")
++    secretKeys.foreach { key => sparkConf.set(key, "secret_password") }
++    // Set a non-secret key
++    sparkConf.set("spark.regular.property", "not_a_secret")
++
++    // Redact sensitive information
++    val redactedConf = Utils.redact(sparkConf, sparkConf.getAll).toMap
++
++    // Assert that secret information got redacted while the regular property remained the same
++    secretKeys.foreach { key => assert(redactedConf(key) === Utils.REDACTION_REPLACEMENT_TEXT) }
++    assert(redactedConf("spark.regular.property") === "not_a_secret")
++  }
+ }
+diff --git a/docs/configuration.md b/docs/configuration.md
+index c0a7bfd..8d87233 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -327,6 +327,15 @@ Apart from these, the following properties are also available, and may be useful
+   </td>
+ </tr>
+ <tr>
++  <td><code>spark.redaction.regex</code></td>
++  <td>(?i)secret|password</td>
++  <td>
++    Regex to decide which Spark configuration properties and environment variables in driver and
++    executor environments contain sensitive information. When this regex matches a property, its
++    value is redacted from the environment UI and various logs like YARN and event logs.
++  </td>
++</tr>
++<tr>
+   <td><code>spark.python.profile</code></td>
+   <td>false</td>
+   <td>
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ExecutorRunnable.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ExecutorRunnable.scala
+index 92e661b..af70aa6 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ExecutorRunnable.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ExecutorRunnable.scala
+@@ -74,7 +74,7 @@ class ExecutorRunnable(
+     |===============================================================================
+     |YARN executor launch context:
+     |  env:
+-    |${env.map { case (k, v) => s"    $k -> $v\n" }.mkString}
++    |${Utils.redact(sparkConf, env.toSeq).map { case (k, v) => s"    $k -> $v\n" }.mkString}
+     |  command:
+     |    ${commands.mkString(" \\ \n      ")}
+     |
+-- 
+1.7.9.5
+

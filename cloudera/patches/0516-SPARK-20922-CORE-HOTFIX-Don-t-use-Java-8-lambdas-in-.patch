@@ -1,0 +1,41 @@
+From 686984455c2758bd4baae7c9f082f85e13b60743 Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Thu, 1 Jun 2017 16:45:31 -0700
+Subject: [PATCH 516/517] [SPARK-20922][CORE][HOTFIX] Don't use Java 8 lambdas
+ in older branches.
+
+Author: Marcelo Vanzin <vanzin@cloudera.com>
+
+Closes #18178 from vanzin/SPARK-20922-hotfix.
+
+(cherry picked from commit 0b25a7d93359e348e11b2e8698990a53436b3c5d)
+
+Cloudera ID: CDH-54803
+
+(cherry picked from commit 1c0f8ca7d9e86114cc81300258f22f77d8f9efd1)
+---
+ .../spark/launcher/FilteredObjectInputStream.java  |    8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/launcher/src/main/java/org/apache/spark/launcher/FilteredObjectInputStream.java b/launcher/src/main/java/org/apache/spark/launcher/FilteredObjectInputStream.java
+index 4d254a0..46796b1 100644
+--- a/launcher/src/main/java/org/apache/spark/launcher/FilteredObjectInputStream.java
++++ b/launcher/src/main/java/org/apache/spark/launcher/FilteredObjectInputStream.java
+@@ -42,7 +42,13 @@ class FilteredObjectInputStream extends ObjectInputStream {
+   protected Class<?> resolveClass(ObjectStreamClass desc)
+       throws IOException, ClassNotFoundException {
+ 
+-    boolean isValid = ALLOWED_PACKAGES.stream().anyMatch(p -> desc.getName().startsWith(p));
++    boolean isValid = false;
++    for (String p : ALLOWED_PACKAGES) {
++      if (desc.getName().startsWith(p)) {
++        isValid = true;
++        break;
++      }
++    }
+     if (!isValid) {
+       throw new IllegalArgumentException(
+         String.format("Unexpected class in stream: %s", desc.getName()));
+-- 
+1.7.9.5
+

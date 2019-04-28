@@ -1,0 +1,51 @@
+From d2b152dd0c90f9011eea39607e1f584cb96f30f4 Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Mon, 5 Dec 2016 10:46:29 -0800
+Subject: [PATCH 456/517] CDH-47767. Always set "isSrcLocal" to false in
+ HiveShim.
+
+The only time "isSrcLocal" should be true is in statements like
+"LOAD DATA LOCAL ...", which are not handled by Spark. So in the
+calls made by HiveShim, isSrcLocal should always be false.
+---
+ .../apache/spark/sql/hive/client/HiveShim.scala    |   10 ++--------
+ 1 file changed, 2 insertions(+), 8 deletions(-)
+
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/HiveShim.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/HiveShim.scala
+index 3468400..e0c4241 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/HiveShim.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/HiveShim.scala
+@@ -430,7 +430,7 @@ private[client] class Shim_v0_14 extends Shim_v0_13 {
+       isSkewedStoreAsSubdir: Boolean): Unit = {
+     loadPartitionMethod.invoke(hive, loadPath, tableName, partSpec, replace: JBoolean,
+       holdDDLTime: JBoolean, inheritTableSpecs: JBoolean, isSkewedStoreAsSubdir: JBoolean,
+-      isSrcLocal(loadPath, hive.getConf()): JBoolean, JBoolean.FALSE)
++      false: JBoolean, JBoolean.FALSE)
+   }
+ 
+   override def loadTable(
+@@ -440,7 +440,7 @@ private[client] class Shim_v0_14 extends Shim_v0_13 {
+       replace: Boolean,
+       holdDDLTime: Boolean): Unit = {
+     loadTableMethod.invoke(hive, loadPath, tableName, replace: JBoolean, holdDDLTime: JBoolean,
+-      isSrcLocal(loadPath, hive.getConf()): JBoolean, JBoolean.FALSE, JBoolean.FALSE)
++      false: JBoolean, JBoolean.FALSE, JBoolean.FALSE)
+   }
+ 
+   override def loadDynamicPartitions(
+@@ -463,12 +463,6 @@ private[client] class Shim_v0_14 extends Shim_v0_13 {
+       TimeUnit.MILLISECONDS).asInstanceOf[Long]
+   }
+ 
+-  protected def isSrcLocal(path: Path, conf: HiveConf): Boolean = {
+-    val localFs = FileSystem.getLocal(conf)
+-    val pathFs = FileSystem.get(path.toUri(), conf)
+-    localFs.getUri() == pathFs.getUri()
+-  }
+-
+ }
+ 
+ private[client] class Shim_v1_0 extends Shim_v0_14 {
+-- 
+1.7.9.5
+

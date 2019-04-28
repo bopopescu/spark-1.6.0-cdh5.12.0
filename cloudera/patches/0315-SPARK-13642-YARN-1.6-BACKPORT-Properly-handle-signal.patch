@@ -1,0 +1,91 @@
+From b653728c3fc196b377f4339c97cb235222f52d36 Mon Sep 17 00:00:00 2001
+From: jerryshao <sshao@hortonworks.com>
+Date: Wed, 23 Mar 2016 09:14:29 -0500
+Subject: [PATCH 315/517] [SPARK-13642][YARN][1.6-BACKPORT] Properly handle
+ signal kill in ApplicationMaster
+
+## What changes were proposed in this pull request?
+
+This patch is fixing the race condition in ApplicationMaster when receiving a signal. In the current implementation, if signal is received and with no any exception, this application will be finished with successful state in Yarn, and there's no another attempt. Actually the application is killed by signal in the runtime, so another attempt is expected.
+
+This patch adds a signal handler to handle the signal things, if signal is received, marking this application finished with failure, rather than success.
+
+## How was this patch tested?
+
+This patch is tested with following situations:
+
+Application is finished normally.
+Application is finished by calling System.exit(n).
+Application is killed by yarn command.
+ApplicationMaster is killed by "SIGTERM" send by kill pid command.
+ApplicationMaster is killed by NM with "SIGTERM" in case of NM failure.
+
+Author: jerryshao <sshao@hortonworks.com>
+
+Closes #11690 from jerryshao/SPARK-13642-1.6-backport.
+
+(cherry picked from commit 5e9cefc8ccfaa0ef0bb0f2052f9aa755197b0184)
+---
+ .../spark/deploy/yarn/ApplicationMaster.scala      |   21 ++++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
+index dce8814..46e35ae 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
+@@ -17,8 +17,6 @@
+ 
+ package org.apache.spark.deploy.yarn
+ 
+-import scala.util.control.NonFatal
+-
+ import java.io.{File, IOException}
+ import java.lang.reflect.InvocationTargetException
+ import java.net.{Socket, URI, URL}
+@@ -29,10 +27,14 @@ import scala.concurrent.{Await, Promise}
+ import scala.concurrent.duration.Duration
+ import scala.util.control.NonFatal
+ 
++import scala.util.control.NonFatal
++
++import org.apache.commons.lang3.SystemUtils
+ import org.apache.hadoop.fs.{FileSystem, Path}
+ import org.apache.hadoop.yarn.api._
+ import org.apache.hadoop.yarn.api.records._
+ import org.apache.hadoop.yarn.conf.YarnConfiguration
++import sun.misc.{Signal, SignalHandler}
+ 
+ import org.apache.spark.rpc._
+ import org.apache.spark.{Logging, SecurityManager, SparkConf, SparkContext, SparkEnv,
+@@ -113,6 +115,20 @@ private[spark] class ApplicationMaster(
+ 
+   private var delegationTokenRenewerOption: Option[AMDelegationTokenRenewer] = None
+ 
++  if (SystemUtils.IS_OS_UNIX) {
++    // Register signal handler for signal "TERM", "INT" and "HUP". For the cases where AM receive a
++    // signal and stop, from RM's aspect this application needs to be reattempted, rather than mark
++    // as success.
++    class AMSignalHandler(name: String) extends SignalHandler {
++      val prevHandler = Signal.handle(new Signal(name), this)
++      override def handle(sig: Signal): Unit = {
++        finish(FinalApplicationStatus.FAILED, ApplicationMaster.EXIT_SIGNAL)
++        prevHandler.handle(sig)
++      }
++    }
++    Seq("TERM", "INT", "HUP").foreach { sig => new AMSignalHandler(sig) }
++  }
++
+   final def run(): Int = {
+     try {
+       val appAttemptId = client.getAttemptId()
+@@ -643,6 +659,7 @@ object ApplicationMaster extends Logging {
+   private val EXIT_SC_NOT_INITED = 13
+   private val EXIT_SECURITY = 14
+   private val EXIT_EXCEPTION_USER_CLASS = 15
++  private val EXIT_SIGNAL = 16
+ 
+   private var master: ApplicationMaster = _
+ 
+-- 
+1.7.9.5
+

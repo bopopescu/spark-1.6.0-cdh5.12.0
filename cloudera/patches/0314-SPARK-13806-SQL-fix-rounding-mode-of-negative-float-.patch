@@ -1,0 +1,119 @@
+From 14edbabd191b22704321fbb0b5e72d2ddbad7af2 Mon Sep 17 00:00:00 2001
+From: Davies Liu <davies@databricks.com>
+Date: Tue, 22 Mar 2016 16:45:20 -0700
+Subject: [PATCH 314/517] [SPARK-13806] [SQL] fix rounding mode of negative
+ float/double
+
+Round() in database usually round the number up (away from zero), it's different than Math.round() in Java.
+
+For example:
+```
+scala> java.lang.Math.round(-3.5)
+res3: Long = -3
+```
+In Database, we should return -4.0 in this cases.
+
+This PR remove the buggy special case for scale=0.
+
+Add tests for negative values with tie.
+
+Author: Davies Liu <davies@databricks.com>
+
+Closes #11894 from davies/fix_round.
+
+(cherry picked from commit 4700adb98e4a37c2b0ef7123eca8a9a03bbdbe78)
+Signed-off-by: Davies Liu <davies.liu@gmail.com>
+
+Conflicts:
+	sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala
+
+(cherry picked from commit 179f6e323583deff4461d88c9315be170ee6fffd)
+---
+ .../sql/catalyst/expressions/mathExpressions.scala |   48 ++++++--------------
+ .../catalyst/expressions/MathFunctionsSuite.scala  |    4 ++
+ 2 files changed, 19 insertions(+), 33 deletions(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala
+index 28f616f..8ab8179 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala
+@@ -739,7 +739,7 @@ case class Round(child: Expression, scale: Expression)
+         if (f.isNaN || f.isInfinite) {
+           f
+         } else {
+-          BigDecimal(f).setScale(_scale, HALF_UP).toFloat
++          BigDecimal(f.toDouble).setScale(_scale, HALF_UP).toFloat
+         }
+       case DoubleType =>
+         val d = input1.asInstanceOf[Double]
+@@ -795,39 +795,21 @@ case class Round(child: Expression, scale: Expression)
+           s"${ev.value} = ${ce.value};"
+         }
+       case FloatType => // if child eval to NaN or Infinity, just return it.
+-        if (_scale == 0) {
+-          s"""
+-            if (Float.isNaN(${ce.value}) || Float.isInfinite(${ce.value})){
+-              ${ev.value} = ${ce.value};
+-            } else {
+-              ${ev.value} = Math.round(${ce.value});
+-            }"""
+-        } else {
+-          s"""
+-            if (Float.isNaN(${ce.value}) || Float.isInfinite(${ce.value})){
+-              ${ev.value} = ${ce.value};
+-            } else {
+-              ${ev.value} = java.math.BigDecimal.valueOf(${ce.value}).
+-                setScale(${_scale}, java.math.BigDecimal.ROUND_HALF_UP).floatValue();
+-            }"""
+-        }
++        s"""
++          if (Float.isNaN(${ce.value}) || Float.isInfinite(${ce.value})){
++            ${ev.value} = ${ce.value};
++          } else {
++            ${ev.value} = java.math.BigDecimal.valueOf(${ce.value}).
++              setScale(${_scale}, java.math.BigDecimal.ROUND_HALF_UP).floatValue();
++          }"""
+       case DoubleType => // if child eval to NaN or Infinity, just return it.
+-        if (_scale == 0) {
+-          s"""
+-            if (Double.isNaN(${ce.value}) || Double.isInfinite(${ce.value})){
+-              ${ev.value} = ${ce.value};
+-            } else {
+-              ${ev.value} = Math.round(${ce.value});
+-            }"""
+-        } else {
+-          s"""
+-            if (Double.isNaN(${ce.value}) || Double.isInfinite(${ce.value})){
+-              ${ev.value} = ${ce.value};
+-            } else {
+-              ${ev.value} = java.math.BigDecimal.valueOf(${ce.value}).
+-                setScale(${_scale}, java.math.BigDecimal.ROUND_HALF_UP).doubleValue();
+-            }"""
+-        }
++        s"""
++          if (Double.isNaN(${ce.value}) || Double.isInfinite(${ce.value})){
++            ${ev.value} = ${ce.value};
++          } else {
++            ${ev.value} = java.math.BigDecimal.valueOf(${ce.value}).
++              setScale(${_scale}, java.math.BigDecimal.ROUND_HALF_UP).doubleValue();
++          }"""
+     }
+ 
+     if (scaleV == null) { // if scale is null, no need to eval its child at all
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/MathFunctionsSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/MathFunctionsSuite.scala
+index 88ed9fd..aacc56f 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/MathFunctionsSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/MathFunctionsSuite.scala
+@@ -552,5 +552,9 @@ class MathFunctionsSuite extends SparkFunSuite with ExpressionEvalHelper {
+       checkEvaluation(Round(Literal.create(null, dataType),
+         Literal.create(null, IntegerType)), null)
+     }
++
++    checkEvaluation(Round(-3.5, 0), -4.0)
++    checkEvaluation(Round(-0.35, 1), -0.4)
++    checkEvaluation(Round(-35, -1), -40)
+   }
+ }
+-- 
+1.7.9.5
+

@@ -1,0 +1,417 @@
+From 0995e73697bc0dec2bb36d04b867ee28c4064b8b Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Thu, 9 Feb 2017 22:06:46 +0900
+Subject: [PATCH 470/517] [SPARK-17874][CORE] Add SSL port configuration.
+
+Make the SSL port configuration explicit, instead of deriving it
+from the non-SSL port, but retain the existing functionality in
+case anyone depends on it.
+
+The change starts the HTTPS and HTTP connectors separately, so
+that it's possible to use independent ports for each. For that to
+work, the initialization of the server needs to be shuffled around
+a bit. The change also makes it so the initialization of both
+connectors is similar, and end up using the same Scheduler - previously
+only the HTTP connector would use the correct one.
+
+Also fixed some outdated documentation about a couple of services
+that were removed long ago.
+
+Tested with unit tests and by running spark-shell with SSL configs.
+
+Author: Marcelo Vanzin <vanzin@cloudera.com>
+
+Closes #16625 from vanzin/SPARK-17874.
+
+(cherry picked from commit 3fc8e8caf81d0049daf9b776ad4059b0df81630f)
+
+Cloudera ID: CDH-49082
+---
+ .../main/scala/org/apache/spark/SSLOptions.scala   |    9 ++
+ .../scala/org/apache/spark/ui/JettyUtils.scala     |  139 +++++++++++---------
+ .../main/scala/org/apache/spark/util/Utils.scala   |   11 +-
+ .../scala/org/apache/spark/SSLOptionsSuite.scala   |   10 +-
+ .../test/scala/org/apache/spark/ui/UISuite.scala   |   28 +++-
+ docs/configuration.md                              |   14 ++
+ docs/security.md                                   |    2 +-
+ 7 files changed, 143 insertions(+), 70 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/SSLOptions.scala b/core/src/main/scala/org/apache/spark/SSLOptions.scala
+index 261265f..34e01ce 100644
+--- a/core/src/main/scala/org/apache/spark/SSLOptions.scala
++++ b/core/src/main/scala/org/apache/spark/SSLOptions.scala
+@@ -36,6 +36,8 @@ import org.eclipse.jetty.util.ssl.SslContextFactory
+  *
+  * @param enabled             enables or disables SSL; if it is set to false, the rest of the
+  *                            settings are disregarded
++ * @param port                the port where to bind the SSL server; if not defined, it will be
++ *                            based on the non-SSL port for the same service.
+  * @param keyStore            a path to the key-store file
+  * @param keyStorePassword    a password to access the key-store file
+  * @param keyPassword         a password to access the private key in the key-store
+@@ -49,6 +51,7 @@ import org.eclipse.jetty.util.ssl.SslContextFactory
+  */
+ private[spark] case class SSLOptions(
+     enabled: Boolean = false,
++    port: Option[Int] = None,
+     keyStore: Option[File] = None,
+     keyStorePassword: Option[String] = None,
+     keyPassword: Option[String] = None,
+@@ -202,6 +205,11 @@ private[spark] object SSLOptions extends Logging {
+   def parse(conf: SparkConf, ns: String, defaults: Option[SSLOptions] = None): SSLOptions = {
+     val enabled = conf.getBoolean(s"$ns.enabled", defaultValue = defaults.exists(_.enabled))
+ 
++    val port = conf.getOption(s"$ns.port").map(_.toInt)
++    port.foreach { p =>
++      require(p >= 0, "Port number must be a non-negative value.")
++    }
++
+     val keyStore = conf.getOption(s"$ns.keyStore").map(new File(_))
+         .orElse(defaults.flatMap(_.keyStore))
+ 
+@@ -236,6 +244,7 @@ private[spark] object SSLOptions extends Logging {
+ 
+     new SSLOptions(
+       enabled,
++      port,
+       keyStore,
+       keyStorePassword,
+       keyPassword,
+diff --git a/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala b/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala
+index aef08c1..c56f795 100644
+--- a/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala
++++ b/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala
+@@ -25,7 +25,7 @@ import scala.collection.mutable.{ArrayBuffer, StringBuilder}
+ import scala.language.implicitConversions
+ import scala.xml.Node
+ 
+-import org.eclipse.jetty.server.{Connector, Request, Server}
++import org.eclipse.jetty.server._
+ import org.eclipse.jetty.server.handler._
+ import org.eclipse.jetty.server.nio.SelectChannelConnector
+ import org.eclipse.jetty.server.ssl.SslSelectChannelConnector
+@@ -238,78 +238,94 @@ private[spark] object JettyUtils extends Logging {
+ 
+     addFilters(handlers, conf)
+ 
+-    val gzipHandlers = handlers.map { h =>
+-      h.setConnectorNames(Array(SPARK_CONNECTOR_NAME))
+-
+-      val gzipHandler = new GzipHandler
+-      gzipHandler.setHandler(h)
+-      gzipHandler
++    // Start the server first, with no connectors.
++    val pool = new QueuedThreadPool
++    if (serverName.nonEmpty) {
++      pool.setName(serverName)
+     }
++    pool.setDaemon(true)
++
++    val server = new Server()
++    server.setThreadPool(pool)
++
++    val errorHandler = new ErrorHandler()
++    errorHandler.setShowStacks(true)
++    errorHandler.setServer(server)
++    server.addBean(errorHandler)
++
++    val collection = new ContextHandlerCollection
++    server.setHandler(collection)
++
++    try {
++      server.start()
+ 
+-    // Bind to the given port, or throw a java.net.BindException if the port is occupied
+-    def connect(currentPort: Int): ((Server, Option[Int]), Int) = {
+-      val server = new Server
+-      val connectors = new ArrayBuffer[Connector]()
+-      val collection = new ContextHandlerCollection
+-
+-      // Create a connector on port currentPort to listen for HTTP requests
+-      val httpConnector = new SelectChannelConnector()
+-      httpConnector.setPort(currentPort)
+-      connectors += httpConnector
+-
+-      val httpsConnector = sslOptions.createJettySslContextFactory() match {
+-        case Some(factory) =>
+-          // If the new port wraps around, do not try a privileged port.
+-          val securePort =
+-            if (currentPort != 0) {
+-              (currentPort + 400 - 1024) % (65536 - 1024) + 1024
+-            } else {
+-              0
+-            }
+-          val scheme = "https"
+-          // Create a connector on port securePort to listen for HTTPS requests
++      // If SSL is configured, create the secure connector first.
++      val securePort = sslOptions.createJettySslContextFactory().map { factory =>
++        val securePort = sslOptions.port.getOrElse(if (port > 0) Utils.userPort(port, 400) else 0)
++        val secureServerName = if (serverName.nonEmpty) s"$serverName (HTTPS)" else serverName
++
++        def sslConnect(currentPort: Int): (Connector, Int) = {
+           val connector = new SslSelectChannelConnector(factory)
+-          connector.setPort(securePort)
++          connector.setServer(server)
++          connector.setPort(currentPort)
+           connector.setName(SPARK_CONNECTOR_NAME)
+-          connectors += connector
++          connector.setAcceptQueueSize(math.min(connector.getAcceptors, 8))
++          connector.setHost(hostName)
++          connector.start()
++          (connector, connector.getLocalPort())
++        }
++
++        val (connector, boundPort) = Utils.startServiceOnPort(securePort,
++          sslConnect, conf, secureServerName)
++        server.addConnector(connector)
++        boundPort
++      }
+ 
+-          // redirect the HTTP requests to HTTPS port
++      // Bind the HTTP port.
++      def httpConnect(currentPort: Int): (SelectChannelConnector, Int) = {
++        val connector = new SelectChannelConnector()
++        connector.setServer(server)
++        connector.setPort(currentPort)
++        connector.setAcceptQueueSize(math.min(connector.getAcceptors, 8))
++        connector.setHost(hostName)
++        connector.start()
++        (connector, connector.getLocalPort())
++      }
++
++      val (httpConnector, httpPort) = Utils.startServiceOnPort(port, httpConnect, conf, serverName)
++
++      // If SSL is configured, then configure redirection in the HTTP connector.
++      securePort match {
++        case Some(p) =>
+           httpConnector.setName(REDIRECT_CONNECTOR_NAME)
+-          collection.addHandler(createRedirectHttpsHandler(securePort, scheme))
+-          Some(connector)
++          val redirector = createRedirectHttpsHandler(p, "https")
++          collection.addHandler(redirector)
++          redirector.start()
+ 
+         case None =>
+-          // No SSL, so the HTTP connector becomes the official one where all contexts bind.
+           httpConnector.setName(SPARK_CONNECTOR_NAME)
+-          None
+       }
+ 
+-      val pool = new QueuedThreadPool
+-      pool.setDaemon(true)
+-      server.setThreadPool(pool)
+-      val errorHandler = new ErrorHandler()
+-      errorHandler.setShowStacks(true)
+-      server.addBean(errorHandler)
+-
+-      gzipHandlers.foreach(collection.addHandler)
+-      server.setHandler(collection)
+-
+-      server.setConnectors(connectors.toArray)
+-      try {
+-        server.start()
+-        ((server, httpsConnector.map(_.getLocalPort())), httpConnector.getLocalPort)
+-      } catch {
+-        case e: Exception =>
+-          server.stop()
+-          pool.stop()
+-          throw e
++      server.addConnector(httpConnector)
++
++      // Add all the known handlers now that connectors are configured.
++      handlers.foreach { h =>
++        h.setConnectorNames(Array(SPARK_CONNECTOR_NAME))
++        val gzipHandler = new GzipHandler()
++        gzipHandler.setHandler(h)
++        collection.addHandler(gzipHandler)
++        gzipHandler.start()
+       }
+-    }
+ 
+-    val ((server, securePort), boundPort) = Utils.startServiceOnPort(port, connect, conf,
+-      serverName)
+-    ServerInfo(server, boundPort, securePort,
+-      server.getHandler().asInstanceOf[ContextHandlerCollection])
++      ServerInfo(server, httpPort, securePort, collection)
++    } catch {
++      case e: Exception =>
++        server.stop()
++        if (pool.isStarted()) {
++          pool.stop()
++        }
++        throw e
++    }
+   }
+ 
+   private def createRedirectHttpsHandler(securePort: Int, scheme: String): ContextHandler = {
+@@ -328,8 +344,7 @@ private[spark] object JettyUtils extends Logging {
+         val httpsURI = createRedirectURI(scheme, baseRequest.getServerName, securePort,
+           baseRequest.getRequestURI, baseRequest.getQueryString)
+         response.setContentLength(0)
+-        response.encodeRedirectURL(httpsURI)
+-        response.sendRedirect(httpsURI)
++        response.sendRedirect(response.encodeRedirectURL(httpsURI))
+         baseRequest.setHandled(true)
+       }
+     })
+diff --git a/core/src/main/scala/org/apache/spark/util/Utils.scala b/core/src/main/scala/org/apache/spark/util/Utils.scala
+index a359dc0..c1b2a4c 100644
+--- a/core/src/main/scala/org/apache/spark/util/Utils.scala
++++ b/core/src/main/scala/org/apache/spark/util/Utils.scala
+@@ -1999,6 +1999,14 @@ private[spark] object Utils extends Logging {
+   }
+ 
+   /**
++   * Returns the user port to try when trying to bind a service. Handles wrapping and skipping
++   * privileged ports.
++   */
++  def userPort(base: Int, offset: Int): Int = {
++    (base + offset - 1024) % (65536 - 1024) + 1024
++  }
++
++  /**
+    * Attempt to start a service on the given port, or fail after a number of attempts.
+    * Each subsequent attempt uses 1 + the port used in the previous attempt (unless the port is 0).
+    *
+@@ -2025,8 +2033,7 @@ private[spark] object Utils extends Logging {
+       val tryPort = if (startPort == 0) {
+         startPort
+       } else {
+-        // If the new port wraps around, do not try a privilege port
+-        ((startPort + offset - 1024) % (65536 - 1024)) + 1024
++        userPort(startPort, offset)
+       }
+       try {
+         val (service, port) = startService(tryPort)
+diff --git a/core/src/test/scala/org/apache/spark/SSLOptionsSuite.scala b/core/src/test/scala/org/apache/spark/SSLOptionsSuite.scala
+index 25b79bc..76f0f6f 100644
+--- a/core/src/test/scala/org/apache/spark/SSLOptionsSuite.scala
++++ b/core/src/test/scala/org/apache/spark/SSLOptionsSuite.scala
+@@ -104,22 +104,24 @@ class SSLOptionsSuite extends SparkFunSuite with BeforeAndAfterAll {
+ 
+     val conf = new SparkConf
+     conf.set("spark.ssl.enabled", "true")
+-    conf.set("spark.ui.ssl.enabled", "false")
++    conf.set("spark.ssl.ui.enabled", "false")
++    conf.set("spark.ssl.ui.port", "4242")
+     conf.set("spark.ssl.keyStore", keyStorePath)
+     conf.set("spark.ssl.keyStorePassword", "password")
+-    conf.set("spark.ui.ssl.keyStorePassword", "12345")
++    conf.set("spark.ssl.ui.keyStorePassword", "12345")
+     conf.set("spark.ssl.keyPassword", "password")
+     conf.set("spark.ssl.trustStore", trustStorePath)
+     conf.set("spark.ssl.trustStorePassword", "password")
+     conf.set("spark.ssl.enabledAlgorithms",
+       "TLS_RSA_WITH_AES_128_CBC_SHA, TLS_RSA_WITH_AES_256_CBC_SHA")
+-    conf.set("spark.ui.ssl.enabledAlgorithms", "ABC, DEF")
++    conf.set("spark.ssl.ui.enabledAlgorithms", "ABC, DEF")
+     conf.set("spark.ssl.protocol", "SSLv3")
+ 
+     val defaultOpts = SSLOptions.parse(conf, "spark.ssl", defaults = None)
+-    val opts = SSLOptions.parse(conf, "spark.ui.ssl", defaults = Some(defaultOpts))
++    val opts = SSLOptions.parse(conf, "spark.ssl.ui", defaults = Some(defaultOpts))
+ 
+     assert(opts.enabled === false)
++    assert(opts.port === Some(4242))
+     assert(opts.trustStore.isDefined === true)
+     assert(opts.trustStore.get.getName === "truststore")
+     assert(opts.trustStore.get.getAbsolutePath === trustStorePath)
+diff --git a/core/src/test/scala/org/apache/spark/ui/UISuite.scala b/core/src/test/scala/org/apache/spark/ui/UISuite.scala
+index 168240c..e1cb98a 100644
+--- a/core/src/test/scala/org/apache/spark/ui/UISuite.scala
++++ b/core/src/test/scala/org/apache/spark/ui/UISuite.scala
+@@ -29,6 +29,7 @@ import org.scalatest.time.SpanSugar._
+ 
+ import org.apache.spark._
+ import org.apache.spark.LocalSparkContext._
++import org.apache.spark.util.Utils
+ 
+ class UISuite extends SparkFunSuite {
+ 
+@@ -51,12 +52,15 @@ class UISuite extends SparkFunSuite {
+     (conf, new SecurityManager(conf).getSSLOptions("ui"))
+   }
+ 
+-  private def sslEnabledConf(): (SparkConf, SSLOptions) = {
++  private def sslEnabledConf(sslPort: Option[Int] = None): (SparkConf, SSLOptions) = {
+     val conf = new SparkConf()
+       .set("spark.ssl.ui.enabled", "true")
+       .set("spark.ssl.ui.keyStore", "./src/test/resources/spark.keystore")
+       .set("spark.ssl.ui.keyStorePassword", "123456")
+       .set("spark.ssl.ui.keyPassword", "123456")
++    sslPort.foreach { p =>
++      conf.set("spark.ssl.ui.port", p.toString)
++    }
+     (conf, new SecurityManager(conf).getSSLOptions("ui"))
+   }
+ 
+@@ -240,6 +244,28 @@ class UISuite extends SparkFunSuite {
+     }
+   }
+ 
++  test("specify both http and https ports separately") {
++    var socket: ServerSocket = null
++    var serverInfo: ServerInfo = null
++    try {
++      socket = new ServerSocket(0)
++
++      // Make sure the SSL port lies way outside the "http + 400" range used as the default.
++      val baseSslPort = Utils.userPort(socket.getLocalPort(), 10000)
++      val (conf, sslOptions) = sslEnabledConf(sslPort = Some(baseSslPort))
++
++      serverInfo = JettyUtils.startJettyServer("0.0.0.0", socket.getLocalPort() + 1,
++        sslOptions, Seq[ServletContextHandler](), conf, "server1")
++
++      val notAllowed = Utils.userPort(serverInfo.boundPort, 400)
++      assert(serverInfo.securePort.isDefined)
++      assert(serverInfo.securePort.get != Utils.userPort(serverInfo.boundPort, 400))
++    } finally {
++      stopServer(serverInfo)
++      closeSocket(socket)
++    }
++  }
++
+   def stopServer(info: ServerInfo): Unit = {
+     if (info != null) info.stop()
+   }
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 377e80b..628c45c 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -1577,6 +1577,20 @@ Apart from these, the following properties are also available, and may be useful
+         </td>
+     </tr>
+     <tr>
++        <td><code>spark.ssl.[namespace].port</code></td>
++        <td>None</td>
++        <td>
++            The port where the SSL service will listen on.
++
++            <br />The port must be defined within a namespace configuration; see
++            <a href="security.html#ssl-configuration">SSL Configuration</a> for the available
++            namespaces.
++
++            <br />When not set, the SSL port will be derived from the non-SSL port for the
++            same service. A value of "0" will make the service bind to an ephemeral port.
++        </td>
++    </tr>
++    <tr>
+         <td><code>spark.ssl.enabledAlgorithms</code></td>
+         <td>Empty</td>
+         <td>
+diff --git a/docs/security.md b/docs/security.md
+index 2e19b52..0e3668c 100644
+--- a/docs/security.md
++++ b/docs/security.md
+@@ -54,7 +54,7 @@ component-specific configuration namespaces used to override the default setting
+   </tr>
+   <tr>
+     <td><code>spark.ssl.fs</code></td>
+-    <td>HTTP file server and broadcast server</td>
++    <td>File download client (used to download jars and files from HTTPS-enabled servers).</td>
+   </tr>
+   <tr>
+     <td><code>spark.ssl.ui</code></td>
+-- 
+1.7.9.5
+

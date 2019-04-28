@@ -1,0 +1,37 @@
+From 446b9e364d510464618d218d7ad7190afd8874af Mon Sep 17 00:00:00 2001
+From: Kevin McHale <kevin@premise.com>
+Date: Thu, 2 Jun 2016 11:17:33 -0500
+Subject: [PATCH 358/517] [SPARK-14204][SQL] register driverClass rather than
+ user-specified class
+
+This pull request fixes an issue in which cluster-mode executors fail to properly register a JDBC driver when the driver is provided in a jar by the user, but the driver class name is derived from a JDBC URL (rather than specified by the user).  The consequence of this is that all JDBC accesses under the described circumstances fail with an `IllegalStateException`. I reported the issue here: https://issues.apache.org/jira/browse/SPARK-14204
+
+My proposed solution is to have the executors register the JDBC driver class under all circumstances, not only when the driver is specified by the user.
+
+This patch was tested manually.  I built an assembly jar, deployed it to a cluster, and confirmed that the problem was fixed.
+
+Author: Kevin McHale <kevin@premise.com>
+
+Closes #12000 from mchalek/jdbc-driver-registration.
+
+(cherry picked from commit 0a13e4c0712fb83525eb5acbf55aabc4c9891ff7)
+---
+ .../sql/execution/datasources/jdbc/JdbcUtils.scala |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/jdbc/JdbcUtils.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/jdbc/JdbcUtils.scala
+index da75ae3..d52d8f9 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/jdbc/JdbcUtils.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/jdbc/JdbcUtils.scala
+@@ -50,7 +50,7 @@ object JdbcUtils extends Logging {
+       DriverManager.getDriver(url).getClass.getCanonicalName
+     }
+     () => {
+-      userSpecifiedDriverClass.foreach(DriverRegistry.register)
++      DriverRegistry.register(driverClass)
+       val driver: Driver = DriverManager.getDrivers.asScala.collectFirst {
+         case d: DriverWrapper if d.wrapped.getClass.getCanonicalName == driverClass => d
+         case d if d.getClass.getCanonicalName == driverClass => d
+-- 
+1.7.9.5
+

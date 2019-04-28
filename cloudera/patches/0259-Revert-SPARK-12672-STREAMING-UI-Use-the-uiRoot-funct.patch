@@ -1,0 +1,40 @@
+From 9aa994d4818db59e4205a31cea9511d7e3d405ec Mon Sep 17 00:00:00 2001
+From: Shixiong Zhu <shixiong@databricks.com>
+Date: Wed, 6 Jan 2016 13:53:25 -0800
+Subject: [PATCH 259/517] Revert "[SPARK-12672][STREAMING][UI] Use the uiRoot
+ function instead of default root path to gain the
+ streaming batch url."
+
+This reverts commit 8f0ead3e79beb2c5f2731ceaa34fe1c133763386. Will merge #10618 instead.
+
+(cherry picked from commit 39b0a348008b6ab532768b90fd578b77711af98c)
+---
+ .../spark/streaming/scheduler/JobScheduler.scala   |    5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/streaming/src/main/scala/org/apache/spark/streaming/scheduler/JobScheduler.scala b/streaming/src/main/scala/org/apache/spark/streaming/scheduler/JobScheduler.scala
+index 2c57706..1ed6fb0 100644
+--- a/streaming/src/main/scala/org/apache/spark/streaming/scheduler/JobScheduler.scala
++++ b/streaming/src/main/scala/org/apache/spark/streaming/scheduler/JobScheduler.scala
+@@ -26,8 +26,7 @@ import org.apache.spark.Logging
+ import org.apache.spark.rdd.PairRDDFunctions
+ import org.apache.spark.streaming._
+ import org.apache.spark.streaming.ui.UIUtils
+-import org.apache.spark.ui.{UIUtils => SparkUIUtils}
+-import org.apache.spark.util.{EventLoop, ThreadUtils}
++import org.apache.spark.util.{EventLoop, ThreadUtils, Utils}
+ 
+ 
+ private[scheduler] sealed trait JobSchedulerEvent
+@@ -204,7 +203,7 @@ class JobScheduler(val ssc: StreamingContext) extends Logging {
+       try {
+         val formattedTime = UIUtils.formatBatchTime(
+           job.time.milliseconds, ssc.graph.batchDuration.milliseconds, showYYYYMMSS = false)
+-        val batchUrl = s"${SparkUIUtils.uiRoot}/streaming/batch/?id=${job.time.milliseconds}"
++        val batchUrl = s"/streaming/batch/?id=${job.time.milliseconds}"
+         val batchLinkText = s"[output operation ${job.outputOpId}, batch time ${formattedTime}]"
+ 
+         ssc.sc.setJobDescription(
+-- 
+1.7.9.5
+

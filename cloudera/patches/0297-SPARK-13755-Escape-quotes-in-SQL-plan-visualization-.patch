@@ -1,0 +1,56 @@
+From 09678d6e16c11f08bc99308d54c29c706ce60002 Mon Sep 17 00:00:00 2001
+From: Josh Rosen <joshrosen@databricks.com>
+Date: Tue, 8 Mar 2016 16:28:22 -0800
+Subject: [PATCH 297/517] [SPARK-13755] Escape quotes in SQL plan
+ visualization node labels
+
+When generating Graphviz DOT files in the SQL query visualization we need to escape double-quotes inside node labels. This is a followup to #11309, which fixed a similar graph in Spark Core's DAG visualization.
+
+Author: Josh Rosen <joshrosen@databricks.com>
+
+Closes #11587 from JoshRosen/graphviz-escaping.
+
+(cherry picked from commit 81f54acc9cc0fb9d4ee552f6f56a26c78654a33b)
+Signed-off-by: Josh Rosen <joshrosen@databricks.com>
+(cherry picked from commit 8ec4f159ae6bbf836403ae3c72de12757ab96146)
+---
+ .../spark/sql/execution/ui/SparkPlanGraph.scala    |   12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SparkPlanGraph.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SparkPlanGraph.scala
+index 3a6eff9..11a1fab 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SparkPlanGraph.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/ui/SparkPlanGraph.scala
+@@ -21,6 +21,8 @@ import java.util.concurrent.atomic.AtomicLong
+ 
+ import scala.collection.mutable
+ 
++import org.apache.commons.lang3.StringEscapeUtils
++
+ import org.apache.spark.sql.execution.SparkPlanInfo
+ import org.apache.spark.sql.execution.metric.SQLMetrics
+ 
+@@ -104,16 +106,14 @@ private[ui] case class SparkPlanGraphNode(
+     }
+ 
+     if (values.nonEmpty) {
+-      // If there are metrics, display each entry in a separate line. We should use an escaped
+-      // "\n" here to follow the dot syntax.
+-      //
++      // If there are metrics, display each entry in a separate line.
+       // Note: whitespace between two "\n"s is to create an empty line between the name of
+       // SparkPlan and metrics. If removing it, it won't display the empty line in UI.
+-      builder ++= "\\n \\n"
+-      builder ++= values.mkString("\\n")
++      builder ++= "\n \n"
++      builder ++= values.mkString("\n")
+     }
+ 
+-    s"""  $id [label="${builder.toString()}"];"""
++    s"""  $id [label="${StringEscapeUtils.escapeJava(builder.toString())}"];"""
+   }
+ }
+ 
+-- 
+1.7.9.5
+

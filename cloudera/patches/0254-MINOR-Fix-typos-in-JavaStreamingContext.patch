@@ -1,0 +1,53 @@
+From d7baceee1efb982af32b8a834ad82ecbabc92a06 Mon Sep 17 00:00:00 2001
+From: Shixiong Zhu <shixiong@databricks.com>
+Date: Mon, 21 Dec 2015 22:28:18 -0800
+Subject: [PATCH 254/517] [MINOR] Fix typos in JavaStreamingContext
+
+Author: Shixiong Zhu <shixiong@databricks.com>
+
+Closes #10424 from zsxwing/typo.
+
+(cherry picked from commit 93da8565fea42d8ac978df411daced4a9ea3a9c8)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit 309ef355fc511b70765983358d5c92b5f1a26bce)
+---
+ .../streaming/api/java/JavaStreamingContext.scala  |    8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/streaming/src/main/scala/org/apache/spark/streaming/api/java/JavaStreamingContext.scala b/streaming/src/main/scala/org/apache/spark/streaming/api/java/JavaStreamingContext.scala
+index 8f21c79..7a50135 100644
+--- a/streaming/src/main/scala/org/apache/spark/streaming/api/java/JavaStreamingContext.scala
++++ b/streaming/src/main/scala/org/apache/spark/streaming/api/java/JavaStreamingContext.scala
+@@ -695,9 +695,9 @@ object JavaStreamingContext {
+    *
+    * @param checkpointPath Checkpoint directory used in an earlier JavaStreamingContext program
+    * @param factory        JavaStreamingContextFactory object to create a new JavaStreamingContext
+-   * @deprecated As of 1.4.0, replaced by `getOrCreate` without JavaStreamingContextFactor.
++   * @deprecated As of 1.4.0, replaced by `getOrCreate` without JavaStreamingContextFactory.
+    */
+-  @deprecated("use getOrCreate without JavaStreamingContextFactor", "1.4.0")
++  @deprecated("use getOrCreate without JavaStreamingContextFactory", "1.4.0")
+   def getOrCreate(
+       checkpointPath: String,
+       factory: JavaStreamingContextFactory
+@@ -718,7 +718,7 @@ object JavaStreamingContext {
+    * @param factory        JavaStreamingContextFactory object to create a new JavaStreamingContext
+    * @param hadoopConf     Hadoop configuration if necessary for reading from any HDFS compatible
+    *                       file system
+-   * @deprecated As of 1.4.0, replaced by `getOrCreate` without JavaStreamingContextFactor.
++   * @deprecated As of 1.4.0, replaced by `getOrCreate` without JavaStreamingContextFactory.
+    */
+   @deprecated("use getOrCreate without JavaStreamingContextFactory", "1.4.0")
+   def getOrCreate(
+@@ -744,7 +744,7 @@ object JavaStreamingContext {
+    *                       file system
+    * @param createOnError  Whether to create a new JavaStreamingContext if there is an
+    *                       error in reading checkpoint data.
+-   * @deprecated As of 1.4.0, replaced by `getOrCreate` without JavaStreamingContextFactor.
++   * @deprecated As of 1.4.0, replaced by `getOrCreate` without JavaStreamingContextFactory.
+    */
+   @deprecated("use getOrCreate without JavaStreamingContextFactory", "1.4.0")
+   def getOrCreate(
+-- 
+1.7.9.5
+

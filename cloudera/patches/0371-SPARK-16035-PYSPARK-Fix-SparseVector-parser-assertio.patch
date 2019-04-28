@@ -1,0 +1,38 @@
+From 03ddb6c48613408e9be89288f57083f4056650fe Mon Sep 17 00:00:00 2001
+From: andreapasqua <andrea@radius.com>
+Date: Fri, 17 Jun 2016 22:41:05 -0700
+Subject: [PATCH 371/517] [SPARK-16035][PYSPARK] Fix SparseVector parser
+ assertion for end parenthesis
+
+## What changes were proposed in this pull request?
+The check on the end parenthesis of the expression to parse was using the wrong variable. I corrected that.
+## How was this patch tested?
+Manual test
+
+Author: andreapasqua <andrea@radius.com>
+
+Closes #13750 from andreapasqua/sparse-vector-parser-assertion-fix.
+
+(cherry picked from commit 4c64e88d5ba4c36cbdbc903376492f0f43401e4e)
+Signed-off-by: Xiangrui Meng <meng@databricks.com>
+(cherry picked from commit 3f1d730e90ea270fab7d244651d1266cfd7fa893)
+---
+ python/pyspark/mllib/linalg/__init__.py |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/python/pyspark/mllib/linalg/__init__.py b/python/pyspark/mllib/linalg/__init__.py
+index b525d26..118d4ac 100644
+--- a/python/pyspark/mllib/linalg/__init__.py
++++ b/python/pyspark/mllib/linalg/__init__.py
+@@ -565,7 +565,7 @@ class SparseVector(Vector):
+         if start == -1:
+             raise ValueError("Tuple should start with '('")
+         end = s.find(')')
+-        if start == -1:
++        if end == -1:
+             raise ValueError("Tuple should end with ')'")
+         s = s[start + 1: end].strip()
+ 
+-- 
+1.7.9.5
+

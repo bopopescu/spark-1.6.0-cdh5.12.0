@@ -1,0 +1,98 @@
+From 334cbf1e883401c6b7194f9223a5082fc9c2fa06 Mon Sep 17 00:00:00 2001
+From: Josh Rosen <joshrosen@databricks.com>
+Date: Tue, 9 Aug 2016 11:21:45 -0700
+Subject: [PATCH 417/517] [SPARK-16956] Make ApplicationState.MAX_NUM_RETRY
+ configurable
+
+## What changes were proposed in this pull request?
+
+This patch introduces a new configuration, `spark.deploy.maxExecutorRetries`, to let users configure an obscure behavior in the standalone master where the master will kill Spark applications which have experienced too many back-to-back executor failures. The current setting is a hardcoded constant (10); this patch replaces that with a new cluster-wide configuration.
+
+**Background:** This application-killing was added in 6b5980da796e0204a7735a31fb454f312bc9daac (from September 2012) and I believe that it was designed to prevent a faulty application whose executors could never launch from DOS'ing the Spark cluster via an infinite series of executor launch attempts. In a subsequent patch (#1360), this feature was refined to prevent applications which have running executors from being killed by this code path.
+
+**Motivation for making this configurable:** Previously, if a Spark Standalone application experienced more than `ApplicationState.MAX_NUM_RETRY` executor failures and was left with no executors running then the Spark master would kill that application, but this behavior is problematic in environments where the Spark executors run on unstable infrastructure and can all simultaneously die. For instance, if your Spark driver runs on an on-demand EC2 instance while all workers run on ephemeral spot instances then it's possible for all executors to die at the same time while the driver stays alive. In this case, it may be desirable to keep the Spark application alive so that it can recover once new workers and executors are available. In order to accommodate this use-case, this patch modifies the Master to never kill faulty applications if `spark.deploy.maxExecutorRetries` is negative.
+
+I'd like to merge this patch into master, branch-2.0, and branch-1.6.
+
+## How was this patch tested?
+
+I tested this manually using `spark-shell` and `local-cluster` mode. This is a tricky feature to unit test and historically this code has not changed very often, so I'd prefer to skip the additional effort of adding a testing framework and would rather rely on manual tests and review for now.
+
+Author: Josh Rosen <joshrosen@databricks.com>
+
+Closes #14544 from JoshRosen/add-setting-for-max-executor-failures.
+
+(cherry picked from commit b89b3a5c8e391fcaebe7ef3c77ef16bb9431d6ab)
+Signed-off-by: Josh Rosen <joshrosen@databricks.com>
+(cherry picked from commit ace458f0330f22463ecf7cbee7c0465e10fba8a8)
+---
+ .../spark/deploy/master/ApplicationState.scala     |    2 --
+ .../org/apache/spark/deploy/master/Master.scala    |    7 ++++++-
+ docs/spark-standalone.md                           |   15 +++++++++++++++
+ 3 files changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/deploy/master/ApplicationState.scala b/core/src/main/scala/org/apache/spark/deploy/master/ApplicationState.scala
+index 37bfcdf..097728c 100644
+--- a/core/src/main/scala/org/apache/spark/deploy/master/ApplicationState.scala
++++ b/core/src/main/scala/org/apache/spark/deploy/master/ApplicationState.scala
+@@ -22,6 +22,4 @@ private[master] object ApplicationState extends Enumeration {
+   type ApplicationState = Value
+ 
+   val WAITING, RUNNING, FINISHED, FAILED, KILLED, UNKNOWN = Value
+-
+-  val MAX_NUM_RETRY = 10
+ }
+diff --git a/core/src/main/scala/org/apache/spark/deploy/master/Master.scala b/core/src/main/scala/org/apache/spark/deploy/master/Master.scala
+index e96b97a..2796793 100644
+--- a/core/src/main/scala/org/apache/spark/deploy/master/Master.scala
++++ b/core/src/main/scala/org/apache/spark/deploy/master/Master.scala
+@@ -71,6 +71,7 @@ private[deploy] class Master(
+   private val RETAINED_DRIVERS = conf.getInt("spark.deploy.retainedDrivers", 200)
+   private val REAPER_ITERATIONS = conf.getInt("spark.dead.worker.persistence", 15)
+   private val RECOVERY_MODE = conf.get("spark.deploy.recoveryMode", "NONE")
++  private val MAX_EXECUTOR_RETRIES = conf.getInt("spark.deploy.maxExecutorRetries", 10)
+ 
+   val workers = new HashSet[WorkerInfo]
+   val idToApp = new HashMap[String, ApplicationInfo]
+@@ -284,7 +285,11 @@ private[deploy] class Master(
+ 
+             val normalExit = exitStatus == Some(0)
+             // Only retry certain number of times so we don't go into an infinite loop.
+-            if (!normalExit && appInfo.incrementRetryCount() >= ApplicationState.MAX_NUM_RETRY) {
++            // Important note: this code path is not exercised by tests, so be very careful when
++            // changing this `if` condition.
++            if (!normalExit
++                && appInfo.incrementRetryCount() >= MAX_EXECUTOR_RETRIES
++                && MAX_EXECUTOR_RETRIES >= 0) { // < 0 disables this application-killing path
+               val execs = appInfo.executors.values
+               if (!execs.exists(_.state == ExecutorState.RUNNING)) {
+                 logError(s"Application ${appInfo.desc.name} with ID ${appInfo.id} failed " +
+diff --git a/docs/spark-standalone.md b/docs/spark-standalone.md
+index 2fe9ec3..1849b2c 100644
+--- a/docs/spark-standalone.md
++++ b/docs/spark-standalone.md
+@@ -205,6 +205,21 @@ SPARK_MASTER_OPTS supports the following system properties:
+   </td>
+ </tr>
+ <tr>
++  <td><code>spark.deploy.maxExecutorRetries</code></td>
++  <td>10</td>
++  <td>
++    Limit on the maximum number of back-to-back executor failures that can occur before the
++    standalone cluster manager removes a faulty application. An application will never be removed
++    if it has any running executors. If an application experiences more than
++    <code>spark.deploy.maxExecutorRetries</code> failures in a row, no executors
++    successfully start running in between those failures, and the application has no running
++    executors then the standalone cluster manager will remove the application and mark it as failed.
++    To disable this automatic removal, set <code>spark.deploy.maxExecutorRetries</code> to
++    <code>-1</code>.
++    <br/>
++  </td>
++</tr>
++<tr>
+   <td><code>spark.worker.timeout</code></td>
+   <td>60</td>
+   <td>
+-- 
+1.7.9.5
+

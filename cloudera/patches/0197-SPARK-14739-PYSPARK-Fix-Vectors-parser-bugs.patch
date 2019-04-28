@@ -1,0 +1,92 @@
+From 90ed1860641f6950a096eeb7ad5de80a30446d1f Mon Sep 17 00:00:00 2001
+From: Arash Parsa <arash@ip-192-168-50-106.ec2.internal>
+Date: Thu, 21 Apr 2016 11:29:24 +0100
+Subject: [PATCH 197/517] [SPARK-14739][PYSPARK] Fix Vectors parser bugs
+
+## What changes were proposed in this pull request?
+
+The PySpark deserialization has a bug that shows while deserializing all zero sparse vectors. This fix filters out empty string tokens before casting, hence properly stringified SparseVectors successfully get parsed.
+
+## How was this patch tested?
+
+Standard unit-tests similar to other methods.
+
+Author: Arash Parsa <arash@ip-192-168-50-106.ec2.internal>
+Author: Arash Parsa <arashpa@gmail.com>
+Author: Vishnu Prasad <vishnu667@gmail.com>
+Author: Vishnu Prasad S <vishnu667@gmail.com>
+
+Closes #12516 from arashpa/SPARK-14739.
+
+(cherry picked from commit 2b8906c43760591f2e2da99bf0e34fa1bb63bfd1)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 1cda10b4c83b9bbc70f6d9bf500b1bcc99f842a0)
+---
+ python/pyspark/mllib/linalg/__init__.py |    6 +++---
+ python/pyspark/mllib/tests.py           |   16 +++++++++++-----
+ 2 files changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/python/pyspark/mllib/linalg/__init__.py b/python/pyspark/mllib/linalg/__init__.py
+index ae9ce58..d87b7eb 100644
+--- a/python/pyspark/mllib/linalg/__init__.py
++++ b/python/pyspark/mllib/linalg/__init__.py
+@@ -293,7 +293,7 @@ class DenseVector(Vector):
+         s = s[start + 1: end]
+ 
+         try:
+-            values = [float(val) for val in s.split(',')]
++            values = [float(val) for val in s.split(',') if val]
+         except ValueError:
+             raise ValueError("Unable to parse values from %s" % s)
+         return DenseVector(values)
+@@ -584,7 +584,7 @@ class SparseVector(Vector):
+         new_s = s[ind_start + 1: ind_end]
+         ind_list = new_s.split(',')
+         try:
+-            indices = [int(ind) for ind in ind_list]
++            indices = [int(ind) for ind in ind_list if ind]
+         except ValueError:
+             raise ValueError("Unable to parse indices from %s." % new_s)
+         s = s[ind_end + 1:].strip()
+@@ -597,7 +597,7 @@ class SparseVector(Vector):
+             raise ValueError("Values array should end with ']'.")
+         val_list = s[val_start + 1: val_end].split(',')
+         try:
+-            values = [float(val) for val in val_list]
++            values = [float(val) for val in val_list if val]
+         except ValueError:
+             raise ValueError("Unable to parse values from %s." % s)
+         return SparseVector(size, indices, values)
+diff --git a/python/pyspark/mllib/tests.py b/python/pyspark/mllib/tests.py
+index 26db87e..b056246 100644
+--- a/python/pyspark/mllib/tests.py
++++ b/python/pyspark/mllib/tests.py
+@@ -388,14 +388,20 @@ class VectorTests(MLlibTestCase):
+         self.assertTrue(array_equal(sm.values, [1, 3, 4, 6, 9]))
+ 
+     def test_parse_vector(self):
++        a = DenseVector([])
++        self.assertEqual(str(a), '[]')
++        self.assertEqual(Vectors.parse(str(a)), a)
+         a = DenseVector([3, 4, 6, 7])
+-        self.assertTrue(str(a), '[3.0,4.0,6.0,7.0]')
+-        self.assertTrue(Vectors.parse(str(a)), a)
++        self.assertEqual(str(a), '[3.0,4.0,6.0,7.0]')
++        self.assertEqual(Vectors.parse(str(a)), a)
++        a = SparseVector(4, [], [])
++        self.assertEqual(str(a), '(4,[],[])')
++        self.assertEqual(SparseVector.parse(str(a)), a)
+         a = SparseVector(4, [0, 2], [3, 4])
+-        self.assertTrue(str(a), '(4,[0,2],[3.0,4.0])')
+-        self.assertTrue(Vectors.parse(str(a)), a)
++        self.assertEqual(str(a), '(4,[0,2],[3.0,4.0])')
++        self.assertEqual(Vectors.parse(str(a)), a)
+         a = SparseVector(10, [0, 1], [4, 5])
+-        self.assertTrue(SparseVector.parse(' (10, [0,1 ],[ 4.0,5.0] )'), a)
++        self.assertEqual(SparseVector.parse(' (10, [0,1 ],[ 4.0,5.0] )'), a)
+ 
+     def test_norms(self):
+         a = DenseVector([0, 2, 3, -1])
+-- 
+1.7.9.5
+

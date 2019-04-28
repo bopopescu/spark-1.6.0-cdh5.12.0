@@ -1,0 +1,53 @@
+From 2e1bd1dd268d9d527ec08fa63ef5984e5b0d5e68 Mon Sep 17 00:00:00 2001
+From: Sameer Agarwal <sameer@databricks.com>
+Date: Thu, 26 May 2016 18:49:54 -0700
+Subject: [PATCH 226/517] [BUILD][1.6] Fix compilation
+
+## What changes were proposed in this pull request?
+
+Makes `UnsafeSortDataFormat`  and `RecordPointerAndKeyPrefix` public. These are already public in 2.0 and are used in an `ExternalSorterSuite` test (see https://github.com/apache/spark/commit/0b8bdf793a98296fd1ac1fc499946929c6a5959d)
+
+## How was this patch tested?
+
+Successfully builds locally
+
+Author: Sameer Agarwal <sameer@databricks.com>
+
+Closes #13339 from sameeragarwal/fix-compile.
+
+(cherry picked from commit c53c83ce84ff57570d48cfc06583c8e5b9c9a90d)
+---
+ .../unsafe/sort/RecordPointerAndKeyPrefix.java     |    2 +-
+ .../unsafe/sort/UnsafeSortDataFormat.java          |    3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/RecordPointerAndKeyPrefix.java b/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/RecordPointerAndKeyPrefix.java
+index dbf6770..a0a2c04 100644
+--- a/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/RecordPointerAndKeyPrefix.java
++++ b/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/RecordPointerAndKeyPrefix.java
+@@ -19,7 +19,7 @@ package org.apache.spark.util.collection.unsafe.sort;
+ 
+ import org.apache.spark.memory.TaskMemoryManager;
+ 
+-final class RecordPointerAndKeyPrefix {
++public final class RecordPointerAndKeyPrefix {
+   /**
+    * A pointer to a record; see {@link TaskMemoryManager} for a
+    * description of how these addresses are encoded.
+diff --git a/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/UnsafeSortDataFormat.java b/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/UnsafeSortDataFormat.java
+index 1eac329..8e73631 100644
+--- a/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/UnsafeSortDataFormat.java
++++ b/core/src/main/java/org/apache/spark/util/collection/unsafe/sort/UnsafeSortDataFormat.java
+@@ -29,7 +29,8 @@ import org.apache.spark.util.collection.SortDataFormat;
+  * Within each long[] buffer, position {@code 2 * i} holds a pointer pointer to the record at
+  * index {@code i}, while position {@code 2 * i + 1} in the array holds an 8-byte key prefix.
+  */
+-final class UnsafeSortDataFormat extends SortDataFormat<RecordPointerAndKeyPrefix, LongArray> {
++public final class UnsafeSortDataFormat
++    extends SortDataFormat<RecordPointerAndKeyPrefix, LongArray> {
+ 
+   public static final UnsafeSortDataFormat INSTANCE = new UnsafeSortDataFormat();
+ 
+-- 
+1.7.9.5
+

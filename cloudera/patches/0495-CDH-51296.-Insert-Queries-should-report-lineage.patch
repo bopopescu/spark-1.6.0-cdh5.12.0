@@ -1,0 +1,173 @@
+From b07d359a43b846bbc1a9af04a3810b64aabdb900 Mon Sep 17 00:00:00 2001
+From: Salil Surendran <salilsurendran@cloudera.com>
+Date: Fri, 10 Mar 2017 09:03:23 -0800
+Subject: [PATCH 495/517] CDH-51296. Insert Queries should report lineage
+
+Insert queries such as
+sqlContext.sql("insert into orders select id, name from customers") should report lineage
+---
+ .../spark/sql/query/analysis/QueryAnalysis.scala   |   12 +--
+ .../query/analysis/HiveQueryAnalysisSuite.scala    |   96 ++++++++++++++++++++
+ .../spark/sql/hive/HiveMetastoreCatalog.scala      |    2 +-
+ 3 files changed, 103 insertions(+), 7 deletions(-)
+
+diff --git a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+index 17880fa..a7092be 100644
+--- a/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
++++ b/lineage/src/main/scala/org/apache/spark/sql/query/analysis/QueryAnalysis.scala
+@@ -26,12 +26,8 @@ import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, Nam
+ import org.apache.spark.sql.catalyst.plans.logical.{UnaryNode, _}
+ import org.apache.spark.sql.execution.QueryExecution
+ import org.apache.spark.sql.execution.datasources.parquet.ParquetRelation
+-import org.apache.spark.sql.execution.datasources.{
+-  CreateTableUsing,
+-  CreateTableUsingAsSelect,
+-  LogicalRelation
+-}
+-import org.apache.spark.sql.hive.MetastoreRelation
++import org.apache.spark.sql.execution.datasources.{CreateTableUsing, CreateTableUsingAsSelect, LogicalRelation}
++import org.apache.spark.sql.hive.{InsertIntoHiveTable, MetastoreRelation}
+ import org.apache.spark.sql.hive.execution.CreateTableAsSelect
+ import org.apache.spark.sql.query.analysis.DataSourceFormat.DataSourceFormat
+ import org.apache.spark.sql.query.analysis.DataSourceType.DataSourceType
+@@ -72,6 +68,9 @@ object QueryAnalysis {
+           case CreateTableAsSelect(ht, _, _) =>
+             Some(QueryDetails(ht.database + "." + ht.name, fields.to[ListBuffer],
+                 DataSourceType.HIVE))
++          case InsertIntoHiveTable(m, _, _, _, _) =>
++            Some(QueryDetails(m.databaseName + "." + m.tableName,
++                m.output.map(_.name).to[ListBuffer], DataSourceType.HIVE))
+           case _ => None
+         }
+       }
+@@ -209,6 +208,7 @@ object QueryAnalysis {
+         }
+       case m: MetastoreRelation => Some(m)
+       case CreateTableAsSelect(_, query, _) => getRelation(query, attr)
++      case InsertIntoHiveTable(_, _, child, _, _) => getRelation(child, attr)
+       case p @ Project(_, _) =>
+         if (getAttributesReferences(p.projectList).exists(a => a.sameRef(attr))) {
+           getRelation(p.child, attr)
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+index ed84b3a..b99fec9 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+@@ -209,6 +209,102 @@ class HiveQueryAnalysisSuite
+     assertHiveOutputs(qe, "test_table_5", Seq("code", "sal"))
+   }
+ 
++  test("CDH-51296: Insert Queries should report lineage") {
++    // Create test table of different column names
++    hiveContext.sql(
++      s"""create table test_table_6 (code_new STRING, salary_new INT)
++        | ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t'""".stripMargin)
++
++    // Assert select * of tables of similar schema works for DataFrameWriter.insert method
++    hiveContext.sql("select * from test_table_1").write.insertInto("test_table_2")
++    var qe = TestQeListener.getAndClear()
++    assertHiveInputs(qe, "test_table_1", Seq("description", "code", "salary", "total_emp"))
++    assertHiveOutputs(qe, "test_table_2", Seq("description", "code", "salary", "total_emp"))
++
++    // Assert select where column name of input table is different from column names of output
++    // table for DataFrameWriter.insert method
++    hiveContext.sql("select code, salary from test_table_1").write.insertInto("test_table_6")
++    qe = TestQeListener.getAndClear()
++    assertHiveInputs(qe, "test_table_1", Seq("code", "salary"))
++    assertHiveOutputs(qe, "test_table_6", Seq("code_new", "salary_new"))
++
++    // Assert select * works where output table column names vary from input table column names
++    hiveContext.sql("select * from test_table_1").write.insertInto("test_table_6")
++    qe = TestQeListener.getAndClear()
++    // This issue fails because of this bug CDH-51466.
++    // assertHiveInputs(qe, "test_table_1", Seq("code", "salary"))
++    assertHiveOutputs(qe, "test_table_6", Seq("code_new", "salary_new"))
++
++    // Assert insert with complex join query
++    hiveContext.sql(
++      s"""select
++        |   code, sal
++        | from
++        |   (
++        |     select
++        |       tt_2.code as code,
++        |       tt_1.description as desc,
++        |       tt_1.salary as sal
++        |     from
++        |       test_table_1 tt_1
++        |     join
++        |       test_table_2 tt_2 on (tt_1.code = tt_2.code)
++        |     where tt_1.salary > 170000
++        |       sort by sal
++        |     )t1
++        |       limit 3""".stripMargin).write.insertInto("test_table_6")
++    assertComplexInsert()
++
++    // Repeat the above same tests for insert into query
++    // Assert select * of tables of similar schema works insert into query
++    hiveContext.sql("insert into test_table_2 select * from test_table_1")
++    qe = TestQeListener.getAndClear()
++    assertHiveInputs(qe, "test_table_1", Seq("description", "code", "salary", "total_emp"))
++    assertHiveOutputs(qe, "test_table_2", Seq("description", "code", "salary", "total_emp"))
++
++    // Assert select query where column name of input table is different from column names of output
++    // table works for insert into query
++    hiveContext.sql("insert into test_table_6 select code, salary from test_table_1")
++    qe = TestQeListener.getAndClear()
++    assertHiveInputs(qe, "test_table_1", Seq("code", "salary"))
++    assertHiveOutputs(qe, "test_table_6", Seq("code_new", "salary_new"))
++
++    // Assert select * works where output table column names vary from input table column names
++    hiveContext.sql("insert into test_table_6 select * from test_table_1")
++    qe = TestQeListener.getAndClear()
++    // This issue fails because of this bug CDH-51466.
++    // assertHiveInputs(qe, "test_table_1", Seq("code", "salary"))
++    assertHiveOutputs(qe, "test_table_6", Seq("code_new", "salary_new"))
++
++    // Assert select query with complex join works for insert into query
++    hiveContext.sql(
++      s"""insert into test_table_6
++        |   select code, sal
++        | from (
++        |   select
++        |     tt_2.code as code,
++        |     tt_1.description as desc,
++        |     tt_1 .salary as sal
++        |   from
++        |     test_table_1 tt_1
++        |   join
++        |     test_table_2 tt_2 on (tt_1.code = tt_2.code)
++        |   where tt_1.salary > 170000
++        |     sort by sal
++        |   )t1
++        |     limit 3""".stripMargin)
++    assertComplexInsert()
++  }
++
++  private def assertComplexInsert() = {
++    val qe = TestQeListener.getAndClear()
++    val inputMetadata = QueryAnalysis.getInputMetadata(qe)
++    assert(inputMetadata.length === 2)
++    assertHiveFieldExists(inputMetadata, "test_table_1", "salary")
++    assertHiveFieldExists(inputMetadata, "test_table_2", "code")
++    assertHiveOutputs(qe, "test_table_6", Seq("code_new", "salary_new"))
++  }
++
+   def assertHiveInputs(
+       qe: org.apache.spark.sql.execution.QueryExecution,
+       table: String,
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
+index 1bdcb55..3da1892 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
+@@ -721,7 +721,7 @@ private[hive] class HiveMetastoreCatalog(val client: ClientInterface, hive: Hive
+  * This plan ignores nullability of ArrayType, MapType, StructType unlike InsertIntoTable
+  * because Hive table doesn't have nullability for ARRAY, MAP, STRUCT types.
+  */
+-private[hive] case class InsertIntoHiveTable(
++private[sql] case class InsertIntoHiveTable(
+     table: MetastoreRelation,
+     partition: Map[String, Option[String]],
+     child: LogicalPlan,
+-- 
+1.7.9.5
+

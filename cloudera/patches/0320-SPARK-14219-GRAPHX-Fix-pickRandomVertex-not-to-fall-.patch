@@ -1,0 +1,64 @@
+From 794ed0b3d8fc8709e51b377f9079d965b94cb6f0 Mon Sep 17 00:00:00 2001
+From: Dongjoon Hyun <dongjoon@apache.org>
+Date: Mon, 28 Mar 2016 21:00:00 -0700
+Subject: [PATCH 320/517] =?UTF-8?q?[SPARK-14219][GRAPHX]=20Fix=20`pickRandom?=
+ =?UTF-8?q?Vertex`=20not=20to=20fall=20into=20infinit=E2=80=A6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+## What changes were proposed in this pull request?
+
+Currently, `GraphOps.pickRandomVertex()` falls into infinite loops for graphs having only one vertex. This PR fixes it by modifying the following termination-checking condition.
+```scala
+-      if (selectedVertices.count > 1) {
++      if (selectedVertices.count > 0) {
+```
+
+## How was this patch tested?
+
+Pass the Jenkins tests (including new test case).
+
+Author: Dongjoon Hyun <dongjoon@apache.org>
+
+Closes #12021 from dongjoon-hyun/SPARK-14219-2.
+
+(cherry picked from commit a7579444d577f4f53ee2ce1470764126b175ba21)
+---
+ .../scala/org/apache/spark/graphx/GraphOps.scala   |    2 +-
+ .../scala/org/apache/spark/graphx/GraphSuite.scala |    8 ++++++++
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/graphx/src/main/scala/org/apache/spark/graphx/GraphOps.scala b/graphx/src/main/scala/org/apache/spark/graphx/GraphOps.scala
+index 9827dfa..e27c44d 100644
+--- a/graphx/src/main/scala/org/apache/spark/graphx/GraphOps.scala
++++ b/graphx/src/main/scala/org/apache/spark/graphx/GraphOps.scala
+@@ -269,7 +269,7 @@ class GraphOps[VD: ClassTag, ED: ClassTag](graph: Graph[VD, ED]) extends Seriali
+         if (Random.nextDouble() < probability) { Some(vidVvals._1) }
+         else { None }
+       }
+-      if (selectedVertices.count > 1) {
++      if (selectedVertices.count > 0) {
+         found = true
+         val collectedVertices = selectedVertices.collect()
+         retVal = collectedVertices(Random.nextInt(collectedVertices.size))
+diff --git a/graphx/src/test/scala/org/apache/spark/graphx/GraphSuite.scala b/graphx/src/test/scala/org/apache/spark/graphx/GraphSuite.scala
+index 1f5e27d..9acbd79 100644
+--- a/graphx/src/test/scala/org/apache/spark/graphx/GraphSuite.scala
++++ b/graphx/src/test/scala/org/apache/spark/graphx/GraphSuite.scala
+@@ -428,4 +428,12 @@ class GraphSuite extends SparkFunSuite with LocalSparkContext {
+     }
+   }
+ 
++  test("SPARK-14219: pickRandomVertex") {
++    withSpark { sc =>
++      val vert = sc.parallelize(List((1L, "a")), 1)
++      val edges = sc.parallelize(List(Edge[Long](1L, 1L)), 1)
++      val g0 = Graph(vert, edges)
++      assert(g0.pickRandomVertex() === 1L)
++    }
++  }
+ }
+-- 
+1.7.9.5
+

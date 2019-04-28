@@ -1,0 +1,411 @@
+From 922a114e91e9ce08774c4e7a37feb83e945d217b Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Fri, 27 Jan 2017 10:16:09 -0800
+Subject: [PATCH 468/517] [SPARK-19220][UI] Make redirection to HTTPS apply to
+ all URIs.
+
+The redirect handler was installed only for the root of the server;
+any other context ended up being served directly through the HTTP
+port. Since every sub page (e.g. application UIs in the history
+server) is a separate servlet context, this meant that everything
+but the root was accessible via HTTP still.
+
+The change adds separate names to each connector, and binds contexts
+to specific connectors so that content is only served through the
+HTTPS connector when it's enabled. In that case, the only thing that
+binds to the HTTP connector is the redirect handler.
+
+Tested with new unit tests and by checking a live history server.
+
+(cherry picked from commit 93d588756b4d507fbb26890495dc90b91209b89b)
+
+Cloudera ID: CDH-49081
+---
+ .../main/scala/org/apache/spark/TestUtils.scala    |   38 +++++++-
+ .../scala/org/apache/spark/ui/JettyUtils.scala     |  100 ++++++++++++++------
+ .../src/main/scala/org/apache/spark/ui/WebUI.scala |   14 +--
+ .../org/apache/spark/ui/UISeleniumSuite.scala      |   13 +--
+ .../test/scala/org/apache/spark/ui/UISuite.scala   |   55 ++++++++++-
+ 5 files changed, 165 insertions(+), 55 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/TestUtils.scala b/core/src/main/scala/org/apache/spark/TestUtils.scala
+index 871b9d1..7fed461 100644
+--- a/core/src/main/scala/org/apache/spark/TestUtils.scala
++++ b/core/src/main/scala/org/apache/spark/TestUtils.scala
+@@ -18,19 +18,22 @@
+ package org.apache.spark
+ 
+ import java.io.{ByteArrayInputStream, File, FileInputStream, FileOutputStream}
+-import java.net.{URI, URL}
++import java.net.{HttpURLConnection, URI, URL}
+ import java.nio.charset.StandardCharsets
+ import java.nio.file.Paths
++import java.security.SecureRandom
++import java.security.cert.X509Certificate
+ import java.util.Arrays
+ import java.util.concurrent.{CountDownLatch, TimeUnit}
+ import java.util.jar.{JarEntry, JarOutputStream}
++import javax.net.ssl._
++import javax.tools.{JavaFileObject, SimpleJavaFileObject, ToolProvider}
+ 
+ import scala.collection.JavaConverters._
+ import scala.collection.mutable
+ import scala.collection.mutable.ArrayBuffer
+ 
+ import com.google.common.io.{ByteStreams, Files}
+-import javax.tools.{JavaFileObject, SimpleJavaFileObject, ToolProvider}
+ 
+ import org.apache.spark.executor.TaskMetrics
+ import org.apache.spark.scheduler._
+@@ -182,6 +185,37 @@ private[spark] object TestUtils {
+     assert(spillListener.numSpilledStages == 0, s"expected $identifier to not spill, but did")
+   }
+ 
++  /**
++   * Returns the response code from an HTTP(S) URL.
++   */
++  def httpResponseCode(url: URL, method: String = "GET"): Int = {
++    val connection = url.openConnection().asInstanceOf[HttpURLConnection]
++    connection.setRequestMethod(method)
++
++    // Disable cert and host name validation for HTTPS tests.
++    if (connection.isInstanceOf[HttpsURLConnection]) {
++      val sslCtx = SSLContext.getInstance("SSL")
++      val trustManager = new X509TrustManager {
++        override def getAcceptedIssuers(): Array[X509Certificate] = null
++        override def checkClientTrusted(x509Certificates: Array[X509Certificate], s: String) {}
++        override def checkServerTrusted(x509Certificates: Array[X509Certificate], s: String) {}
++      }
++      val verifier = new HostnameVerifier() {
++        override def verify(hostname: String, session: SSLSession): Boolean = true
++      }
++      sslCtx.init(null, Array(trustManager), new SecureRandom())
++      connection.asInstanceOf[HttpsURLConnection].setSSLSocketFactory(sslCtx.getSocketFactory())
++      connection.asInstanceOf[HttpsURLConnection].setHostnameVerifier(verifier)
++    }
++
++    try {
++      connection.connect()
++      connection.getResponseCode()
++    } finally {
++      connection.disconnect()
++    }
++  }
++
+ }
+ 
+ 
+diff --git a/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala b/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala
+index bc143b7..aef08c1 100644
+--- a/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala
++++ b/core/src/main/scala/org/apache/spark/ui/JettyUtils.scala
+@@ -30,6 +30,7 @@ import org.eclipse.jetty.server.handler._
+ import org.eclipse.jetty.server.nio.SelectChannelConnector
+ import org.eclipse.jetty.server.ssl.SslSelectChannelConnector
+ import org.eclipse.jetty.servlet._
++import org.eclipse.jetty.util.component.LifeCycle
+ import org.eclipse.jetty.util.thread.QueuedThreadPool
+ import org.json4s.JValue
+ import org.json4s.jackson.JsonMethods.{pretty, render}
+@@ -42,6 +43,9 @@ import org.apache.spark.util.Utils
+  */
+ private[spark] object JettyUtils extends Logging {
+ 
++  val SPARK_CONNECTOR_NAME = "Spark"
++  val REDIRECT_CONNECTOR_NAME = "HttpsRedirect"
++
+   // Base type for a function that returns something based on an HTTP request. Allows for
+   // implicit conversion from many types of functions to jetty Handlers.
+   type Responder[T] = HttpServletRequest => T
+@@ -232,56 +236,68 @@ private[spark] object JettyUtils extends Logging {
+       conf: SparkConf,
+       serverName: String = ""): ServerInfo = {
+ 
+-    val collection = new ContextHandlerCollection
+     addFilters(handlers, conf)
+ 
+     val gzipHandlers = handlers.map { h =>
++      h.setConnectorNames(Array(SPARK_CONNECTOR_NAME))
++
+       val gzipHandler = new GzipHandler
+       gzipHandler.setHandler(h)
+       gzipHandler
+     }
+ 
+     // Bind to the given port, or throw a java.net.BindException if the port is occupied
+-    def connect(currentPort: Int): (Server, Int) = {
++    def connect(currentPort: Int): ((Server, Option[Int]), Int) = {
+       val server = new Server
+-      val connectors = new ArrayBuffer[Connector]
++      val connectors = new ArrayBuffer[Connector]()
++      val collection = new ContextHandlerCollection
++
+       // Create a connector on port currentPort to listen for HTTP requests
+       val httpConnector = new SelectChannelConnector()
+       httpConnector.setPort(currentPort)
+       connectors += httpConnector
+ 
+-      sslOptions.createJettySslContextFactory().foreach { factory =>
+-        // If the new port wraps around, do not try a privileged port.
+-        val securePort =
+-          if (currentPort != 0) {
+-            (currentPort + 400 - 1024) % (65536 - 1024) + 1024
+-          } else {
+-            0
+-          }
+-        val scheme = "https"
+-        // Create a connector on port securePort to listen for HTTPS requests
+-        val connector = new SslSelectChannelConnector(factory)
+-        connector.setPort(securePort)
+-        connectors += connector
+-
+-        // redirect the HTTP requests to HTTPS port
+-        collection.addHandler(createRedirectHttpsHandler(securePort, scheme))
++      val httpsConnector = sslOptions.createJettySslContextFactory() match {
++        case Some(factory) =>
++          // If the new port wraps around, do not try a privileged port.
++          val securePort =
++            if (currentPort != 0) {
++              (currentPort + 400 - 1024) % (65536 - 1024) + 1024
++            } else {
++              0
++            }
++          val scheme = "https"
++          // Create a connector on port securePort to listen for HTTPS requests
++          val connector = new SslSelectChannelConnector(factory)
++          connector.setPort(securePort)
++          connector.setName(SPARK_CONNECTOR_NAME)
++          connectors += connector
++
++          // redirect the HTTP requests to HTTPS port
++          httpConnector.setName(REDIRECT_CONNECTOR_NAME)
++          collection.addHandler(createRedirectHttpsHandler(securePort, scheme))
++          Some(connector)
++
++        case None =>
++          // No SSL, so the HTTP connector becomes the official one where all contexts bind.
++          httpConnector.setName(SPARK_CONNECTOR_NAME)
++          None
+       }
+ 
+-      gzipHandlers.foreach(collection.addHandler)
+-      connectors.foreach(_.setHost(hostName))
+-      server.setConnectors(connectors.toArray)
+-
+       val pool = new QueuedThreadPool
+       pool.setDaemon(true)
+       server.setThreadPool(pool)
+       val errorHandler = new ErrorHandler()
+       errorHandler.setShowStacks(true)
+       server.addBean(errorHandler)
++
++      gzipHandlers.foreach(collection.addHandler)
+       server.setHandler(collection)
++
++      server.setConnectors(connectors.toArray)
+       try {
+         server.start()
+-        (server, server.getConnectors.head.getLocalPort)
++        ((server, httpsConnector.map(_.getLocalPort())), httpConnector.getLocalPort)
+       } catch {
+         case e: Exception =>
+           server.stop()
+@@ -290,13 +306,16 @@ private[spark] object JettyUtils extends Logging {
+       }
+     }
+ 
+-    val (server, boundPort) = Utils.startServiceOnPort[Server](port, connect, conf, serverName)
+-    ServerInfo(server, boundPort, collection)
++    val ((server, securePort), boundPort) = Utils.startServiceOnPort(port, connect, conf,
++      serverName)
++    ServerInfo(server, boundPort, securePort,
++      server.getHandler().asInstanceOf[ContextHandlerCollection])
+   }
+ 
+   private def createRedirectHttpsHandler(securePort: Int, scheme: String): ContextHandler = {
+     val redirectHandler: ContextHandler = new ContextHandler
+     redirectHandler.setContextPath("/")
++    redirectHandler.setConnectorNames(Array(REDIRECT_CONNECTOR_NAME))
+     redirectHandler.setHandler(new AbstractHandler {
+       override def handle(
+           target: String,
+@@ -334,4 +353,31 @@ private[spark] object JettyUtils extends Logging {
+ private[spark] case class ServerInfo(
+     server: Server,
+     boundPort: Int,
+-    rootHandler: ContextHandlerCollection)
++    securePort: Option[Int],
++    private val rootHandler: ContextHandlerCollection) {
++
++  def addHandler(handler: ContextHandler): Unit = {
++    handler.setConnectorNames(Array(JettyUtils.SPARK_CONNECTOR_NAME))
++    rootHandler.addHandler(handler)
++    if (!handler.isStarted()) {
++      handler.start()
++    }
++  }
++
++  def removeHandler(handler: ContextHandler): Unit = {
++    rootHandler.removeHandler(handler)
++    if (handler.isStarted) {
++      handler.stop()
++    }
++  }
++
++  def stop(): Unit = {
++    server.stop()
++    // Stop the ThreadPool if it supports stop() method (through LifeCycle).
++    // It is needed because stopping the Server won't stop the ThreadPool it uses.
++    val threadPool = server.getThreadPool
++    if (threadPool != null && threadPool.isInstanceOf[LifeCycle]) {
++      threadPool.asInstanceOf[LifeCycle].stop
++    }
++  }
++}
+diff --git a/core/src/main/scala/org/apache/spark/ui/WebUI.scala b/core/src/main/scala/org/apache/spark/ui/WebUI.scala
+index fe4949b..957b394 100644
+--- a/core/src/main/scala/org/apache/spark/ui/WebUI.scala
++++ b/core/src/main/scala/org/apache/spark/ui/WebUI.scala
+@@ -89,23 +89,13 @@ private[spark] abstract class WebUI(
+   /** Attach a handler to this UI. */
+   def attachHandler(handler: ServletContextHandler) {
+     handlers += handler
+-    serverInfo.foreach { info =>
+-      info.rootHandler.addHandler(handler)
+-      if (!handler.isStarted) {
+-        handler.start()
+-      }
+-    }
++    serverInfo.foreach(_.addHandler(handler))
+   }
+ 
+   /** Detach a handler from this UI. */
+   def detachHandler(handler: ServletContextHandler) {
+     handlers -= handler
+-    serverInfo.foreach { info =>
+-      info.rootHandler.removeHandler(handler)
+-      if (handler.isStarted) {
+-        handler.stop()
+-      }
+-    }
++    serverInfo.foreach(_.removeHandler(handler))
+   }
+ 
+   /**
+diff --git a/core/src/test/scala/org/apache/spark/ui/UISeleniumSuite.scala b/core/src/test/scala/org/apache/spark/ui/UISeleniumSuite.scala
+index 5e52275..521072e 100644
+--- a/core/src/test/scala/org/apache/spark/ui/UISeleniumSuite.scala
++++ b/core/src/test/scala/org/apache/spark/ui/UISeleniumSuite.scala
+@@ -448,23 +448,14 @@ class UISeleniumSuite extends SparkFunSuite with WebBrowser with Matchers with B
+   }
+ 
+   test("kill stage POST/GET response is correct") {
+-    def getResponseCode(url: URL, method: String): Int = {
+-      val connection = url.openConnection().asInstanceOf[HttpURLConnection]
+-      connection.setRequestMethod(method)
+-      connection.connect()
+-      val code = connection.getResponseCode()
+-      connection.disconnect()
+-      code
+-    }
+-
+     withSpark(newSparkContext(killEnabled = true)) { sc =>
+       sc.parallelize(1 to 10).map{x => Thread.sleep(10000); x}.countAsync()
+       eventually(timeout(5 seconds), interval(50 milliseconds)) {
+         val url = new URL(
+           sc.ui.get.appUIAddress.stripSuffix("/") + "/stages/stage/kill/?id=0&terminate=true")
+         // SPARK-6846: should be POST only but YARN AM doesn't proxy POST
+-        getResponseCode(url, "GET") should be (200)
+-        getResponseCode(url, "POST") should be (200)
++        TestUtils.httpResponseCode(url, "GET") should be (200)
++        TestUtils.httpResponseCode(url, "POST") should be (200)
+       }
+     }
+   }
+diff --git a/core/src/test/scala/org/apache/spark/ui/UISuite.scala b/core/src/test/scala/org/apache/spark/ui/UISuite.scala
+index 69c4605..168240c 100644
+--- a/core/src/test/scala/org/apache/spark/ui/UISuite.scala
++++ b/core/src/test/scala/org/apache/spark/ui/UISuite.scala
+@@ -18,11 +18,12 @@
+ package org.apache.spark.ui
+ 
+ import java.net.{BindException, ServerSocket}
++import java.net.URL
++import javax.servlet.http.{HttpServlet, HttpServletRequest, HttpServletResponse}
+ 
+ import scala.io.Source
+ 
+-import org.eclipse.jetty.server.Server
+-import org.eclipse.jetty.servlet.ServletContextHandler
++import org.eclipse.jetty.servlet.{ServletContextHandler, ServletHolder}
+ import org.scalatest.concurrent.Eventually._
+ import org.scalatest.time.SpanSugar._
+ 
+@@ -164,6 +165,7 @@ class UISuite extends SparkFunSuite {
+       val boundPort = serverInfo.boundPort
+       assert(server.getState === "STARTED")
+       assert(boundPort != 0)
++      assert(serverInfo.securePort.isDefined)
+       intercept[BindException] {
+         socket = new ServerSocket(boundPort)
+       }
+@@ -191,8 +193,55 @@ class UISuite extends SparkFunSuite {
+     }
+   }
+ 
++  test("http -> https redirect applies to all URIs") {
++    var serverInfo: ServerInfo = null
++    try {
++      val servlet = new HttpServlet() {
++        override def doGet(req: HttpServletRequest, res: HttpServletResponse): Unit = {
++          res.sendError(HttpServletResponse.SC_OK)
++        }
++      }
++
++      def newContext(path: String): ServletContextHandler = {
++        val ctx = new ServletContextHandler()
++        ctx.setContextPath(path)
++        ctx.addServlet(new ServletHolder(servlet), "/root")
++        ctx
++      }
++
++      val (conf, sslOptions) = sslEnabledConf()
++      serverInfo = JettyUtils.startJettyServer("0.0.0.0", 0, sslOptions,
++        Seq[ServletContextHandler](newContext("/"), newContext("/test1")),
++        conf)
++      assert(serverInfo.server.getState === "STARTED")
++
++      val testContext = newContext("/test2")
++      serverInfo.addHandler(testContext)
++      testContext.start()
++
++      val httpPort = serverInfo.boundPort
++
++      val tests = Seq(
++        ("http", serverInfo.boundPort, HttpServletResponse.SC_FOUND),
++        ("https", serverInfo.securePort.get, HttpServletResponse.SC_OK))
++
++      tests.foreach { case (scheme, port, expected) =>
++        val urls = Seq(
++          s"$scheme://localhost:$port/root",
++          s"$scheme://localhost:$port/test1/root",
++          s"$scheme://localhost:$port/test2/root")
++        urls.foreach { url =>
++          val rc = TestUtils.httpResponseCode(new URL(url))
++          assert(rc === expected, s"Unexpected status $rc for $url")
++        }
++      }
++    } finally {
++      stopServer(serverInfo)
++    }
++  }
++
+   def stopServer(info: ServerInfo): Unit = {
+-    if (info != null && info.server != null) info.server.stop
++    if (info != null) info.stop()
+   }
+ 
+   def closeSocket(socket: ServerSocket): Unit = {
+-- 
+1.7.9.5
+

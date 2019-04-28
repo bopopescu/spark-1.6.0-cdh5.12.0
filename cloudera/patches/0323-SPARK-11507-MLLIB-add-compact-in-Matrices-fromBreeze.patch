@@ -1,0 +1,90 @@
+From 270437a0ec1baab75a2d303ec997cb00c0cc2926 Mon Sep 17 00:00:00 2001
+From: Yuhao Yang <hhbyyh@gmail.com>
+Date: Wed, 30 Mar 2016 15:58:19 -0700
+Subject: [PATCH 323/517] [SPARK-11507][MLLIB] add compact in Matrices
+ fromBreeze
+
+jira: https://issues.apache.org/jira/browse/SPARK-11507
+"In certain situations when adding two block matrices, I get an error regarding colPtr and the operation fails. External issue URL includes full error and code for reproducing the problem."
+
+root cause: colPtr.last does NOT always equal to values.length in breeze SCSMatrix, which fails the require in SparseMatrix.
+
+easy step to repro:
+```
+val m1: BM[Double] = new CSCMatrix[Double] (Array (1.0, 1, 1), 3, 3, Array (0, 1, 2, 3), Array (0, 1, 2) )
+val m2: BM[Double] = new CSCMatrix[Double] (Array (1.0, 2, 2, 4), 3, 3, Array (0, 0, 2, 4), Array (1, 2, 1, 2) )
+val sum = m1 + m2
+Matrices.fromBreeze(sum)
+```
+
+Solution: By checking the code in [CSCMatrix](https://github.com/scalanlp/breeze/blob/28000a7b901bc3cfbbbf5c0bce1d0a5dda8281b0/math/src/main/scala/breeze/linalg/CSCMatrix.scala), CSCMatrix in breeze can have extra zeros in the end of data array. Invoking compact will make sure it aligns with the require of SparseMatrix. This should add limited overhead as the actual compact operation is only performed when necessary.
+
+Author: Yuhao Yang <hhbyyh@gmail.com>
+
+Closes #9520 from hhbyyh/matricesFromBreeze.
+
+(cherry picked from commit ca458618d8ee659ffa9a081083cd475a440fa8ff)
+Signed-off-by: Joseph K. Bradley <joseph@databricks.com>
+
+Conflicts:
+	mllib/src/test/scala/org/apache/spark/mllib/linalg/MatricesSuite.scala
+
+(cherry picked from commit 3cc3d8578248f8bdeab007708c98f93639b44cf5)
+---
+ .../org/apache/spark/mllib/linalg/Matrices.scala   |   10 +++++++++-
+ .../apache/spark/mllib/linalg/MatricesSuite.scala  |   12 ++++++++++++
+ 2 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/linalg/Matrices.scala b/mllib/src/main/scala/org/apache/spark/mllib/linalg/Matrices.scala
+index 48e9778..7d35c8a 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/linalg/Matrices.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/linalg/Matrices.scala
+@@ -879,8 +879,16 @@ object Matrices {
+       case dm: BDM[Double] =>
+         new DenseMatrix(dm.rows, dm.cols, dm.data, dm.isTranspose)
+       case sm: BSM[Double] =>
++        // Spark-11507. work around breeze issue 479.
++        val mat = if (sm.colPtrs.last != sm.data.length) {
++          val matCopy = sm.copy
++          matCopy.compact()
++          matCopy
++        } else {
++          sm
++        }
+         // There is no isTranspose flag for sparse matrices in Breeze
+-        new SparseMatrix(sm.rows, sm.cols, sm.colPtrs, sm.rowIndices, sm.data)
++        new SparseMatrix(mat.rows, mat.cols, mat.colPtrs, mat.rowIndices, mat.data)
+       case _ =>
+         throw new UnsupportedOperationException(
+           s"Do not support conversion from type ${breeze.getClass.getName}.")
+diff --git a/mllib/src/test/scala/org/apache/spark/mllib/linalg/MatricesSuite.scala b/mllib/src/test/scala/org/apache/spark/mllib/linalg/MatricesSuite.scala
+index da04a44..0230aac 100644
+--- a/mllib/src/test/scala/org/apache/spark/mllib/linalg/MatricesSuite.scala
++++ b/mllib/src/test/scala/org/apache/spark/mllib/linalg/MatricesSuite.scala
+@@ -19,6 +19,7 @@ package org.apache.spark.mllib.linalg
+ 
+ import java.util.Random
+ 
++import breeze.linalg.{CSCMatrix, Matrix => BM}
+ import org.mockito.Mockito.when
+ import org.scalatest.mock.MockitoSugar._
+ import scala.collection.mutable.{Map => MutableMap}
+@@ -498,4 +499,15 @@ class MatricesSuite extends SparkFunSuite {
+     assert(sm1.numNonzeros === 1)
+     assert(sm1.numActives === 3)
+   }
++
++  test("fromBreeze with sparse matrix") {
++    // colPtr.last does NOT always equal to values.length in breeze SCSMatrix and
++    // invocation of compact() may be necessary. Refer to SPARK-11507
++    val bm1: BM[Double] = new CSCMatrix[Double](
++      Array(1.0, 1, 1), 3, 3, Array(0, 1, 2, 3), Array(0, 1, 2))
++    val bm2: BM[Double] = new CSCMatrix[Double](
++      Array(1.0, 2, 2, 4), 3, 3, Array(0, 0, 2, 4), Array(1, 2, 1, 2))
++    val sum = bm1 + bm2
++    Matrices.fromBreeze(sum)
++  }
+ }
+-- 
+1.7.9.5
+

@@ -1,0 +1,58 @@
+From a18d4ee6a44dad54a800046ff7db232e5f90b936 Mon Sep 17 00:00:00 2001
+From: Pete Robbins <robbinspg@gmail.com>
+Date: Thu, 2 Jun 2016 10:14:51 -0700
+Subject: [PATCH 376/517] [SPARK-15606][CORE] Use non-blocking removeExecutor
+ call to avoid deadlocks
+
+## What changes were proposed in this pull request?
+Set minimum number of dispatcher threads to 3 to avoid deadlocks on machines with only 2 cores
+
+## How was this patch tested?
+
+Spark test builds
+
+Author: Pete Robbins <robbinspg@gmail.com>
+
+Closes #13355 from robbinspg/SPARK-13906.
+
+(cherry picked from commit d98fb19c18f0122f335e5d810a2f8ff752b98d86)
+---
+ .../cluster/CoarseGrainedSchedulerBackend.scala    |    2 +-
+ .../apache/spark/storage/BlockManagerMaster.scala  |    8 ++++++++
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+index 163c498..f56b2a3 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+@@ -279,7 +279,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+           // manager to reregister itself. If that happens, the block manager master will know
+           // about the executor, but the scheduler will not. Therefore, we should remove the
+           // executor from the block manager when we hit this case.
+-          scheduler.sc.env.blockManager.master.removeExecutor(executorId)
++          scheduler.sc.env.blockManager.master.removeExecutorAsync(executorId)
+           logInfo(s"Asked to remove non-existent executor $executorId")
+       }
+     }
+diff --git a/core/src/main/scala/org/apache/spark/storage/BlockManagerMaster.scala b/core/src/main/scala/org/apache/spark/storage/BlockManagerMaster.scala
+index 440c4c1..10e1d9e 100644
+--- a/core/src/main/scala/org/apache/spark/storage/BlockManagerMaster.scala
++++ b/core/src/main/scala/org/apache/spark/storage/BlockManagerMaster.scala
+@@ -41,6 +41,14 @@ class BlockManagerMaster(
+     logInfo("Removed " + execId + " successfully in removeExecutor")
+   }
+ 
++  /** Request removal of a dead executor from the driver endpoint.
++   *  This is only called on the driver side. Non-blocking
++   */
++  def removeExecutorAsync(execId: String) {
++    driverEndpoint.ask[Boolean](RemoveExecutor(execId))
++    logInfo("Removal of executor " + execId + " requested")
++  }
++
+   /** Register the BlockManager's id with the driver. */
+   def registerBlockManager(
+       blockManagerId: BlockManagerId, maxMemSize: Long, slaveEndpoint: RpcEndpointRef): Unit = {
+-- 
+1.7.9.5
+

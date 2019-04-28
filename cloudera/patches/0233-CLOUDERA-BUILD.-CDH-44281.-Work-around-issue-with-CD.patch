@@ -1,0 +1,47 @@
+From a2755c3a1f8b5926fd19f6ee2aa0d289709f5ea1 Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Thu, 22 Sep 2016 19:36:18 -0700
+Subject: [PATCH 233/517] CLOUDERA-BUILD. CDH-44281. Work around issue with
+ CDH jackson version.
+
+---
+ .../spark/network/yarn/YarnShuffleService.java     |    8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java b/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java
+index bba3ae5..f77a976 100644
+--- a/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java
++++ b/network/yarn/src/main/java/org/apache/spark/network/yarn/YarnShuffleService.java
+@@ -50,6 +50,7 @@ import org.apache.spark.network.sasl.ShuffleSecretManager;
+ import org.apache.spark.network.server.TransportServer;
+ import org.apache.spark.network.server.TransportServerBootstrap;
+ import org.apache.spark.network.shuffle.ExternalShuffleBlockHandler;
++import org.apache.spark.network.util.JavaUtils;
+ import org.apache.spark.network.util.TransportConf;
+ import org.apache.spark.network.yarn.util.HadoopConfigProvider;
+ 
+@@ -216,9 +217,9 @@ public class YarnShuffleService extends AuxiliaryService {
+           break;
+         }
+         String id = parseDbAppKey(key);
+-        ByteBuffer secret = mapper.readValue(e.getValue(), ByteBuffer.class);
++        byte[] secret = mapper.readValue(e.getValue(), byte[].class);
+         logger.info("Reloading tokens for app: " + id);
+-        secretManager.registerApp(id, secret);
++        secretManager.registerApp(id, ByteBuffer.wrap(secret));
+       }
+     }
+   }
+@@ -249,7 +250,8 @@ public class YarnShuffleService extends AuxiliaryService {
+         AppId fullId = new AppId(appId);
+         if (db != null) {
+           byte[] key = dbAppKey(fullId);
+-          byte[] value = mapper.writeValueAsString(shuffleSecret).getBytes(StandardCharsets.UTF_8);
++          byte[] value = mapper.writeValueAsString(JavaUtils.bufferToArray(shuffleSecret))
++            .getBytes(StandardCharsets.UTF_8);
+           db.put(key, value);
+         }
+         secretManager.registerApp(appId, shuffleSecret);
+-- 
+1.7.9.5
+

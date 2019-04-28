@@ -1,0 +1,50 @@
+From fcbf9bfc46b94027311a0b9c70970c27025133b9 Mon Sep 17 00:00:00 2001
+From: Maciej Brynski <maciej.brynski@adpilot.pl>
+Date: Tue, 2 Aug 2016 08:07:08 -0700
+Subject: [PATCH 410/517] [SPARK-15541] Casting ConcurrentHashMap to
+ ConcurrentMap (master branch)
+
+Casting ConcurrentHashMap to ConcurrentMap allows to run code compiled with Java 8 on Java 7
+
+Compilation. Existing automatic tests
+
+Author: Maciej Brynski <maciej.brynski@adpilot.pl>
+
+Closes #14459 from maver1ck/spark-15541-master.
+
+(cherry picked from commit 511dede1118f20a7756f614acb6fc88af52c9de9)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 8a22275dea74cd79ecd59438fd88bebcae13c944)
+---
+ .../org/apache/spark/rpc/netty/Dispatcher.scala    |    8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/rpc/netty/Dispatcher.scala b/core/src/main/scala/org/apache/spark/rpc/netty/Dispatcher.scala
+index 8efb894..a5d64b0 100644
+--- a/core/src/main/scala/org/apache/spark/rpc/netty/Dispatcher.scala
++++ b/core/src/main/scala/org/apache/spark/rpc/netty/Dispatcher.scala
+@@ -17,7 +17,7 @@
+ 
+ package org.apache.spark.rpc.netty
+ 
+-import java.util.concurrent.{ThreadPoolExecutor, ConcurrentHashMap, LinkedBlockingQueue, TimeUnit}
++import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap, LinkedBlockingQueue, ThreadPoolExecutor, TimeUnit}
+ import javax.annotation.concurrent.GuardedBy
+ 
+ import scala.collection.JavaConverters._
+@@ -41,8 +41,10 @@ private[netty] class Dispatcher(nettyEnv: NettyRpcEnv) extends Logging {
+     val inbox = new Inbox(ref, endpoint)
+   }
+ 
+-  private val endpoints = new ConcurrentHashMap[String, EndpointData]
+-  private val endpointRefs = new ConcurrentHashMap[RpcEndpoint, RpcEndpointRef]
++  private val endpoints: ConcurrentMap[String, EndpointData] =
++    new ConcurrentHashMap[String, EndpointData]
++  private val endpointRefs: ConcurrentMap[RpcEndpoint, RpcEndpointRef] =
++    new ConcurrentHashMap[RpcEndpoint, RpcEndpointRef]
+ 
+   // Track the receivers whose inboxes may contain messages.
+   private val receivers = new LinkedBlockingQueue[EndpointData]
+-- 
+1.7.9.5
+

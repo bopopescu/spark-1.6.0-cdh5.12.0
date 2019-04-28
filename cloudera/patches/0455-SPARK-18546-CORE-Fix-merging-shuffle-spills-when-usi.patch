@@ -1,0 +1,499 @@
+From a8ca6e6e6cd84765ace91f850871d0263845e0c5 Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Wed, 30 Nov 2016 14:10:32 -0800
+Subject: [PATCH 455/517] [SPARK-18546][CORE] Fix merging shuffle spills when
+ using encryption.
+
+The problem exists because it's not possible to just concatenate encrypted
+partition data from different spill files; currently each partition would
+have its own initial vector to set up encryption, and the final merged file
+should contain a single initial vector for each merged partiton, otherwise
+iterating over each record becomes really hard.
+
+To fix that, UnsafeShuffleWriter now decrypts the partitions when merging,
+so that the merged file contains a single initial vector at the start of
+the partition data.
+
+Because it's not possible to do that using the fast transferTo path, when
+encryption is enabled UnsafeShuffleWriter will revert back to using file
+streams when merging. It may be possible to use a hybrid approach when
+using encryption, using an intermediate direct buffer when reading from
+files and encrypting the data, but that's better left for a separate patch.
+
+As part of the change I made DiskBlockObjectWriter take a SerializerManager
+instead of a "wrap stream" closure, since that makes it easier to test the
+code without having to mock SerializerManager functionality.
+
+Tested with newly added unit tests (UnsafeShuffleWriterSuite for the write
+side and ExternalAppendOnlyMapSuite for integration), and by running some
+apps that failed without the fix.
+
+Author: Marcelo Vanzin <vanzin@cloudera.com>
+
+Closes #15982 from vanzin/SPARK-18546.
+
+(cherry picked from commit 93e9d880bf8a144112d74a6897af4e36fcfa5807)
+---
+ .../spark/shuffle/sort/UnsafeShuffleWriter.java    |   54 ++++++++++-----
+ .../util/collection/ExternalAppendOnlyMap.scala    |    4 +-
+ .../shuffle/sort/UnsafeShuffleWriterSuite.java     |   71 +++++++++++++++-----
+ .../unsafe/sort/UnsafeExternalSorterSuite.java     |    2 +-
+ .../spark/storage/DiskBlockObjectWriterSuite.scala |   46 +++++--------
+ .../collection/ExternalAppendOnlyMapSuite.scala    |    8 ++-
+ 6 files changed, 119 insertions(+), 66 deletions(-)
+
+diff --git a/core/src/main/java/org/apache/spark/shuffle/sort/UnsafeShuffleWriter.java b/core/src/main/java/org/apache/spark/shuffle/sort/UnsafeShuffleWriter.java
+index d5e16fc..d0adb1a 100644
+--- a/core/src/main/java/org/apache/spark/shuffle/sort/UnsafeShuffleWriter.java
++++ b/core/src/main/java/org/apache/spark/shuffle/sort/UnsafeShuffleWriter.java
+@@ -38,9 +38,14 @@ import org.slf4j.LoggerFactory;
+ 
+ import org.apache.spark.*;
+ import org.apache.spark.annotation.Private;
++import org.apache.spark.crypto.CryptoConf;
++import org.apache.spark.crypto.CryptoStreamUtils;
+ import org.apache.spark.executor.ShuffleWriteMetrics;
+ import org.apache.spark.io.CompressionCodec;
+ import org.apache.spark.io.CompressionCodec$;
++import org.apache.commons.io.input.CloseShieldInputStream;
++import org.apache.commons.io.output.CloseShieldOutputStream;
++import org.apache.commons.io.output.CountingOutputStream;
+ import org.apache.spark.memory.TaskMemoryManager;
+ import org.apache.spark.network.util.LimitedInputStream;
+ import org.apache.spark.scheduler.MapStatus;
+@@ -263,6 +268,7 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
+       sparkConf.getBoolean("spark.shuffle.unsafe.fastMergeEnabled", true);
+     final boolean fastMergeIsSupported = !compressionEnabled ||
+       CompressionCodec$.MODULE$.supportsConcatenationOfSerializedStreams(compressionCodec);
++    final boolean encryptionEnabled = CryptoConf.isShuffleEncryptionEnabled(sparkConf);
+     try {
+       if (spills.length == 0) {
+         new FileOutputStream(outputFile).close(); // Create an empty file
+@@ -288,7 +294,7 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
+           // Compression is disabled or we are using an IO compression codec that supports
+           // decompression of concatenated compressed streams, so we can perform a fast spill merge
+           // that doesn't need to interpret the spilled bytes.
+-          if (transferToEnabled) {
++          if (transferToEnabled && !encryptionEnabled) {
+             logger.debug("Using transferTo-based fast merge");
+             partitionLengths = mergeSpillsWithTransferTo(spills, outputFile);
+           } else {
+@@ -319,9 +325,9 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
+   /**
+    * Merges spill files using Java FileStreams. This code path is slower than the NIO-based merge,
+    * {@link UnsafeShuffleWriter#mergeSpillsWithTransferTo(SpillInfo[], File)}, so it's only used in
+-   * cases where the IO compression codec does not support concatenation of compressed data, or in
+-   * cases where users have explicitly disabled use of {@code transferTo} in order to work around
+-   * kernel bugs.
++   * cases where the IO compression codec does not support concatenation of compressed data, when
++   * encryption is enabled, or when users have explicitly disabled use of {@code transferTo} in
++   * order to work around kernel bugs.
+    *
+    * @param spills the spills to merge.
+    * @param outputFile the file to write the merged data to.
+@@ -336,7 +342,11 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
+     final int numPartitions = partitioner.numPartitions();
+     final long[] partitionLengths = new long[numPartitions];
+     final InputStream[] spillInputStreams = new FileInputStream[spills.length];
+-    OutputStream mergedFileOutputStream = null;
++
++    // Use a counting output stream to avoid having to close the underlying file and ask
++    // the file system for its size after each partition is written.
++    final CountingOutputStream mergedFileOutputStream = new CountingOutputStream(
++      new FileOutputStream(outputFile));
+ 
+     boolean threwException = true;
+     try {
+@@ -344,27 +354,35 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
+         spillInputStreams[i] = new FileInputStream(spills[i].file);
+       }
+       for (int partition = 0; partition < numPartitions; partition++) {
+-        final long initialFileLength = outputFile.length();
+-        mergedFileOutputStream =
+-          new TimeTrackingOutputStream(writeMetrics, new FileOutputStream(outputFile, true));
++        final long initialFileLength = mergedFileOutputStream.getByteCount();
++        // Shield the underlying output stream from close() calls, so that we can close the higher
++        // level streams to make sure all data is really flushed and internal state is cleaned.
++        OutputStream partitionOutput = new CloseShieldOutputStream(
++          new TimeTrackingOutputStream(writeMetrics, mergedFileOutputStream));
++        partitionOutput = CryptoStreamUtils.wrapForEncryption(partitionOutput, sparkConf);
+         if (compressionCodec != null) {
+-          mergedFileOutputStream = compressionCodec.compressedOutputStream(mergedFileOutputStream);
++          partitionOutput = compressionCodec.compressedOutputStream(partitionOutput);
+         }
+-
+         for (int i = 0; i < spills.length; i++) {
+           final long partitionLengthInSpill = spills[i].partitionLengths[partition];
+           if (partitionLengthInSpill > 0) {
+-            InputStream partitionInputStream =
+-              new LimitedInputStream(spillInputStreams[i], partitionLengthInSpill);
+-            if (compressionCodec != null) {
+-              partitionInputStream = compressionCodec.compressedInputStream(partitionInputStream);
++            InputStream partitionInputStream = new LimitedInputStream(
++              new CloseShieldInputStream(spillInputStreams[i]), partitionLengthInSpill);
++            try {
++              partitionInputStream = CryptoStreamUtils.wrapForEncryption(partitionInputStream,
++                sparkConf);
++              if (compressionCodec != null) {
++                partitionInputStream = compressionCodec.compressedInputStream(partitionInputStream);
++              }
++              ByteStreams.copy(partitionInputStream, partitionOutput);
++            } finally {
++              partitionInputStream.close();
+             }
+-            ByteStreams.copy(partitionInputStream, mergedFileOutputStream);
+           }
+         }
+-        mergedFileOutputStream.flush();
+-        mergedFileOutputStream.close();
+-        partitionLengths[partition] = (outputFile.length() - initialFileLength);
++        partitionOutput.flush();
++        partitionOutput.close();
++        partitionLengths[partition] = (mergedFileOutputStream.getByteCount() - initialFileLength);
+       }
+       threwException = false;
+     } finally {
+diff --git a/core/src/main/scala/org/apache/spark/util/collection/ExternalAppendOnlyMap.scala b/core/src/main/scala/org/apache/spark/util/collection/ExternalAppendOnlyMap.scala
+index 25811ec..60dd0bc 100644
+--- a/core/src/main/scala/org/apache/spark/util/collection/ExternalAppendOnlyMap.scala
++++ b/core/src/main/scala/org/apache/spark/util/collection/ExternalAppendOnlyMap.scala
+@@ -28,6 +28,7 @@ import com.google.common.io.ByteStreams
+ 
+ import org.apache.spark.{Logging, SparkEnv, TaskContext}
+ import org.apache.spark.annotation.DeveloperApi
++import org.apache.spark.crypto.CryptoStreamUtils
+ import org.apache.spark.memory.TaskMemoryManager
+ import org.apache.spark.serializer.{DeserializationStream, Serializer}
+ import org.apache.spark.storage.{BlockId, BlockManager}
+@@ -492,7 +493,8 @@ class ExternalAppendOnlyMap[K, V, C](
+           ", batchOffsets = " + batchOffsets.mkString("[", ", ", "]"))
+ 
+         val bufferedStream = new BufferedInputStream(ByteStreams.limit(fileStream, end - start))
+-        val compressedStream = blockManager.wrapForCompression(blockId, bufferedStream)
++        val decrypted = CryptoStreamUtils.wrapForEncryption(bufferedStream, sparkConf)
++        val compressedStream = blockManager.wrapForCompression(blockId, decrypted)
+         ser.deserializeStream(compressedStream)
+       } else {
+         // No more batches left
+diff --git a/core/src/test/java/org/apache/spark/shuffle/sort/UnsafeShuffleWriterSuite.java b/core/src/test/java/org/apache/spark/shuffle/sort/UnsafeShuffleWriterSuite.java
+index 5fe64bd..9a0e7bc 100644
+--- a/core/src/test/java/org/apache/spark/shuffle/sort/UnsafeShuffleWriterSuite.java
++++ b/core/src/test/java/org/apache/spark/shuffle/sort/UnsafeShuffleWriterSuite.java
+@@ -27,7 +27,6 @@ import scala.runtime.AbstractFunction1;
+ 
+ import com.google.common.collect.Iterators;
+ import com.google.common.collect.HashMultiset;
+-import com.google.common.io.ByteStreams;
+ import org.junit.After;
+ import org.junit.Before;
+ import org.junit.Test;
+@@ -43,6 +42,8 @@ import static org.mockito.Answers.RETURNS_SMART_NULLS;
+ import static org.mockito.Mockito.*;
+ 
+ import org.apache.spark.*;
++import org.apache.spark.crypto.CryptoConf;
++import org.apache.spark.crypto.CryptoStreamUtils;
+ import org.apache.spark.io.CompressionCodec$;
+ import org.apache.spark.io.LZ4CompressionCodec;
+ import org.apache.spark.io.LZFCompressionCodec;
+@@ -123,7 +124,6 @@ public class UnsafeShuffleWriterSuite {
+       @Override
+       public DiskBlockObjectWriter answer(InvocationOnMock invocationOnMock) throws Throwable {
+         Object[] args = invocationOnMock.getArguments();
+-
+         return new DiskBlockObjectWriter(
+           (File) args[1],
+           (SerializerInstance) args[2],
+@@ -224,9 +224,10 @@ public class UnsafeShuffleWriterSuite {
+     for (int i = 0; i < NUM_PARTITITONS; i++) {
+       final long partitionSize = partitionSizesInMergedFile[i];
+       if (partitionSize > 0) {
+-        InputStream in = new FileInputStream(mergedOutputFile);
+-        ByteStreams.skipFully(in, startOffset);
+-        in = new LimitedInputStream(in, partitionSize);
++        FileInputStream fin = new FileInputStream(mergedOutputFile);
++        fin.getChannel().position(startOffset);
++        InputStream in = new LimitedInputStream(fin, partitionSize);
++        in = CryptoStreamUtils.wrapForEncryption(in, conf);
+         if (conf.getBoolean("spark.shuffle.compress", true)) {
+           in = CompressionCodec$.MODULE$.createCodec(conf).compressedInputStream(in);
+         }
+@@ -318,14 +319,22 @@ public class UnsafeShuffleWriterSuite {
+   }
+ 
+   private void testMergingSpills(
+-      boolean transferToEnabled,
+-      String compressionCodecName) throws IOException {
++      final boolean transferToEnabled,
++      String compressionCodecName,
++      boolean encrypt) throws Exception {
+     if (compressionCodecName != null) {
+       conf.set("spark.shuffle.compress", "true");
+       conf.set("spark.io.compression.codec", compressionCodecName);
+     } else {
+       conf.set("spark.shuffle.compress", "false");
+     }
++    conf.set(CryptoConf.SPARK_SHUFFLE_ENCRYPTION_ENABLED(), String.valueOf(encrypt));
++    testMergingSpills(transferToEnabled, encrypt);
++  }
++
++  private void testMergingSpills(
++      boolean transferToEnabled,
++      boolean encrypted) throws IOException {
+     final UnsafeShuffleWriter<Object, Object> writer = createWriter(transferToEnabled);
+     final ArrayList<Product2<Object, Object>> dataToWrite =
+       new ArrayList<Product2<Object, Object>>();
+@@ -349,6 +358,7 @@ public class UnsafeShuffleWriterSuite {
+     for (long size: partitionSizesInMergedFile) {
+       sumOfPartitionSizes += size;
+     }
++
+     assertEquals(sumOfPartitionSizes, mergedOutputFile.length());
+ 
+     assertEquals(HashMultiset.create(dataToWrite), HashMultiset.create(readRecordsFromFile()));
+@@ -363,42 +373,72 @@ public class UnsafeShuffleWriterSuite {
+ 
+   @Test
+   public void mergeSpillsWithTransferToAndLZF() throws Exception {
+-    testMergingSpills(true, LZFCompressionCodec.class.getName());
++    testMergingSpills(true, LZFCompressionCodec.class.getName(), false);
+   }
+ 
+   @Test
+   public void mergeSpillsWithFileStreamAndLZF() throws Exception {
+-    testMergingSpills(false, LZFCompressionCodec.class.getName());
++    testMergingSpills(false, LZFCompressionCodec.class.getName(), false);
+   }
+ 
+   @Test
+   public void mergeSpillsWithTransferToAndLZ4() throws Exception {
+-    testMergingSpills(true, LZ4CompressionCodec.class.getName());
++    testMergingSpills(true, LZ4CompressionCodec.class.getName(), false);
+   }
+ 
+   @Test
+   public void mergeSpillsWithFileStreamAndLZ4() throws Exception {
+-    testMergingSpills(false, LZ4CompressionCodec.class.getName());
++    testMergingSpills(false, LZ4CompressionCodec.class.getName(), false);
+   }
+ 
+   @Test
+   public void mergeSpillsWithTransferToAndSnappy() throws Exception {
+-    testMergingSpills(true, SnappyCompressionCodec.class.getName());
++    testMergingSpills(true, SnappyCompressionCodec.class.getName(), false);
+   }
+ 
+   @Test
+   public void mergeSpillsWithFileStreamAndSnappy() throws Exception {
+-    testMergingSpills(false, SnappyCompressionCodec.class.getName());
++    testMergingSpills(false, SnappyCompressionCodec.class.getName(), false);
+   }
+ 
+   @Test
+   public void mergeSpillsWithTransferToAndNoCompression() throws Exception {
+-    testMergingSpills(true, null);
++    testMergingSpills(true, null, false);
+   }
+ 
+   @Test
+   public void mergeSpillsWithFileStreamAndNoCompression() throws Exception {
+-    testMergingSpills(false, null);
++    testMergingSpills(false, null, false);
++  }
++
++  @Test
++  public void mergeSpillsWithCompressionAndEncryption() throws Exception {
++    // This should actually be translated to a "file stream merge" internally, just have the
++    // test to make sure that it's the case.
++    testMergingSpills(true, LZ4CompressionCodec.class.getName(), true);
++  }
++
++  @Test
++  public void mergeSpillsWithFileStreamAndCompressionAndEncryption() throws Exception {
++    testMergingSpills(false, LZ4CompressionCodec.class.getName(), true);
++  }
++
++  @Test
++  public void mergeSpillsWithCompressionAndEncryptionSlowPath() throws Exception {
++    conf.set("spark.shuffle.unsafe.fastMergeEnabled", "false");
++    testMergingSpills(false, LZ4CompressionCodec.class.getName(), true);
++  }
++
++  @Test
++  public void mergeSpillsWithEncryptionAndNoCompression() throws Exception {
++    // This should actually be translated to a "file stream merge" internally, just have the
++    // test to make sure that it's the case.
++    testMergingSpills(true, null, true);
++  }
++
++  @Test
++  public void mergeSpillsWithFileStreamAndEncryptionAndNoCompression() throws Exception {
++    testMergingSpills(false, null, true);
+   }
+ 
+   @Test
+@@ -545,4 +585,5 @@ public class UnsafeShuffleWriterSuite {
+       writer.stop(false);
+     }
+   }
++
+ }
+diff --git a/core/src/test/java/org/apache/spark/util/collection/unsafe/sort/UnsafeExternalSorterSuite.java b/core/src/test/java/org/apache/spark/util/collection/unsafe/sort/UnsafeExternalSorterSuite.java
+index e0ee281..6b85e56 100644
+--- a/core/src/test/java/org/apache/spark/util/collection/unsafe/sort/UnsafeExternalSorterSuite.java
++++ b/core/src/test/java/org/apache/spark/util/collection/unsafe/sort/UnsafeExternalSorterSuite.java
+@@ -56,7 +56,7 @@ import static org.mockito.Mockito.*;
+ 
+ public class UnsafeExternalSorterSuite {
+ 
+-  final LinkedList<File> spillFilesCreated = new LinkedList<File>();
++  final LinkedList<File> spillFilesCreated = new LinkedList<>();
+   final TestMemoryManager memoryManager =
+     new TestMemoryManager(new SparkConf().set("spark.memory.offHeap.enabled", "false"));
+   final TaskMemoryManager taskMemoryManager = new TaskMemoryManager(memoryManager, 0);
+diff --git a/core/src/test/scala/org/apache/spark/storage/DiskBlockObjectWriterSuite.scala b/core/src/test/scala/org/apache/spark/storage/DiskBlockObjectWriterSuite.scala
+index 7c19531..798f0fb 100644
+--- a/core/src/test/scala/org/apache/spark/storage/DiskBlockObjectWriterSuite.scala
++++ b/core/src/test/scala/org/apache/spark/storage/DiskBlockObjectWriterSuite.scala
+@@ -37,11 +37,18 @@ class DiskBlockObjectWriterSuite extends SparkFunSuite with BeforeAndAfterEach {
+     Utils.deleteRecursively(tempDir)
+   }
+ 
+-  test("verify write metrics") {
++  private def createWriter(): (DiskBlockObjectWriter, File, ShuffleWriteMetrics) = {
+     val file = new File(tempDir, "somefile")
++    val conf = new SparkConf()
+     val writeMetrics = new ShuffleWriteMetrics()
+     val writer = new DiskBlockObjectWriter(
+-      file, new JavaSerializer(new SparkConf()).newInstance(), 1024, os => os, true, writeMetrics)
++      file, new JavaSerializer(new SparkConf()).newInstance(), 1024, os => os, true,
++      writeMetrics)
++    (writer, file, writeMetrics)
++  }
++
++  test("verify write metrics") {
++    val (writer, file, writeMetrics) = createWriter()
+ 
+     writer.write(Long.box(20), Long.box(30))
+     // Record metrics update on every write
+@@ -60,10 +67,7 @@ class DiskBlockObjectWriterSuite extends SparkFunSuite with BeforeAndAfterEach {
+   }
+ 
+   test("verify write metrics on revert") {
+-    val file = new File(tempDir, "somefile")
+-    val writeMetrics = new ShuffleWriteMetrics()
+-    val writer = new DiskBlockObjectWriter(
+-      file, new JavaSerializer(new SparkConf()).newInstance(), 1024, os => os, true, writeMetrics)
++    val (writer, _, writeMetrics) = createWriter()
+ 
+     writer.write(Long.box(20), Long.box(30))
+     // Record metrics update on every write
+@@ -83,10 +87,7 @@ class DiskBlockObjectWriterSuite extends SparkFunSuite with BeforeAndAfterEach {
+   }
+ 
+   test("Reopening a closed block writer") {
+-    val file = new File(tempDir, "somefile")
+-    val writeMetrics = new ShuffleWriteMetrics()
+-    val writer = new DiskBlockObjectWriter(
+-      file, new JavaSerializer(new SparkConf()).newInstance(), 1024, os => os, true, writeMetrics)
++    val (writer, _, _) = createWriter()
+ 
+     writer.open()
+     writer.close()
+@@ -96,10 +97,7 @@ class DiskBlockObjectWriterSuite extends SparkFunSuite with BeforeAndAfterEach {
+   }
+ 
+   test("calling revertPartialWritesAndClose() on a closed block writer should have no effect") {
+-    val file = new File(tempDir, "somefile")
+-    val writeMetrics = new ShuffleWriteMetrics()
+-    val writer = new DiskBlockObjectWriter(
+-      file, new JavaSerializer(new SparkConf()).newInstance(), 1024, os => os, true, writeMetrics)
++    val (writer, file, writeMetrics) = createWriter()
+     for (i <- 1 to 1000) {
+       writer.write(i, i)
+     }
+@@ -112,10 +110,7 @@ class DiskBlockObjectWriterSuite extends SparkFunSuite with BeforeAndAfterEach {
+   }
+ 
+   test("commitAndClose() should be idempotent") {
+-    val file = new File(tempDir, "somefile")
+-    val writeMetrics = new ShuffleWriteMetrics()
+-    val writer = new DiskBlockObjectWriter(
+-      file, new JavaSerializer(new SparkConf()).newInstance(), 1024, os => os, true, writeMetrics)
++    val (writer, file, writeMetrics) = createWriter()
+     for (i <- 1 to 1000) {
+       writer.write(i, i)
+     }
+@@ -130,10 +125,7 @@ class DiskBlockObjectWriterSuite extends SparkFunSuite with BeforeAndAfterEach {
+   }
+ 
+   test("revertPartialWritesAndClose() should be idempotent") {
+-    val file = new File(tempDir, "somefile")
+-    val writeMetrics = new ShuffleWriteMetrics()
+-    val writer = new DiskBlockObjectWriter(
+-      file, new JavaSerializer(new SparkConf()).newInstance(), 1024, os => os, true, writeMetrics)
++    val (writer, file, writeMetrics) = createWriter()
+     for (i <- 1 to 1000) {
+       writer.write(i, i)
+     }
+@@ -148,10 +140,7 @@ class DiskBlockObjectWriterSuite extends SparkFunSuite with BeforeAndAfterEach {
+   }
+ 
+   test("fileSegment() can only be called after commitAndClose() has been called") {
+-    val file = new File(tempDir, "somefile")
+-    val writeMetrics = new ShuffleWriteMetrics()
+-    val writer = new DiskBlockObjectWriter(
+-      file, new JavaSerializer(new SparkConf()).newInstance(), 1024, os => os, true, writeMetrics)
++    val (writer, file, writeMetrics) = createWriter()
+     for (i <- 1 to 1000) {
+       writer.write(i, i)
+     }
+@@ -162,10 +151,7 @@ class DiskBlockObjectWriterSuite extends SparkFunSuite with BeforeAndAfterEach {
+   }
+ 
+   test("commitAndClose() without ever opening or writing") {
+-    val file = new File(tempDir, "somefile")
+-    val writeMetrics = new ShuffleWriteMetrics()
+-    val writer = new DiskBlockObjectWriter(
+-      file, new JavaSerializer(new SparkConf()).newInstance(), 1024, os => os, true, writeMetrics)
++    val (writer, _, _) = createWriter()
+     writer.commitAndClose()
+     assert(writer.fileSegment().length === 0)
+   }
+diff --git a/core/src/test/scala/org/apache/spark/util/collection/ExternalAppendOnlyMapSuite.scala b/core/src/test/scala/org/apache/spark/util/collection/ExternalAppendOnlyMapSuite.scala
+index ed78c1c..aa08c8a 100644
+--- a/core/src/test/scala/org/apache/spark/util/collection/ExternalAppendOnlyMapSuite.scala
++++ b/core/src/test/scala/org/apache/spark/util/collection/ExternalAppendOnlyMapSuite.scala
+@@ -20,6 +20,7 @@ package org.apache.spark.util.collection
+ import scala.collection.mutable.ArrayBuffer
+ 
+ import org.apache.spark._
++import org.apache.spark.crypto.CryptoConf
+ import org.apache.spark.io.CompressionCodec
+ import org.apache.spark.memory.MemoryTestingUtils
+ 
+@@ -230,15 +231,20 @@ class ExternalAppendOnlyMapSuite extends SparkFunSuite with LocalSparkContext {
+     }
+   }
+ 
++  test("spilling with compression and encryption") {
++    testSimpleSpilling(Some(CompressionCodec.DEFAULT_COMPRESSION_CODEC), encrypt = true)
++  }
++
+   /**
+    * Test spilling through simple aggregations and cogroups.
+    * If a compression codec is provided, use it. Otherwise, do not compress spills.
+    */
+-  private def testSimpleSpilling(codec: Option[String] = None): Unit = {
++  private def testSimpleSpilling(codec: Option[String] = None, encrypt: Boolean = false): Unit = {
+     val size = 1000
+     val conf = createSparkConf(loadDefaults = true, codec)  // Load defaults for Spark home
+     conf.set("spark.shuffle.manager", "hash") // avoid using external sorter
+     conf.set("spark.shuffle.spill.numElementsForceSpillThreshold", (size / 4).toString)
++    conf.set(CryptoConf.SPARK_SHUFFLE_ENCRYPTION_ENABLED, encrypt.toString)
+     sc = new SparkContext("local-cluster[1,1,1024]", "test", conf)
+ 
+     assertSpilled(sc, "reduceByKey") {
+-- 
+1.7.9.5
+

@@ -1,0 +1,43 @@
+From f4118e966f9abe303f3771a6af72e535ee89f37d Mon Sep 17 00:00:00 2001
+From: Sameer Agarwal <sameer@databricks.com>
+Date: Wed, 9 Mar 2016 18:16:29 -0800
+Subject: [PATCH 300/517] [SPARK-13760][SQL] Fix BigDecimal constructor for
+ FloatType
+
+## What changes were proposed in this pull request?
+
+A very minor change for using `BigDecimal.decimal(f: Float)` instead of `BigDecimal(f: float)`. The latter is deprecated and can result in inconsistencies due to an implicit conversion to `Double`.
+
+## How was this patch tested?
+
+N/A
+
+cc yhuai
+
+Author: Sameer Agarwal <sameer@databricks.com>
+
+Closes #11597 from sameeragarwal/bigdecimal.
+
+(cherry picked from commit 926e9c45a21c5b71ef0832d63b8dae7d4f3d8826)
+Signed-off-by: Yin Huai <yhuai@databricks.com>
+(cherry picked from commit 8a1bd5834cec61a882c54fdf56385c76b221cb4f)
+---
+ .../sql/catalyst/expressions/mathExpressions.scala |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala
+index 28f616f..4825bd2 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/mathExpressions.scala
+@@ -739,7 +739,7 @@ case class Round(child: Expression, scale: Expression)
+         if (f.isNaN || f.isInfinite) {
+           f
+         } else {
+-          BigDecimal(f).setScale(_scale, HALF_UP).toFloat
++          BigDecimal.decimal(f).setScale(_scale, HALF_UP).toFloat
+         }
+       case DoubleType =>
+         val d = input1.asInstanceOf[Double]
+-- 
+1.7.9.5
+

@@ -1,0 +1,169 @@
+From d152a5f021b2664be78b77ff6be9f5dff86e61cb Mon Sep 17 00:00:00 2001
+From: Eric Liang <ekl@databricks.com>
+Date: Tue, 12 Jul 2016 23:09:02 -0700
+Subject: [PATCH 396/517] [SPARK-16514][SQL] Fix various regex codegen bugs
+
+## What changes were proposed in this pull request?
+
+RegexExtract and RegexReplace currently crash on non-nullable input due use of a hard-coded local variable name (e.g. compiles fail with `java.lang.Exception: failed to compile: org.codehaus.commons.compiler.CompileException: File 'generated.java', Line 85, Column 26: Redefinition of local variable "m" `).
+
+This changes those variables to use fresh names, and also in a few other places.
+
+## How was this patch tested?
+
+Unit tests. rxin
+
+Author: Eric Liang <ekl@databricks.com>
+
+Closes #14168 from ericl/sc-3906.
+
+(cherry picked from commit 1c58fa905b6543d366d00b2e5394dfd633987f6d)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit 9808735e0ce91c68df4c1ce82c44543995d44aed)
+---
+ .../catalyst/expressions/regexpExpressions.scala   |   48 ++++++++++++++------
+ .../expressions/StringExpressionsSuite.scala       |    6 +++
+ 2 files changed, 39 insertions(+), 15 deletions(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/regexpExpressions.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/regexpExpressions.scala
+index 9e484c5..154c7a0 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/regexpExpressions.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/regexpExpressions.scala
+@@ -104,10 +104,11 @@ case class Like(left: Expression, right: Expression)
+         """
+       }
+     } else {
++      val rightStr = ctx.freshName("rightStr")
+       nullSafeCodeGen(ctx, ev, (eval1, eval2) => {
+         s"""
+-          String rightStr = ${eval2}.toString();
+-          ${patternClass} $pattern = ${patternClass}.compile($escapeFunc(rightStr));
++          String $rightStr = ${eval2}.toString();
++          ${patternClass} $pattern = ${patternClass}.compile($escapeFunc($rightStr));
+           ${ev.value} = $pattern.matcher(${eval1}.toString()).matches();
+         """
+       })
+@@ -152,10 +153,11 @@ case class RLike(left: Expression, right: Expression)
+         """
+       }
+     } else {
++      val rightStr = ctx.freshName("rightStr")
+       nullSafeCodeGen(ctx, ev, (eval1, eval2) => {
+         s"""
+-          String rightStr = ${eval2}.toString();
+-          ${patternClass} $pattern = ${patternClass}.compile(rightStr);
++          String $rightStr = ${eval2}.toString();
++          ${patternClass} $pattern = ${patternClass}.compile($rightStr);
+           ${ev.value} = $pattern.matcher(${eval1}.toString()).find(0);
+         """
+       })
+@@ -248,6 +250,8 @@ case class RegExpReplace(subject: Expression, regexp: Expression, rep: Expressio
+     val classNamePattern = classOf[Pattern].getCanonicalName
+     val classNameStringBuffer = classOf[java.lang.StringBuffer].getCanonicalName
+ 
++    val matcher = ctx.freshName("matcher")
++
+     ctx.addMutableState("UTF8String", termLastRegex, s"${termLastRegex} = null;")
+     ctx.addMutableState(classNamePattern, termPattern, s"${termPattern} = null;")
+     ctx.addMutableState("String", termLastReplacement, s"${termLastReplacement} = null;")
+@@ -256,6 +260,12 @@ case class RegExpReplace(subject: Expression, regexp: Expression, rep: Expressio
+     ctx.addMutableState(classNameStringBuffer,
+       termResult, s"${termResult} = new $classNameStringBuffer();")
+ 
++    val setEvNotNull = if (nullable) {
++      s"${ev.isNull} = false;"
++    } else {
++      ""
++    }
++
+     nullSafeCodeGen(ctx, ev, (subject, regexp, rep) => {
+     s"""
+       if (!$regexp.equals(${termLastRegex})) {
+@@ -269,14 +279,14 @@ case class RegExpReplace(subject: Expression, regexp: Expression, rep: Expressio
+         ${termLastReplacement} = ${termLastReplacementInUTF8}.toString();
+       }
+       ${termResult}.delete(0, ${termResult}.length());
+-      java.util.regex.Matcher m = ${termPattern}.matcher($subject.toString());
++      java.util.regex.Matcher ${matcher} = ${termPattern}.matcher($subject.toString());
+ 
+-      while (m.find()) {
+-        m.appendReplacement(${termResult}, ${termLastReplacement});
++      while (${matcher}.find()) {
++        ${matcher}.appendReplacement(${termResult}, ${termLastReplacement});
+       }
+-      m.appendTail(${termResult});
++      ${matcher}.appendTail(${termResult});
+       ${ev.value} = UTF8String.fromString(${termResult}.toString());
+-      ${ev.isNull} = false;
++      $setEvNotNull
+     """
+     })
+   }
+@@ -320,10 +330,18 @@ case class RegExpExtract(subject: Expression, regexp: Expression, idx: Expressio
+     val termLastRegex = ctx.freshName("lastRegex")
+     val termPattern = ctx.freshName("pattern")
+     val classNamePattern = classOf[Pattern].getCanonicalName
++    val matcher = ctx.freshName("matcher")
++    val matchResult = ctx.freshName("matchResult")
+ 
+     ctx.addMutableState("UTF8String", termLastRegex, s"${termLastRegex} = null;")
+     ctx.addMutableState(classNamePattern, termPattern, s"${termPattern} = null;")
+ 
++    val setEvNotNull = if (nullable) {
++      s"${ev.isNull} = false;"
++    } else {
++      ""
++    }
++
+     nullSafeCodeGen(ctx, ev, (subject, regexp, idx) => {
+       s"""
+       if (!$regexp.equals(${termLastRegex})) {
+@@ -331,15 +349,15 @@ case class RegExpExtract(subject: Expression, regexp: Expression, idx: Expressio
+         ${termLastRegex} = $regexp.clone();
+         ${termPattern} = ${classNamePattern}.compile(${termLastRegex}.toString());
+       }
+-      java.util.regex.Matcher m =
++      java.util.regex.Matcher ${matcher} =
+         ${termPattern}.matcher($subject.toString());
+-      if (m.find()) {
+-        java.util.regex.MatchResult mr = m.toMatchResult();
+-        ${ev.value} = UTF8String.fromString(mr.group($idx));
+-        ${ev.isNull} = false;
++      if (${matcher}.find()) {
++        java.util.regex.MatchResult ${matchResult} = ${matcher}.toMatchResult();
++        ${ev.value} = UTF8String.fromString(${matchResult}.group($idx));
++        $setEvNotNull
+       } else {
+         ${ev.value} = UTF8String.EMPTY_UTF8;
+-        ${ev.isNull} = false;
++        $setEvNotNull
+       }"""
+     })
+   }
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/StringExpressionsSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/StringExpressionsSuite.scala
+index 99e3b13..22980f5 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/StringExpressionsSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/StringExpressionsSuite.scala
+@@ -605,6 +605,9 @@ class StringExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
+     checkEvaluation(expr, null, row4)
+     checkEvaluation(expr, null, row5)
+     checkEvaluation(expr, null, row6)
++
++    val nonNullExpr = RegExpReplace(Literal("100-200"), Literal("(\\d+)"), Literal("num"))
++    checkEvaluation(nonNullExpr, "num-num", row1)
+   }
+ 
+   test("RegexExtract") {
+@@ -631,6 +634,9 @@ class StringExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
+ 
+     val expr1 = new RegExpExtract(s, p)
+     checkEvaluation(expr1, "100", row1)
++
++    val nonNullExpr = RegExpExtract(Literal("100-200"), Literal("(\\d+)-(\\d+)"), Literal(1))
++    checkEvaluation(nonNullExpr, "100", row1)
+   }
+ 
+   test("SPLIT") {
+-- 
+1.7.9.5
+

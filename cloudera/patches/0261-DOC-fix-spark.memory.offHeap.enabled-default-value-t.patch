@@ -1,0 +1,35 @@
+From fe512a1cf4b247e10cff21f22e623b333d018404 Mon Sep 17 00:00:00 2001
+From: zzcclp <xm_zzc@sina.com>
+Date: Wed, 6 Jan 2016 23:06:21 -0800
+Subject: [PATCH 261/517] [DOC] fix 'spark.memory.offHeap.enabled' default
+ value to false
+
+modify 'spark.memory.offHeap.enabled' default value to false
+
+Author: zzcclp <xm_zzc@sina.com>
+
+Closes #10633 from zzcclp/fix_spark.memory.offHeap.enabled_default_value.
+
+(cherry picked from commit 84e77a15df18ba3f1cc871a3c52c783b46e52369)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit 47a58c799206d011587e03178a259974be47d3bc)
+---
+ docs/configuration.md |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 89a82c6..06844dc 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -798,7 +798,7 @@ Apart from these, the following properties are also available, and may be useful
+ </tr>
+ <tr>
+   <td><code>spark.memory.offHeap.enabled</code></td>
+-  <td>true</td>
++  <td>false</td>
+   <td>
+     If true, Spark will attempt to use off-heap memory for certain operations. If off-heap memory use is enabled, then <code>spark.memory.offHeap.size</code> must be positive.
+   </td>
+-- 
+1.7.9.5
+

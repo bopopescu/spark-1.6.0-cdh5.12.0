@@ -1,0 +1,211 @@
+From 597903d8686e7b4ee485871530e8020fccd97e02 Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Wed, 25 Jan 2017 14:22:58 -0800
+Subject: [PATCH 466/517] [SPARK-18750][YARN] Follow up: move test to correct
+ directory in 2.1 branch.
+
+Author: Marcelo Vanzin <vanzin@cloudera.com>
+
+Closes #16704 from vanzin/SPARK-18750_2.1.
+
+(cherry picked from commit 97d3353ef16a6e6edc93d8177b08442a03e19eee)
+Signed-off-by: Marcelo Vanzin <vanzin@cloudera.com>
+(cherry picked from commit 00a48075ac2e0d6dbdc7b2632d8702af4f30aa97)
+
+Cloudera ID: CDH-49317
+---
+ .../yarn/LocalityPlacementStrategySuite.scala      |   87 --------------------
+ .../yarn/LocalityPlacementStrategySuite.scala      |   87 ++++++++++++++++++++
+ 2 files changed, 87 insertions(+), 87 deletions(-)
+ delete mode 100644 resource-managers/yarn/src/test/scala/org/apache/spark/deploy/yarn/LocalityPlacementStrategySuite.scala
+ create mode 100644 yarn/src/test/scala/org/apache/spark/deploy/yarn/LocalityPlacementStrategySuite.scala
+
+diff --git a/resource-managers/yarn/src/test/scala/org/apache/spark/deploy/yarn/LocalityPlacementStrategySuite.scala b/resource-managers/yarn/src/test/scala/org/apache/spark/deploy/yarn/LocalityPlacementStrategySuite.scala
+deleted file mode 100644
+index fb80ff9..0000000
+--- a/resource-managers/yarn/src/test/scala/org/apache/spark/deploy/yarn/LocalityPlacementStrategySuite.scala
++++ /dev/null
+@@ -1,87 +0,0 @@
+-/*
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.
+- * The ASF licenses this file to You under the Apache License, Version 2.0
+- * (the "License"); you may not use this file except in compliance with
+- * the License.  You may obtain a copy of the License at
+- *
+- *    http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-package org.apache.spark.deploy.yarn
+-
+-import scala.collection.mutable.{HashMap, HashSet, Set}
+-
+-import org.apache.hadoop.fs.CommonConfigurationKeysPublic
+-import org.apache.hadoop.net.DNSToSwitchMapping
+-import org.apache.hadoop.yarn.api.records._
+-import org.apache.hadoop.yarn.conf.YarnConfiguration
+-import org.mockito.Mockito._
+-
+-import org.apache.spark.{SparkConf, SparkFunSuite}
+-
+-class LocalityPlacementStrategySuite extends SparkFunSuite {
+-
+-  test("handle large number of containers and tasks (SPARK-18750)") {
+-    // Run the test in a thread with a small stack size, since the original issue
+-    // surfaced as a StackOverflowError.
+-    var error: Throwable = null
+-
+-    val runnable = new Runnable() {
+-      override def run(): Unit = try {
+-        runTest()
+-      } catch {
+-        case e: Throwable => error = e
+-      }
+-    }
+-
+-    val thread = new Thread(new ThreadGroup("test"), runnable, "test-thread", 32 * 1024)
+-    thread.start()
+-    thread.join()
+-
+-    assert(error === null)
+-  }
+-
+-  private def runTest(): Unit = {
+-    val yarnConf = new YarnConfiguration()
+-    yarnConf.setClass(
+-      CommonConfigurationKeysPublic.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
+-      classOf[MockResolver], classOf[DNSToSwitchMapping])
+-
+-    // The numbers below have been chosen to balance being large enough to replicate the
+-    // original issue while not taking too long to run when the issue is fixed. The main
+-    // goal is to create enough requests for localized containers (so there should be many
+-    // tasks on several hosts that have no allocated containers).
+-
+-    val resource = Resource.newInstance(8 * 1024, 4)
+-    val strategy = new LocalityPreferredContainerPlacementStrategy(new SparkConf(),
+-      yarnConf, resource)
+-
+-    val totalTasks = 32 * 1024
+-    val totalContainers = totalTasks / 16
+-    val totalHosts = totalContainers / 16
+-
+-    val mockId = mock(classOf[ContainerId])
+-    val hosts = (1 to totalHosts).map { i => (s"host_$i", totalTasks % i) }.toMap
+-    val containers = (1 to totalContainers).map { i => mockId }
+-    val count = containers.size / hosts.size / 2
+-
+-    val hostToContainerMap = new HashMap[String, Set[ContainerId]]()
+-    hosts.keys.take(hosts.size / 2).zipWithIndex.foreach { case (host, i) =>
+-      val hostContainers = new HashSet[ContainerId]()
+-      containers.drop(count * i).take(i).foreach { c => hostContainers += c }
+-      hostToContainerMap(host) = hostContainers
+-    }
+-
+-    strategy.localityOfRequestedContainers(containers.size * 2, totalTasks, hosts,
+-      hostToContainerMap, Nil)
+-  }
+-
+-}
+diff --git a/yarn/src/test/scala/org/apache/spark/deploy/yarn/LocalityPlacementStrategySuite.scala b/yarn/src/test/scala/org/apache/spark/deploy/yarn/LocalityPlacementStrategySuite.scala
+new file mode 100644
+index 0000000..fb80ff9
+--- /dev/null
++++ b/yarn/src/test/scala/org/apache/spark/deploy/yarn/LocalityPlacementStrategySuite.scala
+@@ -0,0 +1,87 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.spark.deploy.yarn
++
++import scala.collection.mutable.{HashMap, HashSet, Set}
++
++import org.apache.hadoop.fs.CommonConfigurationKeysPublic
++import org.apache.hadoop.net.DNSToSwitchMapping
++import org.apache.hadoop.yarn.api.records._
++import org.apache.hadoop.yarn.conf.YarnConfiguration
++import org.mockito.Mockito._
++
++import org.apache.spark.{SparkConf, SparkFunSuite}
++
++class LocalityPlacementStrategySuite extends SparkFunSuite {
++
++  test("handle large number of containers and tasks (SPARK-18750)") {
++    // Run the test in a thread with a small stack size, since the original issue
++    // surfaced as a StackOverflowError.
++    var error: Throwable = null
++
++    val runnable = new Runnable() {
++      override def run(): Unit = try {
++        runTest()
++      } catch {
++        case e: Throwable => error = e
++      }
++    }
++
++    val thread = new Thread(new ThreadGroup("test"), runnable, "test-thread", 32 * 1024)
++    thread.start()
++    thread.join()
++
++    assert(error === null)
++  }
++
++  private def runTest(): Unit = {
++    val yarnConf = new YarnConfiguration()
++    yarnConf.setClass(
++      CommonConfigurationKeysPublic.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
++      classOf[MockResolver], classOf[DNSToSwitchMapping])
++
++    // The numbers below have been chosen to balance being large enough to replicate the
++    // original issue while not taking too long to run when the issue is fixed. The main
++    // goal is to create enough requests for localized containers (so there should be many
++    // tasks on several hosts that have no allocated containers).
++
++    val resource = Resource.newInstance(8 * 1024, 4)
++    val strategy = new LocalityPreferredContainerPlacementStrategy(new SparkConf(),
++      yarnConf, resource)
++
++    val totalTasks = 32 * 1024
++    val totalContainers = totalTasks / 16
++    val totalHosts = totalContainers / 16
++
++    val mockId = mock(classOf[ContainerId])
++    val hosts = (1 to totalHosts).map { i => (s"host_$i", totalTasks % i) }.toMap
++    val containers = (1 to totalContainers).map { i => mockId }
++    val count = containers.size / hosts.size / 2
++
++    val hostToContainerMap = new HashMap[String, Set[ContainerId]]()
++    hosts.keys.take(hosts.size / 2).zipWithIndex.foreach { case (host, i) =>
++      val hostContainers = new HashSet[ContainerId]()
++      containers.drop(count * i).take(i).foreach { c => hostContainers += c }
++      hostToContainerMap(host) = hostContainers
++    }
++
++    strategy.localityOfRequestedContainers(containers.size * 2, totalTasks, hosts,
++      hostToContainerMap, Nil)
++  }
++
++}
+-- 
+1.7.9.5
+

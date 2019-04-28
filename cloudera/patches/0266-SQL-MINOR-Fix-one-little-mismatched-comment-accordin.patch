@@ -1,0 +1,33 @@
+From a07ef07e71054ad9781203e09864d88915e7a647 Mon Sep 17 00:00:00 2001
+From: proflin <proflin.me@gmail.com>
+Date: Tue, 19 Jan 2016 00:15:43 -0800
+Subject: [PATCH 266/517] [SQL][MINOR] Fix one little mismatched comment
+ according to the codes in interface.scala
+
+Author: proflin <proflin.me@gmail.com>
+
+Closes #10824 from proflin/master.
+
+(cherry picked from commit c00744e60f77edb238aff1e30b450dca65451e91)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit 30f55e5232d85fd070892444367d2bb386dfce13)
+---
+ .../org/apache/spark/sql/sources/interfaces.scala  |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala b/sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
+index fc8ce69..290b52f 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
+@@ -403,7 +403,7 @@ abstract class OutputWriter {
+  * [[Row]] objects. In addition, when reading from Hive style partitioned tables stored in file
+  * systems, it's able to discover partitioning information from the paths of input directories, and
+  * perform partition pruning before start reading the data. Subclasses of [[HadoopFsRelation()]]
+- * must override one of the three `buildScan` methods to implement the read path.
++ * must override one of the four `buildScan` methods to implement the read path.
+  *
+  * For the write path, it provides the ability to write to both non-partitioned and partitioned
+  * tables.  Directory layout of the partitioned tables is compatible with Hive.
+-- 
+1.7.9.5
+

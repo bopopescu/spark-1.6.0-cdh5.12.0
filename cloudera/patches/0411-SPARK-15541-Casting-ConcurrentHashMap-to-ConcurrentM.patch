@@ -1,0 +1,49 @@
+From 81d25728ec01ccbeb9db4a5e4814e3ec9015deed Mon Sep 17 00:00:00 2001
+From: Maciej Brynski <maciej.brynski@adpilot.pl>
+Date: Tue, 2 Aug 2016 16:07:35 -0700
+Subject: [PATCH 411/517] [SPARK-15541] Casting ConcurrentHashMap to
+ ConcurrentMap (branch-1.6)
+
+## What changes were proposed in this pull request?
+
+Casting ConcurrentHashMap to ConcurrentMap allows to run code compiled with Java 8 on Java 7
+
+## How was this patch tested?
+
+Compilation. Existing automatic tests
+
+Author: Maciej Brynski <maciej.brynski@adpilot.pl>
+
+Closes #14390 from maver1ck/spark-15541.
+
+(cherry picked from commit 797e758b16946aa5779cc302f943eafec34c0c39)
+---
+ .../spark/sql/catalyst/analysis/Catalog.scala      |    5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Catalog.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Catalog.scala
+index 8f4ce74..e66d2ad 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Catalog.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Catalog.scala
+@@ -17,7 +17,7 @@
+ 
+ package org.apache.spark.sql.catalyst.analysis
+ 
+-import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
+ 
+ import scala.collection.JavaConverters._
+ import scala.collection.mutable
+@@ -80,7 +80,8 @@ trait Catalog {
+ }
+ 
+ class SimpleCatalog(val conf: CatalystConf) extends Catalog {
+-  private[this] val tables = new ConcurrentHashMap[String, LogicalPlan]
++  private[this] val tables: ConcurrentMap[String, LogicalPlan] =
++    new ConcurrentHashMap[String, LogicalPlan]
+ 
+   override def registerTable(tableIdent: TableIdentifier, plan: LogicalPlan): Unit = {
+     tables.put(getTableName(tableIdent), plan)
+-- 
+1.7.9.5
+

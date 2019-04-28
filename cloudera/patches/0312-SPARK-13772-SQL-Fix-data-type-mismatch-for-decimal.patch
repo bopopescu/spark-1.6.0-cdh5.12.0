@@ -1,0 +1,59 @@
+From 5a2441deb07f626048d45fe5555c6461dbcc1d74 Mon Sep 17 00:00:00 2001
+From: cenyuhai <cenyuhai@didichuxing.com>
+Date: Tue, 22 Mar 2016 20:53:11 +0800
+Subject: [PATCH 312/517] [SPARK-13772][SQL] Fix data type mismatch for
+ decimal
+
+Fix data type mismatch for decimal, patch for branch-1.6.
+
+Author: cenyuhai <cenyuhai@didichuxing.com>
+
+Closes #11605 from cenyuhai/SPARK-13772.
+
+(cherry picked from commit 3243d46ab8c3f76c1a7ee2cc5588f08ec7b51cfe)
+---
+ .../sql/catalyst/analysis/HiveTypeCoercion.scala   |    2 +-
+ .../catalyst/analysis/HiveTypeCoercionSuite.scala  |   14 ++++++++++++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/HiveTypeCoercion.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/HiveTypeCoercion.scala
+index dbcbd68..470af35 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/HiveTypeCoercion.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/HiveTypeCoercion.scala
+@@ -677,7 +677,7 @@ object HiveTypeCoercion {
+       case e if !e.childrenResolved => e
+       // Find tightest common type for If, if the true value and false value have different types.
+       case i @ If(pred, left, right) if left.dataType != right.dataType =>
+-        findTightestCommonTypeToString(left.dataType, right.dataType).map { widestType =>
++        findWiderTypeForTwo(left.dataType, right.dataType).map { widestType =>
+           val newLeft = if (left.dataType == widestType) left else Cast(left, widestType)
+           val newRight = if (right.dataType == widestType) right else Cast(right, widestType)
+           If(pred, newLeft, newRight)
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/analysis/HiveTypeCoercionSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/analysis/HiveTypeCoercionSuite.scala
+index 1429150..3b5bd77 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/analysis/HiveTypeCoercionSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/analysis/HiveTypeCoercionSuite.scala
+@@ -299,6 +299,20 @@ class HiveTypeCoercionSuite extends PlanTest {
+     )
+   }
+ 
++  test("test for SPARK-13772") {
++    val rule = HiveTypeCoercion.IfCoercion
++    ruleTest(rule,
++      If(Literal(true), Literal(1.0), Cast(Literal(1.0), DecimalType(19, 0))),
++      If(Literal(true), Literal(1.0), Cast(Cast(Literal(1.0), DecimalType(19, 0)), DoubleType))
++    )
++
++    ruleTest(rule,
++      If(Literal(true), Literal(Decimal(1)), Cast(Literal(1.0), DecimalType(19, 9))),
++      If(Literal(true), Cast(Literal(Decimal(1)), DecimalType(19, 9)),
++        Cast(Literal(1.0), DecimalType(19, 9)))
++    )
++  }
++
+   test("type coercion for CaseKeyWhen") {
+     ruleTest(HiveTypeCoercion.CaseWhenCoercion,
+       CaseKeyWhen(Literal(1.toShort), Seq(Literal(1), Literal("a"))),
+-- 
+1.7.9.5
+

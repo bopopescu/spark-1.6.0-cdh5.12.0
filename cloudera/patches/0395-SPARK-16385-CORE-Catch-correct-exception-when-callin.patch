@@ -1,0 +1,36 @@
+From a93236df6b51a39b088467d5778318d98d0a5720 Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Tue, 5 Jul 2016 16:55:22 -0700
+Subject: [PATCH 395/517] [SPARK-16385][CORE] Catch correct exception when
+ calling method via reflection.
+
+Using "Method.invoke" causes an exception to be thrown, not an error, so
+Utils.waitForProcess() was always throwing an exception when run on Java 7.
+
+Author: Marcelo Vanzin <vanzin@cloudera.com>
+
+Closes #14056 from vanzin/SPARK-16385.
+
+(cherry picked from commit 59f9c1bd1adfea7069e769fb68351c228c37c8fc)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 702178d1f1f02aaa6efa2de84f23d11be5a8e681)
+---
+ .../main/scala/org/apache/spark/util/Utils.scala   |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/util/Utils.scala b/core/src/main/scala/org/apache/spark/util/Utils.scala
+index 273e560..2f6db3e 100644
+--- a/core/src/main/scala/org/apache/spark/util/Utils.scala
++++ b/core/src/main/scala/org/apache/spark/util/Utils.scala
+@@ -1774,7 +1774,7 @@ private[spark] object Utils extends Logging {
+         .invoke(process, timeoutMs.asInstanceOf[java.lang.Long], TimeUnit.MILLISECONDS)
+         .asInstanceOf[Boolean]
+     } catch {
+-      case _: NoSuchMethodError =>
++      case _: NoSuchMethodException =>
+         // Otherwise implement it manually
+         var terminated = false
+         val startTime = System.currentTimeMillis
+-- 
+1.7.9.5
+

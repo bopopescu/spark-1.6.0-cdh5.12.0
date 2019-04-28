@@ -1,0 +1,34 @@
+From 7bf865da938ed30122e9ee1257d2d078541516a1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jos=C3=A9=20Hiram=20Soltren?= <jose@cloudera.com>
+Date: Fri, 3 Mar 2017 13:09:26 -0600
+Subject: [PATCH 489/517] [CDH-49875] Make local metrics test fail less often
+
+org.apache.spark.scheduler.SparkListenerSuite.local metrics will fail
+when executors finish too quickly. This causes a check to fail.
+
+https://github.com/apache/spark/pull/16586 proposed a fix to
+this by increasing the run time of the local metrics test
+with more parallelism. Instead of cherry-picking the entire
+change, manually port that one proposed fix.
+
+(cherry picked from commit 9e2d735fc9c2bb90b67f9664d71e243d4e06ad76)
+---
+ .../spark/scheduler/SparkListenerSuite.scala       |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/SparkListenerSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/SparkListenerSuite.scala
+index f20d5be..5751000 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/SparkListenerSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/SparkListenerSuite.scala
+@@ -229,7 +229,7 @@ class SparkListenerSuite extends SparkFunSuite with LocalSparkContext with Match
+     }
+ 
+     val numSlices = 16
+-    val d = sc.parallelize(0 to 1e3.toInt, numSlices).map(w)
++    val d = sc.parallelize(0 to 10000.toInt, numSlices).map(w)
+     d.count()
+     sc.listenerBus.waitUntilEmpty(WAIT_TIMEOUT_MILLIS)
+     listener.stageInfos.size should be (1)
+-- 
+1.7.9.5
+

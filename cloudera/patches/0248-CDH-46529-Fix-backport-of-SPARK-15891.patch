@@ -1,0 +1,30 @@
+From c51e614783759b3e9d67dca81b5dab2f828e7031 Mon Sep 17 00:00:00 2001
+From: Imran Rashid <irashid@cloudera.com>
+Date: Thu, 27 Oct 2016 20:57:19 -0700
+Subject: [PATCH 248/517] [CDH-46529] Fix backport of SPARK-15891.
+
+This change fixes the way executor memory is passed to yarn -- we need
+to convert "spark.executor.memory" to MB, since an "m" is automatically
+appended to it to build the jvm args.  This fixes a bug in the backport
+of SPARK-15891, because the original chance used a conf feature not
+present in 1.6.
+---
+ .../spark/deploy/yarn/ApplicationMaster.scala      |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
+index 19920dc..747de13 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ApplicationMaster.scala
+@@ -278,7 +278,7 @@ private[spark] class ApplicationMaster(
+     // be run up front, to avoid printing this out for every single executor being launched.
+     // Use placeholders for information that changes such as executor IDs.
+     logInfo {
+-      val executorMemory = sparkConf.getInt("spark.executor.memory", 1024)
++      val executorMemory = sparkConf.getSizeAsMb("spark.executor.memory", "1024m").toInt
+       val executorCores = sparkConf.getInt("spark.executor.cores", 1)
+       val dummyRunner = new ExecutorRunnable(None, yarnConf, sparkConf, driverUrl, "<executorId>",
+         "<hostname>", executorMemory, executorCores, appId, securityMgr)
+-- 
+1.7.9.5
+

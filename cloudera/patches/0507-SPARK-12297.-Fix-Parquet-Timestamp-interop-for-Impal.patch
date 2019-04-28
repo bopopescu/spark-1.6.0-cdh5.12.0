@@ -1,0 +1,211 @@
+From a5f8ab5d2c13344dc29b3d1bbd7d514ac3131cc3 Mon Sep 17 00:00:00 2001
+From: Imran Rashid <irashid@cloudera.com>
+Date: Wed, 10 May 2017 10:08:47 -0500
+Subject: [PATCH 507/517] SPARK-12297.  Fix Parquet Timestamp interop for
+ Impala.
+
+Impala never applies conversion when writing parquet data, regardless of
+the table property, so do not use the table property if the file was
+created by Impala.
+
+Cloudera ID: CDH-53609
+---
+ .../parquet/SpecificParquetRecordReaderBase.java   |   11 ++-
+ .../datasources/parquet/CatalystRowConverter.scala |   15 ++--
+ .../datasources/parquet/ParquetFileFormat.scala    |    3 +-
+ .../impala_timestamp_data.0.parq                   |  Bin 0 -> 503 bytes
+ .../sql/hive/ParquetHiveCompatibilitySuite.scala   |   80 +++++++++++++++++++-
+ 5 files changed, 98 insertions(+), 11 deletions(-)
+ create mode 100644 sql/hive/src/test/resources/data/files/parquet_timestamp_mixed_source_table/impala_timestamp_data.0.parq
+
+diff --git a/sql/core/src/main/java/org/apache/spark/sql/execution/datasources/parquet/SpecificParquetRecordReaderBase.java b/sql/core/src/main/java/org/apache/spark/sql/execution/datasources/parquet/SpecificParquetRecordReaderBase.java
+index 14f7b5d..162cdbc 100644
+--- a/sql/core/src/main/java/org/apache/spark/sql/execution/datasources/parquet/SpecificParquetRecordReaderBase.java
++++ b/sql/core/src/main/java/org/apache/spark/sql/execution/datasources/parquet/SpecificParquetRecordReaderBase.java
+@@ -53,6 +53,7 @@ import parquet.hadoop.ParquetInputSplit;
+ import parquet.hadoop.api.InitContext;
+ import parquet.hadoop.api.ReadSupport;
+ import parquet.hadoop.metadata.BlockMetaData;
++import parquet.hadoop.metadata.FileMetaData;
+ import parquet.hadoop.metadata.ParquetMetadata;
+ import parquet.hadoop.util.ConfigurationUtil;
+ import parquet.schema.MessageType;
+@@ -128,8 +129,14 @@ public abstract class SpecificParquetRecordReaderBase<T> extends RecordReader<Vo
+                 + " in range " + split.getStart() + ", " + split.getEnd());
+       }
+     }
+-    MessageType fileSchema = footer.getFileMetaData().getSchema();
+-    Map<String, String> fileMetadata = footer.getFileMetaData().getKeyValueMetaData();
++    FileMetaData fileMeta = footer.getFileMetaData();
++    // We need to grab the creator for this specific file, because the timestamp conversion varies
++    // based on the creator, and each file in the table may have a different creator.
++    taskAttemptContext.getConfiguration().set(
++        ParquetFileFormat.FILE_CREATOR(),
++        fileMeta.getCreatedBy());
++    MessageType fileSchema = fileMeta.getSchema();
++    Map<String, String> fileMetadata = fileMeta.getKeyValueMetaData();
+     this.readSupport = getReadSupportInstance(
+         (Class<? extends ReadSupport<T>>) getReadSupportClass(configuration));
+     ReadSupport.ReadContext readContext = readSupport.init(new InitContext(
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRowConverter.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRowConverter.scala
+index 9047dd3..204f131 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRowConverter.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRowConverter.scala
+@@ -257,12 +257,17 @@ private[parquet] class CatalystRowConverter(
+         // TODO Implements `TIMESTAMP_MICROS` once parquet-mr has that.
+         val localTz = TimeZone.getDefault()
+         val tzString = hadoopConf.get(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY)
++        val fileCreator = hadoopConf.get(ParquetFileFormat.FILE_CREATOR)
+         val storageTz = if (tzString == null) {
+-          localTz
+-        } else {
+-          TimeZone.getTimeZone(tzString)
+-        }
+-        logInfo(s"Building timestamp reader with localTz = ${localTz.getID()}; " +
++            localTz
++          } else if (!fileCreator.startsWith("parquet-mr")) {
++            // Impala always writes the data as UTC, regardless of the table property. The
++            // conversion is only done as part of spark & hive, which identify as parquet-mr.
++            TimeZone.getTimeZone("UTC")
++          } else {
++            TimeZone.getTimeZone(tzString)
++          }
++        logDebug(s"Building timestamp reader with localTz = ${localTz.getID()}; " +
+           s"storageTz = ${storageTz.getID()}; tzString = $tzString")
+         new CatalystPrimitiveConverter(updater) {
+           // Converts nanosecond timestamps stored as INT96
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFileFormat.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFileFormat.scala
+index 23dba59..4c98206 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFileFormat.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFileFormat.scala
+@@ -16,6 +16,7 @@
+  */
+ package org.apache.spark.sql.execution.datasources.parquet
+ 
+-object ParquetFileFormat {
++private[sql] object ParquetFileFormat {
+   val PARQUET_TIMEZONE_TABLE_PROPERTY = "parquet.mr.int96.write.zone"
++  val FILE_CREATOR = "spark.sql.parquet.creator"
+ }
+diff --git a/sql/hive/src/test/resources/data/files/parquet_timestamp_mixed_source_table/impala_timestamp_data.0.parq b/sql/hive/src/test/resources/data/files/parquet_timestamp_mixed_source_table/impala_timestamp_data.0.parq
+new file mode 100644
+index 0000000000000000000000000000000000000000..7dd7273ae9616d3afb6220fd598c065fab1e4fce
+GIT binary patch
+literal 503
+zcmWG=3^EjD5$$3WP4W?C6J=pwaCH%8U|=w`G&j&SFa#n60|P5oW=?Si3qNrN4<iFZ
+zbA&ih%D_OBK~zLkLI<Q9h&dP-xKx;cCa^IwF{?1B9bl9Z<&iXH;b4=LU@k5x5@ix&
+z6T8DGwu4cvjZuw5QwOMvMU;sFXbOm808t*IHc-c?Ffi~ka`f1$@^ZN_FkJ9f1uB4m
+z*$t{7J$P*1!Ym`o2DO=~q!?`R3`VgDjB3A_)Rr(|v6)HI#)GXmIU_YU5f~DpJgQ7!
+zCo_n$0a-vJ7{u5lWh8Y-_mdjQZV@{H3?~K+zs%f%#GFKhvecsD%=|nBBRxw!1KnUh
+z$ADlD{}2U@q|(fs6a}+XOS7cJR1@Pw!=xljOEUvA10!=wGmBJ1V?!eov*eUiBO?>j
+Pq(n`I$H2e~07f|gy`WCl
+
+literal 0
+HcmV?d00001
+
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/ParquetHiveCompatibilitySuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/ParquetHiveCompatibilitySuite.scala
+index 14e7f68..f4f29b3 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/ParquetHiveCompatibilitySuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/ParquetHiveCompatibilitySuite.scala
+@@ -17,16 +17,16 @@
+ 
+ package org.apache.spark.sql.hive
+ 
++import java.io.File
++import java.nio.file.Files
+ import java.sql.Timestamp
+-import java.text.SimpleDateFormat
+-import java.util.{Calendar, TimeZone}
++import java.util.TimeZone
+ 
+ import org.apache.hadoop.hive.conf.HiveConf
+ 
+ import org.apache.spark.SparkFunSuite
+ import org.apache.spark.sql._
+ import org.apache.spark.sql.catalyst.TableIdentifier
+-import org.apache.spark.sql.catalyst.util.DateTimeUtils
+ import org.apache.spark.sql.execution.datasources.parquet.{ParquetCompatibilityTest, ParquetFileFormat}
+ import org.apache.spark.sql.hive.client.HiveTable
+ import org.apache.spark.sql.hive.test.TestHiveSingleton
+@@ -434,4 +434,78 @@ class ParquetHiveCompatibilitySuite extends ParquetCompatibilityTest with TestHi
+     }
+     assert(badTzAlterException.getMessage.contains("Blart Versenwald III"))
+   }
++
++  test("SPARK-12297: No conversion on Impala parquet files") {
++    // Different conversions apply to impala data and spark / hive generated data.  This tests
++    // uses a pre-existing impala generated file, and a spark generated file, stuffs them both into
++    // the same table, and makes sure they are read back correctly.
++    Seq(false, true).foreach { withTableTimezone =>
++      val tblName = s"mixed_timestamp_data_$withTableTimezone"
++      withTable(tblName) {
++        withTempDir { tableLocation =>
++          // take our pre-existing impala file and copy it into the location for the table.
++          val resourcePath =
++            "/data/files/parquet_timestamp_mixed_source_table/impala_timestamp_data.0.parq"
++          val inputDataFile = new File(getClass().getResource(resourcePath).getFile())
++          Files.copy(inputDataFile.toPath, new File(tableLocation, inputDataFile.getName()).toPath)
++          sqlContext.setConf(SQLConf.PARQUET_BINARY_AS_STRING, true)
++          val key = ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY
++          val tblProperties = if (withTableTimezone) {
++            s"""TBLPROPERTIES ("$key"="Europe/Berlin")"""
++          } else {
++            ""
++          }
++
++          sqlContext.sql(
++            s"""CREATE EXTERNAL TABLE $tblName (
++                |  str string,
++                |  ts timestamp
++                |)
++                |STORED AS PARQUET
++                |LOCATION '${tableLocation}'
++                |$tblProperties""".stripMargin
++          )
++          // insert some data from spark as well -- this will go into a different parquet file, with
++          // different "CreatedBy" metadata, so we can distinguish when we read back.
++          val dataFromSpark = createRawData().withColumnRenamed("display", "str")
++          dataFromSpark.write.insertInto(tblName)
++
++          // verify test setup is correct -- read the data bypassing the hive table, so no
++          // conversions apply, and make sure we've got two different offsets.
++          val deltas = sqlContext.read.parquet(tableLocation
++            .getAbsolutePath).map { row =>
++            val displayAsTs = Timestamp.valueOf(row.getAs[String]("str"))
++            row.getAs[Timestamp]("ts").getTime() - displayAsTs.getTime()
++          }.collect().toSet
++          // The impala file is written as UTC.  This test is run in America/Los_Angeles, and the
++          // table prop (if applicable) is Europe/Berlin.
++          val sparkGeneratedDataTz =
++            if (withTableTimezone) "Europe/Berlin" else "America/Los_Angeles"
++          val expectedDeltas = Set("UTC", sparkGeneratedDataTz).map { tz =>
++            // we have chosen times so that the offsets don't change w/ DST etc.
++            TimeZone.getDefault().getOffset(0L) - TimeZone.getTimeZone(tz).getOffset(0L)
++          }
++          assert(deltas === expectedDeltas)
++
++          if (withTableTimezone) {
++            // now check that we read it in correctly when going through the hive table, and apply
++            // the correct conversion.
++            sqlContext.sql(s"select * from $tblName").collect().foreach { row =>
++              // the impala data file doesn't show the trailing ".0" in the "str" column
++              val tsAsString = row.getAs[Timestamp]("ts").toString.stripSuffix(".0")
++              assert(row.getAs[String]("str") === tsAsString)
++            }
++          }
++          else {
++            // if we don't set any table property, then reading it from the table should be the same
++            // as reading it directly from the files (no conversion applied, which means a
++            // discrepancy between impala and spark; that is to retain backwards compatibility).
++            val readFromTable = sqlContext.sql(s"select * from $tblName").collect()
++            val readFromFiles = sqlContext.read.parquet(tableLocation.getAbsolutePath).collect()
++            assert(readFromTable.map(_.toString).sorted === readFromFiles.map(_.toString).sorted)
++          }
++        }
++      }
++    }
++  }
+ }
+-- 
+1.7.9.5
+

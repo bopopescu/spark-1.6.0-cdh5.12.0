@@ -1,0 +1,142 @@
+From 77ee66004ffb18f365b00e6a412daa1e895e76b0 Mon Sep 17 00:00:00 2001
+From: Tejas Patil <tejasp@fb.com>
+Date: Tue, 31 May 2016 19:52:22 -0500
+Subject: [PATCH 357/517] [SPARK-15601][CORE] CircularBuffer's toString() to
+ print only the contents written if buffer isn't
+ full
+
+1. The class allocated 4x space than needed as it was using `Int` to store the `Byte` values
+
+2. If CircularBuffer isn't full, currently toString() will print some garbage chars along with the content written as is tries to print the entire array allocated for the buffer. The fix is to keep track of buffer getting full and don't print the tail of the buffer if it isn't full (suggestion by sameeragarwal over https://github.com/apache/spark/pull/12194#discussion_r64495331)
+
+3. Simplified `toString()`
+
+Added new test case
+
+Author: Tejas Patil <tejasp@fb.com>
+
+Closes #13351 from tejasapatil/circular_buffer.
+
+(cherry picked from commit ac38bdc756c25632069e7887a657250fe2fd6d82)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 714f4d78a09c7cd0a71a3867418d5262b6a14527)
+---
+ .../main/scala/org/apache/spark/util/Utils.scala   |   32 ++++++++---------
+ .../scala/org/apache/spark/util/UtilsSuite.scala   |   37 ++++++++++++++++----
+ 2 files changed, 44 insertions(+), 25 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/util/Utils.scala b/core/src/main/scala/org/apache/spark/util/Utils.scala
+index 6731f85..c69025f 100644
+--- a/core/src/main/scala/org/apache/spark/util/Utils.scala
++++ b/core/src/main/scala/org/apache/spark/util/Utils.scala
+@@ -22,6 +22,7 @@ import java.lang.management.ManagementFactory
+ import java.net._
+ import java.nio.ByteBuffer
+ import java.nio.channels.Channels
++import java.nio.charset.StandardCharsets
+ import java.util.concurrent._
+ import java.util.{Locale, Properties, Random, UUID}
+ import javax.net.ssl.HttpsURLConnection
+@@ -2317,29 +2318,24 @@ private[spark] class RedirectThread(
+  * the toString method.
+  */
+ private[spark] class CircularBuffer(sizeInBytes: Int = 10240) extends java.io.OutputStream {
+-  var pos: Int = 0
+-  var buffer = new Array[Int](sizeInBytes)
++  private var pos: Int = 0
++  private var isBufferFull = false
++  private val buffer = new Array[Byte](sizeInBytes)
+ 
+-  def write(i: Int): Unit = {
+-    buffer(pos) = i
++  def write(input: Int): Unit = {
++    buffer(pos) = input.toByte
+     pos = (pos + 1) % buffer.length
++    isBufferFull = isBufferFull || (pos == 0)
+   }
+ 
+   override def toString: String = {
+-    val (end, start) = buffer.splitAt(pos)
+-    val input = new java.io.InputStream {
+-      val iterator = (start ++ end).iterator
+-
+-      def read(): Int = if (iterator.hasNext) iterator.next() else -1
+-    }
+-    val reader = new BufferedReader(new InputStreamReader(input))
+-    val stringBuilder = new StringBuilder
+-    var line = reader.readLine()
+-    while (line != null) {
+-      stringBuilder.append(line)
+-      stringBuilder.append("\n")
+-      line = reader.readLine()
++    if (!isBufferFull) {
++      return new String(buffer, 0, pos, StandardCharsets.UTF_8)
+     }
+-    stringBuilder.toString()
++
++    val nonCircularBuffer = new Array[Byte](sizeInBytes)
++    System.arraycopy(buffer, pos, nonCircularBuffer, 0, buffer.length - pos)
++    System.arraycopy(buffer, 0, nonCircularBuffer, buffer.length - pos, pos)
++    new String(nonCircularBuffer, StandardCharsets.UTF_8)
+   }
+ }
+diff --git a/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala b/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
+index 7de995a..13f85a7 100644
+--- a/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
++++ b/core/src/test/scala/org/apache/spark/util/UtilsSuite.scala
+@@ -17,7 +17,7 @@
+ 
+ package org.apache.spark.util
+ 
+-import java.io.{ByteArrayInputStream, ByteArrayOutputStream, File, FileOutputStream}
++import java.io.{ByteArrayInputStream, ByteArrayOutputStream, File, FileOutputStream, PrintStream}
+ import java.lang.{Double => JDouble, Float => JFloat}
+ import java.net.{BindException, ServerSocket, URI}
+ import java.nio.{ByteBuffer, ByteOrder}
+@@ -679,14 +679,37 @@ class UtilsSuite extends SparkFunSuite with ResetSystemProperties with Logging {
+     assert(!Utils.isInDirectory(nullFile, childFile3))
+   }
+ 
+-  test("circular buffer") {
++  test("circular buffer: if nothing was written to the buffer, display nothing") {
++    val buffer = new CircularBuffer(4)
++    assert(buffer.toString === "")
++  }
++
++  test("circular buffer: if the buffer isn't full, print only the contents written") {
++    val buffer = new CircularBuffer(10)
++    val stream = new PrintStream(buffer, true, "UTF-8")
++    stream.print("test")
++    assert(buffer.toString === "test")
++  }
++
++  test("circular buffer: data written == size of the buffer") {
++    val buffer = new CircularBuffer(4)
++    val stream = new PrintStream(buffer, true, "UTF-8")
++
++    // fill the buffer to its exact size so that it just hits overflow
++    stream.print("test")
++    assert(buffer.toString === "test")
++
++    // add more data to the buffer
++    stream.print("12")
++    assert(buffer.toString === "st12")
++  }
++
++  test("circular buffer: multiple overflow") {
+     val buffer = new CircularBuffer(25)
+-    val stream = new java.io.PrintStream(buffer, true, "UTF-8")
++    val stream = new PrintStream(buffer, true, "UTF-8")
+ 
+-    // scalastyle:off println
+-    stream.println("test circular test circular test circular test circular test circular")
+-    // scalastyle:on println
+-    assert(buffer.toString === "t circular test circular\n")
++    stream.print("test circular test circular test circular test circular test circular")
++    assert(buffer.toString === "st circular test circular")
+   }
+ 
+   test("nanSafeCompareDoubles") {
+-- 
+1.7.9.5
+

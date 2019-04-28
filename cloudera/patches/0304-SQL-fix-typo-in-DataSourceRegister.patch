@@ -1,0 +1,39 @@
+From 1ac4e97d149f281ccdff946e128ffab3f8e33106 Mon Sep 17 00:00:00 2001
+From: Jacky Li <jacky.likun@huawei.com>
+Date: Sun, 13 Mar 2016 18:44:02 -0700
+Subject: [PATCH 304/517] [SQL] fix typo in DataSourceRegister
+
+## What changes were proposed in this pull request?
+fix typo in DataSourceRegister
+
+## How was this patch tested?
+
+found when going through latest code
+
+Author: Jacky Li <jacky.likun@huawei.com>
+
+Closes #11686 from jackylk/patch-12.
+
+(cherry picked from commit f3daa099bf60edbd6ebf997c00e46db1e09f6dda)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit 3519ce9f16b4f053f46df37ab9eb07a27a859c39)
+---
+ .../org/apache/spark/sql/sources/interfaces.scala  |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala b/sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
+index 290b52f..736517b 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/sources/interfaces.scala
+@@ -56,7 +56,7 @@ trait DataSourceRegister {
+    * overridden by children to provide a nice alias for the data source. For example:
+    *
+    * {{{
+-   *   override def format(): String = "parquet"
++   *   override def shortName(): String = "parquet"
+    * }}}
+    *
+    * @since 1.5.0
+-- 
+1.7.9.5
+

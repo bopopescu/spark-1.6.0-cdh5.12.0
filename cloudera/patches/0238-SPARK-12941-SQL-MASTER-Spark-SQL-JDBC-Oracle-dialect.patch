@@ -1,0 +1,42 @@
+From 75d102853f6a19ea2b67c54d82b7125d9f4d5344 Mon Sep 17 00:00:00 2001
+From: thomastechs <thomas.sebastian@tcs.com>
+Date: Thu, 3 Mar 2016 20:35:40 -0800
+Subject: [PATCH 238/517] [SPARK-12941][SQL][MASTER] Spark-SQL JDBC Oracle
+ dialect fails to map string datatypes to Oracle
+ VARCHAR datatype mapping
+
+A test suite added for the bug fix -SPARK 12941; for the mapping of the StringType to corresponding in Oracle
+
+manual tests done
+(Please explain how this patch was tested. E.g. unit tests, integration tests, manual tests)
+
+(If this patch involves UI changes, please attach a screenshot; otherwise, remove this)
+
+Author: thomastechs <thomas.sebastian@tcs.com>
+Author: THOMAS SEBASTIAN <thomas.sebastian@tcs.com>
+
+Closes #11489 from thomastechs/thomastechs-12941-master-new.
+
+(cherry picked from commit 778609720c422eba18d93f7657fd0632fa817276)
+---
+ .../org/apache/spark/sql/jdbc/JDBCSuite.scala      |    6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/jdbc/JDBCSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/jdbc/JDBCSuite.scala
+index b90dcda..4b389ad 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/jdbc/JDBCSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/jdbc/JDBCSuite.scala
+@@ -501,4 +501,10 @@ class JDBCSuite extends SparkFunSuite with BeforeAndAfter with SharedSQLContext
+     assert(rows(0).getAs[java.sql.Timestamp](2)
+       === java.sql.Timestamp.valueOf("2002-02-20 11:22:33.543543"))
+   }
++
++  test("SPARK 12941: The data type mapping for StringType to Oracle") {
++    val oracleDialect = JdbcDialects.get("jdbc:oracle://127.0.0.1/db")
++    assert(oracleDialect.getJDBCType(StringType).
++      map(_.databaseTypeDefinition).get == "VARCHAR2(255)")
++  }
+ }
+-- 
+1.7.9.5
+

@@ -1,0 +1,34 @@
+From f7b4aa3558d02b9351f4d2bd3a92f1f1b29d7501 Mon Sep 17 00:00:00 2001
+From: Udo Klein <git@blinkenlight.net>
+Date: Fri, 8 Jan 2016 20:32:37 +0000
+Subject: [PATCH 262/517] fixed numVertices in transitive closure example
+
+Author: Udo Klein <git@blinkenlight.net>
+
+Closes #10642 from udoklein/patch-2.
+
+(cherry picked from commit 8c70cb4c62a353bea99f37965dfc829c4accc391)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit e4227cb3e19afafe3a7b5a2847478681db2f2044)
+---
+ examples/src/main/python/transitive_closure.py |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/examples/src/main/python/transitive_closure.py b/examples/src/main/python/transitive_closure.py
+index 7bf5fb6..3d61250 100755
+--- a/examples/src/main/python/transitive_closure.py
++++ b/examples/src/main/python/transitive_closure.py
+@@ -30,8 +30,8 @@ rand = Random(42)
+ def generateGraph():
+     edges = set()
+     while len(edges) < numEdges:
+-        src = rand.randrange(0, numEdges)
+-        dst = rand.randrange(0, numEdges)
++        src = rand.randrange(0, numVertices)
++        dst = rand.randrange(0, numVertices)
+         if src != dst:
+             edges.add((src, dst))
+     return edges
+-- 
+1.7.9.5
+

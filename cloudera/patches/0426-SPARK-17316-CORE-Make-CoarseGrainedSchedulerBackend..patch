@@ -1,0 +1,57 @@
+From 16fdfaabccc56ace2e622133db5e00806485eb3e Mon Sep 17 00:00:00 2001
+From: Shixiong Zhu <shixiong@databricks.com>
+Date: Wed, 31 Aug 2016 10:56:02 -0700
+Subject: [PATCH 426/517] [SPARK-17316][CORE] Make
+ CoarseGrainedSchedulerBackend.removeExecutor
+ non-blocking
+
+## What changes were proposed in this pull request?
+
+StandaloneSchedulerBackend.executorRemoved is a blocking call right now. It may cause some deadlock since it's called inside StandaloneAppClient.ClientEndpoint.
+
+This PR just changed CoarseGrainedSchedulerBackend.removeExecutor to be non-blocking. It's safe since the only two usages (StandaloneSchedulerBackend and YarnSchedulerEndpoint) don't need the return value).
+
+## How was this patch tested?
+
+Jenkins unit tests.
+
+Author: Shixiong Zhu <shixiong@databricks.com>
+
+Closes #14882 from zsxwing/SPARK-17316.
+
+(cherry picked from commit b84a92c248e571af1d81586948d5c84b41e18d07)
+---
+ .../cluster/CoarseGrainedSchedulerBackend.scala    |   17 +++++++++--------
+ 1 file changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+index f56b2a3..35481aa 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+@@ -389,14 +389,15 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+     conf.getInt("spark.default.parallelism", math.max(totalCoreCount.get(), 2))
+   }
+ 
+-  // Called by subclasses when notified of a lost worker
+-  def removeExecutor(executorId: String, reason: ExecutorLossReason) {
+-    try {
+-      driverEndpoint.askWithRetry[Boolean](RemoveExecutor(executorId, reason))
+-    } catch {
+-      case e: Exception =>
+-        throw new SparkException("Error notifying standalone scheduler's driver endpoint", e)
+-    }
++  /**
++   * Called by subclasses when notified of a lost worker. It just fires the message and returns
++   * at once.
++   */
++  protected def removeExecutor(executorId: String, reason: ExecutorLossReason): Unit = {
++    // Only log the failure since we don't care about the result.
++    driverEndpoint.ask(RemoveExecutor(executorId, reason)).onFailure { case t =>
++      logError(t.getMessage, t)
++    }(ThreadUtils.sameThread)
+   }
+ 
+   def sufficientResourcesRegistered(): Boolean = true
+-- 
+1.7.9.5
+

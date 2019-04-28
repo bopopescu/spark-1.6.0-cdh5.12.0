@@ -1,0 +1,839 @@
+From e7e4f8ca5603316729da81c29ce203c4f088732d Mon Sep 17 00:00:00 2001
+From: Imran Rashid <irashid@cloudera.com>
+Date: Mon, 20 Mar 2017 10:57:28 -0500
+Subject: [PATCH 502/517] [SPARK-12297][SQL] Hive compatibility for Parquet
+ Timestamps
+
+This change allows timestamps in parquet-based hive table to behave as a
+"floating time", without a timezone, as timestamps are for other file
+formats. If the storage timezone is the same as the session timezone,
+this conversion is a no-op. When data is read from a hive table, the
+table property is always respected. This allows spark to not change
+behavior when reading old data, but read newly written data correctly
+(whatever the source of the data is).
+
+Spark inherited the original behavior from Hive, but Hive is also
+updating behavior to use the same scheme in HIVE-12767 / HIVE-16231.
+
+The default for Spark remains unchanged; created tables do not include
+the new table property.
+
+This will only apply to hive tables; nothing is added to parquet
+metadata to indicate the timezone, so data that is read or written
+directly from parquet files will never have any conversions applied.
+
+Note that CDH-35305 is the backport of SPARK-12297 to cdh 5.12.
+However, the code has diverged so much that its not even a cherry-pick +
+conflict resolution, its a re-implementation.  The good news is, the
+main logic is similar and not very complicated.  The main difference
+from upstreeam is interaction w/ hive for metadata operations (eg.
+create table).
+
+Cloudera ID: CDH-35305
+---
+ project/SparkBuild.scala                           |   20 +-
+ .../datasources/parquet/CatalystReadSupport.scala  |    3 +-
+ .../parquet/CatalystRecordMaterializer.scala       |    8 +-
+ .../datasources/parquet/CatalystRowConverter.scala |   58 +++-
+ .../datasources/parquet/CatalystWriteSupport.scala |   20 +-
+ .../datasources/parquet/ParquetFileFormat.scala    |   21 ++
+ .../datasources/parquet/ParquetRelation.scala      |   11 +-
+ .../parquet/ParquetTimestampSuite.scala            |   97 +++++++
+ .../spark/sql/hive/HiveMetastoreCatalog.scala      |    7 +-
+ .../sql/hive/ParquetHiveCompatibilitySuite.scala   |  302 +++++++++++++++++++-
+ 10 files changed, 522 insertions(+), 25 deletions(-)
+ create mode 100644 sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFileFormat.scala
+ create mode 100644 sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetTimestampSuite.scala
+
+diff --git a/project/SparkBuild.scala b/project/SparkBuild.scala
+index 0e32315..bb3e5527 100644
+--- a/project/SparkBuild.scala
++++ b/project/SparkBuild.scala
+@@ -129,6 +129,7 @@ object SparkBuild extends PomBuild {
+   override val userPropertiesMap = System.getProperties.asScala.toMap
+ 
+   lazy val MavenCompile = config("m2r") extend(Compile)
++  lazy val TestDebug = config("testDebug") extend(Test)
+   lazy val publishLocalBoth = TaskKey[Unit]("publish-local", "publish local for m2 and ivy")
+ 
+   lazy val sparkGenjavadocSettings: Seq[sbt.Def.Setting[_]] = Seq(
+@@ -297,8 +298,23 @@ object SparkBuild extends PomBuild {
+   // TODO: move this to its upstream project.
+   override def projectDefinitions(baseDirectory: File): Seq[Project] = {
+     super.projectDefinitions(baseDirectory).map { x =>
+-      if (projectsMap.exists(_._1 == x.id)) x.settings(projectsMap(x.id): _*)
+-      else x.settings(Seq[Setting[_]](): _*)
++      val baseProject =
++        if (projectsMap.exists(_._1 == x.id)) {
++          x.settings(projectsMap(x.id): _*)
++        } else {
++          x.settings(Seq[Setting[_]](): _*)
++        }
++      // enable running tests with a debugger like "testDebug:testOnly ..."
++      // (somewhat explained http://www.scala-sbt.org/0.13/docs/Testing.html)
++      // The test will pause until you attach a debugger to it (b/c of suspend=y).
++      // This is a standard remote debugging configuration, eg. in IntelliJ
++      // setup a debug configuration for "Remote".
++      baseProject
++       .configs(TestDebug)
++       .settings(inConfig(TestDebug)(Defaults.testTasks): _*)
++       .settings(Seq(
++         javaOptions in TestDebug ++= "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005"
++           .split(" ").toSeq))
+     } ++ Seq[Project](OldDeps.project)
+   }
+ 
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystReadSupport.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystReadSupport.scala
+index 82f68ee..05386cb 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystReadSupport.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystReadSupport.scala
+@@ -97,7 +97,8 @@ private[parquet] class CatalystReadSupport extends ReadSupport[InternalRow] with
+ 
+     new CatalystRecordMaterializer(
+       parquetRequestedSchema,
+-      CatalystReadSupport.expandUDT(catalystRequestedSchema))
++      CatalystReadSupport.expandUDT(catalystRequestedSchema),
++      conf)
+   }
+ }
+ 
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRecordMaterializer.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRecordMaterializer.scala
+index 407c48c..96789a8 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRecordMaterializer.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRecordMaterializer.scala
+@@ -17,6 +17,7 @@
+ 
+ package org.apache.spark.sql.execution.datasources.parquet
+ 
++import org.apache.hadoop.conf.Configuration
+ import parquet.io.api.{GroupConverter, RecordMaterializer}
+ import parquet.schema.MessageType
+ 
+@@ -30,10 +31,13 @@ import org.apache.spark.sql.types.StructType
+  * @param catalystSchema Catalyst schema of the rows to be constructed
+  */
+ private[parquet] class CatalystRecordMaterializer(
+-    parquetSchema: MessageType, catalystSchema: StructType)
++    parquetSchema: MessageType,
++    catalystSchema: StructType,
++    conf: Configuration)
+   extends RecordMaterializer[InternalRow] {
+ 
+-  private val rootConverter = new CatalystRowConverter(parquetSchema, catalystSchema, NoopUpdater)
++  private val rootConverter = new CatalystRowConverter(
++    parquetSchema, catalystSchema, NoopUpdater, conf)
+ 
+   override def getCurrentRecord: InternalRow = rootConverter.currentRecord
+ 
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRowConverter.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRowConverter.scala
+index 1d18c51..9047dd3 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRowConverter.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystRowConverter.scala
+@@ -19,10 +19,12 @@ package org.apache.spark.sql.execution.datasources.parquet
+ 
+ import java.math.{BigDecimal, BigInteger}
+ import java.nio.ByteOrder
++import java.util.TimeZone
+ 
+ import scala.collection.JavaConverters._
+ import scala.collection.mutable.ArrayBuffer
+ 
++import org.apache.hadoop.conf.Configuration
+ import parquet.column.Dictionary
+ import parquet.io.api.{Binary, Converter, GroupConverter, PrimitiveConverter}
+ import parquet.schema.OriginalType.{INT_32, LIST, UTF8}
+@@ -32,7 +34,8 @@ import parquet.schema.{GroupType, MessageType, PrimitiveType, Type}
+ import org.apache.spark.Logging
+ import org.apache.spark.sql.catalyst.InternalRow
+ import org.apache.spark.sql.catalyst.expressions._
+-import org.apache.spark.sql.catalyst.util.{GenericArrayData, ArrayBasedMapData, DateTimeUtils}
++import org.apache.spark.sql.catalyst.util.{DateTimeUtils, GenericArrayData, ArrayBasedMapData}
++import org.apache.spark.sql.catalyst.util.DateTimeUtils._
+ import org.apache.spark.sql.types._
+ import org.apache.spark.unsafe.types.UTF8String
+ 
+@@ -120,7 +123,8 @@ private[parquet] class CatalystPrimitiveConverter(val updater: ParentContainerUp
+ private[parquet] class CatalystRowConverter(
+     parquetType: GroupType,
+     catalystType: StructType,
+-    updater: ParentContainerUpdater)
++    updater: ParentContainerUpdater,
++    hadoopConf: Configuration)
+   extends CatalystGroupConverter(updater) with Logging {
+ 
+   assert(
+@@ -251,18 +255,21 @@ private[parquet] class CatalystRowConverter(
+ 
+       case TimestampType =>
+         // TODO Implements `TIMESTAMP_MICROS` once parquet-mr has that.
++        val localTz = TimeZone.getDefault()
++        val tzString = hadoopConf.get(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY)
++        val storageTz = if (tzString == null) {
++          localTz
++        } else {
++          TimeZone.getTimeZone(tzString)
++        }
++        logInfo(s"Building timestamp reader with localTz = ${localTz.getID()}; " +
++          s"storageTz = ${storageTz.getID()}; tzString = $tzString")
+         new CatalystPrimitiveConverter(updater) {
+           // Converts nanosecond timestamps stored as INT96
+           override def addBinary(value: Binary): Unit = {
+-            assert(
+-              value.length() == 12,
+-              "Timestamps (with nanoseconds) are expected to be stored in 12-byte long binaries, " +
+-              s"but got a ${value.length()}-byte binary.")
+-
+-            val buf = value.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
+-            val timeOfDayNanos = buf.getLong
+-            val julianDay = buf.getInt
+-            updater.setLong(DateTimeUtils.fromJulianDay(julianDay, timeOfDayNanos))
++            val timestamp = CatalystRowConverter.binaryToSQLTimestamp(
++              value, fromTz = localTz, toTz = storageTz)
++            updater.setLong(timestamp)
+           }
+         }
+ 
+@@ -293,7 +300,7 @@ private[parquet] class CatalystRowConverter(
+       case t: StructType =>
+         new CatalystRowConverter(parquetType.asGroupType(), t, new ParentContainerUpdater {
+           override def set(value: Any): Unit = updater.set(value.asInstanceOf[InternalRow].copy())
+-        })
++        }, hadoopConf)
+ 
+       case t =>
+         throw new RuntimeException(
+@@ -637,7 +644,7 @@ private[parquet] class CatalystRowConverter(
+   }
+ }
+ 
+-private[parquet] object CatalystRowConverter {
++private[parquet] object CatalystRowConverter extends Logging {
+   def binaryToUnscaledLong(binary: Binary): Long = {
+     // The underlying `ByteBuffer` implementation is guaranteed to be `HeapByteBuffer`, so here
+     // we are using `Binary.toByteBuffer.array()` to steal the underlying byte array without
+@@ -659,4 +666,29 @@ private[parquet] object CatalystRowConverter {
+     unscaled = (unscaled << (64 - bits)) >> (64 - bits)
+     unscaled
+   }
++
++  /**
++   * Converts an int96 to a SQLTimestamp, given both the storage timezone and the local timezone.
++   * The timestamp is really meant to be interpreted as a "floating time", but since we
++   * actually store it as micros since epoch, why we have to apply a conversion when timezones
++   * change.
++   * @param binary
++   * @return
++   */
++  def binaryToSQLTimestamp(binary: Binary, fromTz: TimeZone, toTz: TimeZone): SQLTimestamp = {
++    // Note that this method is copied from ParquetRowConverter present in Spark 2.2, and has been
++    // placed here as part of the backport of SPARK-12297 / CDH-35305
++    assert(binary.length() == 12, s"Timestamps (with nanoseconds) are expected to be stored in" +
++      s" 12-byte long binaries. Found a ${binary.length()}-byte binary instead.")
++    val buffer = binary.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
++    val timeOfDayNanos = buffer.getLong
++    val julianDay = buffer.getInt
++    val storageTzMicros = DateTimeUtils.fromJulianDay(julianDay, timeOfDayNanos)
++    // avoid expensive time logic if possible.
++    if (fromTz.getID() != toTz.getID()) {
++      DateTimeUtils.convertTz(storageTzMicros, fromTz, toTz)
++    } else {
++      storageTzMicros
++    }
++  }
+ }
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystWriteSupport.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystWriteSupport.scala
+index 0ae401a..1a2fb9d 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystWriteSupport.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/CatalystWriteSupport.scala
+@@ -19,6 +19,7 @@ package org.apache.spark.sql.execution.datasources.parquet
+ 
+ import java.nio.{ByteBuffer, ByteOrder}
+ import java.util
++import java.util.TimeZone
+ 
+ import scala.collection.JavaConverters.mapAsJavaMapConverter
+ 
+@@ -66,6 +67,9 @@ private[parquet] class CatalystWriteSupport extends WriteSupport[InternalRow] wi
+   // Whether to write data in legacy Parquet format compatible with Spark 1.4 and prior versions
+   private var writeLegacyParquetFormat: Boolean = _
+ 
++  private var storageTz: TimeZone = _
++  private var localTz: TimeZone = _
++
+   // Reusable byte array used to write timestamps as Parquet INT96 values
+   private val timestampBuffer = new Array[Byte](12)
+ 
+@@ -81,6 +85,14 @@ private[parquet] class CatalystWriteSupport extends WriteSupport[InternalRow] wi
+       configuration.get(SQLConf.PARQUET_WRITE_LEGACY_FORMAT.key).toBoolean
+     }
+     this.rootFieldWriters = schema.map(_.dataType).map(makeWriter)
++    localTz = TimeZone.getDefault()
++    // If the table has a timezone property, apply the correct conversions.  See SPARK-12297.
++    val tzString = configuration.get(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY)
++    storageTz = if (tzString == null) {
++      localTz
++    } else {
++      TimeZone.getTimeZone(tzString)
++    }
+ 
+     val messageType = new CatalystSchemaConverter(configuration).convert(schema)
+     val metadata = Map(CatalystReadSupport.SPARK_METADATA_KEY -> schemaString).asJava
+@@ -162,7 +174,13 @@ private[parquet] class CatalystWriteSupport extends WriteSupport[InternalRow] wi
+ 
+           // NOTE: Starting from Spark 1.5, Spark SQL `TimestampType` only has microsecond
+           // precision.  Nanosecond parts of timestamp values read from INT96 are simply stripped.
+-          val (julianDay, timeOfDayNanos) = DateTimeUtils.toJulianDay(row.getLong(ordinal))
++          val rawMicros = row.getLong(ordinal)
++          val adjustedMicros = if (localTz.getID() == storageTz.getID()) {
++            rawMicros
++          } else {
++            DateTimeUtils.convertTz(rawMicros, storageTz, localTz)
++          }
++          val (julianDay, timeOfDayNanos) = DateTimeUtils.toJulianDay(adjustedMicros)
+           val buf = ByteBuffer.wrap(timestampBuffer)
+           buf.order(ByteOrder.LITTLE_ENDIAN).putLong(timeOfDayNanos).putInt(julianDay)
+           recordConsumer.addBinary(Binary.fromByteArray(timestampBuffer))
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFileFormat.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFileFormat.scala
+new file mode 100644
+index 0000000..23dba59
+--- /dev/null
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFileFormat.scala
+@@ -0,0 +1,21 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.spark.sql.execution.datasources.parquet
++
++object ParquetFileFormat {
++  val PARQUET_TIMEZONE_TABLE_PROPERTY = "parquet.mr.int96.write.zone"
++}
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetRelation.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetRelation.scala
+index 36778ab..855710d 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetRelation.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetRelation.scala
+@@ -279,6 +279,9 @@ private[sql] class ParquetRelation(
+         .getOrElse(
+           sqlContext.conf.parquetCompressionCodec.toUpperCase,
+           CompressionCodecName.UNCOMPRESSED).name())
++    parameters.get(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY).foreach (
++      conf.set(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY, _)
++    )
+ 
+     new OutputWriterFactory {
+       override def newInstance(
+@@ -308,6 +311,7 @@ private[sql] class ParquetRelation(
+     val parquetBlockSize = ParquetOutputFormat.getLongBlockSize(broadcastedConf.value.value)
+ 
+     // Create the function to set variable Parquet confs at both driver and executor side.
++    val tz = parameters.get(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY)
+     val initLocalJobFuncOpt =
+       ParquetRelation.initializeLocalJobFunc(
+         requiredColumns,
+@@ -317,7 +321,8 @@ private[sql] class ParquetRelation(
+         useMetadataCache,
+         safeParquetFilterPushDown,
+         assumeBinaryIsString,
+-        assumeInt96IsTimestamp) _
++        assumeInt96IsTimestamp,
++        tz) _
+ 
+     // Create the function to set input paths at the driver side.
+     val setInputPaths =
+@@ -563,7 +568,8 @@ private[sql] object ParquetRelation extends Logging {
+       useMetadataCache: Boolean,
+       parquetFilterPushDown: Boolean,
+       assumeBinaryIsString: Boolean,
+-      assumeInt96IsTimestamp: Boolean)(job: Job): Unit = {
++      assumeInt96IsTimestamp: Boolean,
++      timestampTimezone: Option[String])(job: Job): Unit = {
+     val conf = SparkHadoopUtil.get.getConfigurationFromJobContext(job)
+     conf.set(ParquetInputFormat.READ_SUPPORT_CLASS, classOf[CatalystReadSupport].getName)
+ 
+@@ -593,6 +599,7 @@ private[sql] object ParquetRelation extends Logging {
+     // Sets flags for `CatalystSchemaConverter`
+     conf.setBoolean(SQLConf.PARQUET_BINARY_AS_STRING.key, assumeBinaryIsString)
+     conf.setBoolean(SQLConf.PARQUET_INT96_AS_TIMESTAMP.key, assumeInt96IsTimestamp)
++    timestampTimezone.foreach(conf.set(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY, _))
+ 
+     overrideMinSplitSize(parquetBlockSize, conf)
+   }
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetTimestampSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetTimestampSuite.scala
+new file mode 100644
+index 0000000..c2ef481
+--- /dev/null
++++ b/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetTimestampSuite.scala
+@@ -0,0 +1,97 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.spark.sql.execution.datasources.parquet
++
++import java.nio.{ByteOrder, ByteBuffer}
++import java.util.TimeZone
++import java.util.concurrent.TimeUnit
++
++import org.apache.hadoop.conf.Configuration
++import org.apache.spark.sql.SQLConf
++import org.apache.spark.sql.catalyst.util.DateTimeUtils
++import org.scalatest.mock.MockitoSugar
++import org.mockito.ArgumentCaptor
++import org.mockito.Mockito.verify
++import parquet.io.api.{Binary, RecordConsumer}
++
++import org.apache.spark.SparkFunSuite
++import org.apache.spark.sql.catalyst.CatalystTypeConverters
++import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
++import org.apache.spark.sql.test.SharedSQLContext
++import org.apache.spark.sql.types.{TimestampType, StructField, StructType}
++
++class ParquetTimestampSuite extends SparkFunSuite with MockitoSugar with SharedSQLContext {
++
++  test("roundtrip via timezone combos") {
++    /*
++     *  Worked Example
++     *  2015-12-31 23:50:59.123 in floating (aka wall-clock aka timestamp without timezone) time
++     *  in a few different time zones
++     */
++    val MILLIS_PER_HOUR = TimeUnit.HOURS.toMillis(1)
++    val TIME_IN_LA = 1451634659123L
++    val TIME_IN_CHICAGO = TIME_IN_LA + (-2 * MILLIS_PER_HOUR)
++    val TIME_IN_BERLIN = TIME_IN_LA + (-9 * MILLIS_PER_HOUR)
++    val initialTz = TimeZone.getDefault()
++    try {
++      TimeZone.setDefault(TimeZone.getTimeZone("America/Los_Angeles"))
++      val conf = new Configuration()
++      val catalystSchema = StructType(Array(StructField("ts", TimestampType, true)))
++      CatalystWriteSupport.setSchema(catalystSchema, conf)
++      conf.set(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY, "America/Chicago")
++      conf.set(SQLConf.PARQUET_WRITE_LEGACY_FORMAT.key, "true")
++      conf.set(SQLConf.PARQUET_BINARY_AS_STRING.key, "false")
++      conf.set(SQLConf.PARQUET_INT96_AS_TIMESTAMP.key, "true")
++      val writeSupport = new CatalystWriteSupport()
++      val writer = writeSupport.init(conf)
++
++      val recordConsumer = mock[RecordConsumer]
++      writeSupport.prepareForWrite(recordConsumer)
++      val rowData = new Array[Any](1)
++      val row = new GenericInternalRow(rowData)
++      val timestampInLa = new java.sql.Timestamp(TIME_IN_LA)
++      rowData(0) = CatalystTypeConverters.convertToCatalyst(timestampInLa)
++      writeSupport.write(row)
++      // Since the test is run in LA tz, we should should convert to the equivalent time in
++      // chicago timezone.
++      val binaryCaptor = ArgumentCaptor.forClass(classOf[Binary])
++      verify(recordConsumer).addBinary(binaryCaptor.capture())
++      assert(binaryCaptor.getValue.compareTo(millisToBinary(TIME_IN_CHICAGO)) === 0)
++
++      // If we read that time out again in Berlin timezone, we should convert it to the
++      // equivalent time in Berlin.
++      TimeZone.setDefault(TimeZone.getTimeZone("Europe/Berlin"))
++      val parquetSchema = new CatalystSchemaConverter(conf).convert(catalystSchema)
++      val updater = mock[ParentContainerUpdater]
++      val reader = new CatalystRowConverter(parquetSchema, catalystSchema, updater, conf)
++      reader.getConverter(0).asPrimitiveConverter().addBinary(millisToBinary(TIME_IN_CHICAGO))
++      // We read back time in microseconds, so we need to take millis * 1000
++      assert(reader.currentRecord.getLong(0) === (TIME_IN_BERLIN * 1000))
++    } finally {
++      TimeZone.setDefault(initialTz)
++    }
++  }
++
++  private def millisToBinary(millis: Long): Binary = {
++    val micros = millis * 1000
++    val timestampBuffer = new Array[Byte](12)
++    val (julianDay, timeOfDayNanos) = DateTimeUtils.toJulianDay(micros)
++    val buf = ByteBuffer.wrap(timestampBuffer)
++    buf.order(ByteOrder.LITTLE_ENDIAN).putLong(timeOfDayNanos).putInt(julianDay)
++    Binary.fromByteArray(timestampBuffer)
++  }
++}
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
+index 3da1892..1830111 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
+@@ -38,7 +38,7 @@ import org.apache.spark.sql.catalyst.plans.logical
+ import org.apache.spark.sql.catalyst.plans.logical._
+ import org.apache.spark.sql.catalyst.rules._
+ import org.apache.spark.sql.catalyst.util.DataTypeParser
+-import org.apache.spark.sql.execution.datasources.parquet.ParquetRelation
++import org.apache.spark.sql.execution.datasources.parquet.{ParquetFileFormat, ParquetRelation}
+ import org.apache.spark.sql.execution.datasources.{CreateTableUsingAsSelect, LogicalRelation, Partition => ParquetPartition, PartitionSpec, ResolvedDataSource}
+ import org.apache.spark.sql.execution.{FileRelation, datasources}
+ import org.apache.spark.sql.hive.client._
+@@ -439,6 +439,9 @@ private[hive] class HiveMetastoreCatalog(val client: ClientInterface, hive: Hive
+     // NOTE: Instead of passing Metastore schema directly to `ParquetRelation`, we have to
+     // serialize the Metastore schema to JSON and pass it as a data source option because of the
+     // evil case insensitivity issue, which is reconciled within `ParquetRelation`.
++    val tzKey = ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY
++    val tzProps = metastoreRelation.table.properties.get(tzKey)
++      .map { tz => Map(tzKey -> tz) }.getOrElse(Map())
+     val parquetOptions = Map(
+       ParquetRelation.METASTORE_SCHEMA -> metastoreSchema.json,
+       ParquetRelation.MERGE_SCHEMA -> mergeSchema.toString,
+@@ -446,7 +449,7 @@ private[hive] class HiveMetastoreCatalog(val client: ClientInterface, hive: Hive
+         metastoreRelation.tableName,
+         Some(metastoreRelation.databaseName)
+       ).unquotedString
+-    )
++    ) ++ tzProps
+     val tableIdentifier =
+       QualifiedTableName(metastoreRelation.databaseName, metastoreRelation.tableName)
+ 
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/ParquetHiveCompatibilitySuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/ParquetHiveCompatibilitySuite.scala
+index 49aab85..14e7f68 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/ParquetHiveCompatibilitySuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/ParquetHiveCompatibilitySuite.scala
+@@ -18,12 +18,19 @@
+ package org.apache.spark.sql.hive
+ 
+ import java.sql.Timestamp
++import java.text.SimpleDateFormat
++import java.util.{Calendar, TimeZone}
+ 
+ import org.apache.hadoop.hive.conf.HiveConf
+ 
+-import org.apache.spark.sql.execution.datasources.parquet.ParquetCompatibilityTest
+-import org.apache.spark.sql.{Row, SQLConf}
++import org.apache.spark.SparkFunSuite
++import org.apache.spark.sql._
++import org.apache.spark.sql.catalyst.TableIdentifier
++import org.apache.spark.sql.catalyst.util.DateTimeUtils
++import org.apache.spark.sql.execution.datasources.parquet.{ParquetCompatibilityTest, ParquetFileFormat}
++import org.apache.spark.sql.hive.client.HiveTable
+ import org.apache.spark.sql.hive.test.TestHiveSingleton
++import org.apache.spark.sql.types.{StringType, StructField, StructType, TimestampType}
+ 
+ class ParquetHiveCompatibilitySuite extends ParquetCompatibilityTest with TestHiveSingleton {
+   /**
+@@ -32,6 +39,14 @@ class ParquetHiveCompatibilitySuite extends ParquetCompatibilityTest with TestHi
+    */
+   private val stagingDir = new HiveConf().getVar(HiveConf.ConfVars.STAGINGDIR)
+ 
++  // This is needed just for backporting to the spark 1.6 line, to access the table properties.
++  // spark 2.x exposes the table metadata directly via catalog.
++  private lazy val hiveCatalog = sqlContext.catalog.asInstanceOf[HiveMetastoreCatalog]
++  private def hiveTable(tableId: TableIdentifier): HiveTable = {
++    val database = tableId.database.getOrElse(hiveCatalog.client.currentDatabase).toLowerCase
++    hiveCatalog.client.getTable(database, tableId.table)
++  }
++
+   override protected def logParquetSchema(path: String): Unit = {
+     val schema = readParquetSchema(path, { path =>
+       !path.getName.startsWith("_") && !path.getName.startsWith(stagingDir)
+@@ -136,4 +151,287 @@ class ParquetHiveCompatibilitySuite extends ParquetCompatibilityTest with TestHi
+       Row(Row(1, Seq("foo", "bar", null))),
+       "STRUCT<f0: INT, f1: ARRAY<STRING>>")
+   }
++
++  // Check creating parquet tables, writing data into them, and reading it back out under a
++  // variety of conditions:
++  // * tables with explicit tz and those without
++  // * altering table properties directly
++  // * variety of timezones, local & non-local
++  testCreateWriteRead("no_tz", None)
++  val localTz = TimeZone.getDefault.getID()
++  testCreateWriteRead("local", Some(localTz))
++  // check with a variety of timezones.  The unit tests currently are configured to always use
++  // America/Los_Angeles, but even if they didn't, we'd be sure to cover a non-local timezone.
++  Seq(
++    "UTC" -> "UTC",
++    "LA" -> "America/Los_Angeles",
++    "Berlin" -> "Europe/Berlin"
++  ).foreach { case (tableName, zone) =>
++    if (zone != localTz) {
++      testCreateWriteRead(tableName, Some(zone))
++    }
++  }
++
++  private def testCreateWriteRead(
++      baseTable: String,
++      explicitTz: Option[String]): Unit = {
++    testCreateAlterTablesWithTimezone(baseTable, explicitTz)
++    testWriteTablesWithTimezone(baseTable, explicitTz)
++    testReadTablesWithTimezone(baseTable, explicitTz)
++  }
++
++  private def checkHasTz(table: String, tz: Option[String]): Unit = {
++    val tableMetadata = hiveTable(TableIdentifier(table))
++    val actualTz = tableMetadata.properties.get(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY)
++    assert( actualTz === tz, s"table $table timezone was supposed to be $tz, was $actualTz")
++  }
++
++  private def testCreateAlterTablesWithTimezone(
++      baseTable: String,
++      explicitTz: Option[String]): Unit = {
++    test(s"SPARK-12297: Create and Alter Parquet tables and timezones; explicitTz = $explicitTz") {
++      // we're cheating a bit here, in general SparkConf isn't meant to be set at runtime,
++      // but its OK in this case, and lets us run this test, because these tests don't like
++      // creating multiple HiveContexts in the same jvm
++      val key = ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY
++      withTable(baseTable, s"like_$baseTable", s"select_$baseTable") {
++        val localTz = TimeZone.getDefault()
++        val localTzId = localTz.getID()
++        val defaultTz = None
++        // check that created tables have correct TBLPROPERTIES
++        val tblProperties = explicitTz.map {
++          tz => raw"""TBLPROPERTIES ("$key"="$tz")"""
++        }.getOrElse("")
++        sqlContext.sql(
++          raw"""CREATE TABLE $baseTable (
++                |  x int
++                | )
++                | STORED AS PARQUET
++                | $tblProperties
++            """.stripMargin)
++        val expectedTableTz = explicitTz.orElse(defaultTz)
++        checkHasTz(baseTable, expectedTableTz)
++        sqlContext.sql(s"CREATE TABLE like_$baseTable LIKE $baseTable")
++        checkHasTz(s"like_$baseTable", expectedTableTz)
++        sqlContext.sql(
++          raw"""CREATE TABLE select_$baseTable
++                | STORED AS PARQUET
++                | AS
++                | SELECT * from $baseTable
++            """.stripMargin)
++        checkHasTz(s"select_$baseTable", defaultTz)
++
++        // check alter table, setting, unsetting, resetting the property
++        sqlContext.sql(
++          raw"""ALTER TABLE $baseTable SET TBLPROPERTIES ("$key"="America/Los_Angeles")""")
++        checkHasTz(baseTable, Some("America/Los_Angeles"))
++        sqlContext.sql( raw"""ALTER TABLE $baseTable SET TBLPROPERTIES ("$key"="UTC")""")
++        checkHasTz(baseTable, Some("UTC"))
++        sqlContext.sql( raw"""ALTER TABLE $baseTable UNSET TBLPROPERTIES ("$key")""")
++        checkHasTz(baseTable, None)
++        explicitTz.foreach { tz =>
++          sqlContext.sql( raw"""ALTER TABLE $baseTable SET TBLPROPERTIES ("$key"="$tz")""")
++          checkHasTz(baseTable, expectedTableTz)
++        }
++      }
++    }
++  }
++
++  val desiredTimestampStrings = Seq(
++    "2015-12-31 23:50:59.123",
++    "2015-12-31 22:49:59.123",
++    "2016-01-01 00:39:59.123",
++    "2016-01-01 01:29:59.123"
++  )
++  // We don't want to mess with timezones inside the tests themselves, since we use a shared
++  // spark context, and then we might be prone to issues from lazy vals for timezones.  Instead,
++  // we manually adjust the timezone just to determine what the desired millis (since epoch, in utc)
++  // is for various "wall-clock" times in different timezones, and then we can compare against those
++  // in our tests.
++  val originalTz = TimeZone.getDefault
++  val timestampTimezoneToMillis = try {
++    (for {
++      timestampString <- desiredTimestampStrings
++      timezone <- Seq("America/Los_Angeles", "Europe/Berlin", "UTC").map {
++        TimeZone.getTimeZone(_)
++      }
++    } yield {
++      TimeZone.setDefault(timezone)
++      val timestamp = Timestamp.valueOf(timestampString)
++      (timestampString, timezone.getID()) -> timestamp.getTime()
++    }).toMap
++  } finally {
++    TimeZone.setDefault(originalTz)
++  }
++
++  private def createRawData(): DataFrame = {
++    val originalTsStrings = Seq(
++      "2015-12-31 23:50:59.123",
++      "2015-12-31 22:49:59.123",
++      "2016-01-01 00:39:59.123",
++      "2016-01-01 01:29:59.123"
++    )
++    val rowRdd = sqlContext.sparkContext.parallelize(originalTsStrings, 1).map { x =>
++      Row(x, java.sql.Timestamp.valueOf(x))
++    }
++    val schema = StructType(Array(
++      StructField("display", StringType, true),
++      StructField("ts", TimestampType, true)))
++    sqlContext.createDataFrame(rowRdd, schema)
++  }
++
++  private def testWriteTablesWithTimezone(
++      baseTable: String,
++      explicitTz: Option[String]): Unit = {
++    val key = ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY
++    test(s"SPARK-12297: Write to Parquet tables with Timestamps; explicitTz = $explicitTz") {
++      withTable(s"saveAsTable_$baseTable", s"insert_$baseTable") {
++        val localTz = TimeZone.getDefault()
++        val localTzId = localTz.getID()
++        val defaultTz = None
++        val expectedTableTz = explicitTz.orElse(defaultTz)
++        // check that created tables have correct TBLPROPERTIES
++        val tblProperties = explicitTz.map {
++          tz => raw"""TBLPROPERTIES ("$key"="$tz")"""
++        }.getOrElse("")
++
++
++        val rawData = createRawData()
++        // Check writing data out.
++        // We write data into our tables, and then check the raw parquet files to see whether
++        // the correct conversion was applied.
++        rawData.write.saveAsTable(s"saveAsTable_$baseTable")
++        checkHasTz(s"saveAsTable_$baseTable", defaultTz)
++        sqlContext.sql(
++          raw"""CREATE TABLE insert_$baseTable (
++                |  display string,
++                |  ts timestamp
++                | )
++                | STORED AS PARQUET
++                | $tblProperties
++               """.stripMargin)
++        checkHasTz(s"insert_$baseTable", expectedTableTz)
++        rawData.write.insertInto(s"insert_$baseTable")
++        val readFromTable = sqlContext.table(s"insert_$baseTable").collect()
++          .map(_.toString()).sorted
++        // no matter what, roundtripping via the table should leave the data unchanged
++        assert(readFromTable === rawData.collect().map(_.toString()).sorted)
++
++        // Now we load the raw parquet data on disk, and check if it was adjusted correctly.
++        // Note that we only store the timezone in the table property, so when we read the
++        // data this way, we're bypassing all of the conversion logic, and reading the raw
++        // values in the parquet file.
++        val onDiskLocation = hiveTable(TableIdentifier(s"insert_$baseTable")).location.get
++        val readFromDisk = sqlContext.read.parquet(onDiskLocation).collect()
++        val storageTzId = explicitTz.getOrElse(TimeZone.getDefault().getID())
++        readFromDisk.foreach { row =>
++          val displayTime = row.getAs[String](0)
++          val millis = row.getAs[Timestamp](1).getTime()
++          val expectedMillis = timestampTimezoneToMillis((displayTime, storageTzId))
++          assert(expectedMillis === millis)
++        }
++      }
++    }
++  }
++
++  private def testReadTablesWithTimezone(
++      baseTable: String,
++      explicitTz: Option[String]): Unit = {
++    val key = ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY
++    test(s"SPARK-12297: Read from Parquet tables with Timestamps; explicitTz = $explicitTz") {
++      withTable(s"external_$baseTable") {
++        // we intentionally save this data directly, without creating a table, so we can
++        // see that the data is read back differently depending on table properties.
++        // we'll save with adjusted millis, so that it should be the correct millis after reading
++        // back.
++        val localTzID = TimeZone.getDefault().getID()
++        val rawData = createRawData()
++        // to avoid closing over entire class
++        val timestampTimezoneToMillis = this.timestampTimezoneToMillis
++        val adjustedRawData = explicitTz match {
++          case Some(tzId) =>
++            sqlContext.createDataFrame(rawData.map { row =>
++              val displayTime = row.getAs[String](0)
++              val storageMillis = timestampTimezoneToMillis((displayTime, tzId))
++              Row(displayTime, new Timestamp(storageMillis))
++            }, rawData.schema)
++          case _ =>
++            rawData
++        }
++        withTempPath { path =>
++          adjustedRawData.write.parquet(path.getCanonicalPath)
++          val tblProperties = explicitTz.map {
++            tz => raw"""TBLPROPERTIES ("$key"="$tz")"""
++          }.getOrElse("")
++          sqlContext.sql(
++            raw"""CREATE EXTERNAL TABLE external_$baseTable (
++                 | display string,
++                 | ts timestamp
++                 |)
++                 |STORED AS PARQUET
++                 |LOCATION '${path.getCanonicalPath}'
++                 |$tblProperties
++               """.stripMargin)
++          val collectedFromExternal =
++            sqlContext.sql(s"select display, ts from external_$baseTable").collect()
++          collectedFromExternal.foreach { row =>
++            val displayTime = row.getAs[String](0)
++            val millis = row.getAs[Timestamp](1).getTime()
++            assert(millis === timestampTimezoneToMillis((displayTime, localTzID)))
++          }
++
++          // Make sure functions applied to the timestamp don't use the storage time, but the
++          // converted time.  This is particularly important for partitioned tables, which are often
++          // created based on the year, month, day.
++          val extractedYear = sqlContext.sql(s"select year(ts) from external_$baseTable").collect()
++          assert(extractedYear.map{_.getInt(0)}.sorted === Array(2015, 2015, 2016, 2016))
++
++          sqlContext.read.parquet(path.getCanonicalPath).registerTempTable("raw_data")
++
++          // Now test that the behavior is still correct even with a filter which could get
++          // pushed down into parquet.  We don't need special handling for pushed down predicates
++          // because we ignore predicates on TimestampType in ParquetFilters.   This check makes
++          // sure that doesn't change.
++          // These queries should return the entire dataset, but if the predicates were
++          // applied to the raw values in parquet, they would incorrectly filter data out.
++          Seq(
++            ">" -> "2015-12-31 22:00:00",
++            "<" -> "2016-01-01 02:00:00"
++          ).foreach { case (comparison, value) =>
++            val query =
++              s"select ts from external_$baseTable where ts $comparison cast('$value' as timestamp)"
++            val countWithFilter = sqlContext.sql(query).count()
++            assert(countWithFilter === 4, query)
++          }
++        }
++      }
++    }
++  }
++
++  // TODO CDH-52854.  this depends entirely on hive validating the timezone.  When hive implements
++  // HIVE-16469, we should be able to turn this test back on (perhaps tweaking the exact check).
++  ignore("SPARK-12297: exception on bad timezone") {
++    val key = ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY
++    val badTzException = intercept[AnalysisException] {
++      sqlContext.sql(
++        raw"""CREATE TABLE bad_tz_table (
++              |  x int
++              | )
++              | STORED AS PARQUET
++              | TBLPROPERTIES ("$key"="Blart Versenwald III")
++            """.stripMargin)
++    }
++    assert(badTzException.getMessage.contains("Blart Versenwald III"))
++    sqlContext.sql(
++      raw"""CREATE TABLE flippidee_floop (
++            |  x int
++            | )
++            | STORED AS PARQUET
++            """.stripMargin)
++    val badTzAlterException = intercept[AnalysisException] {
++      sqlContext.sql(
++        raw"""ALTER TABLE flippidee_floop SET TBLPROPERTIES ("$key"="Blart Versenwald III")""")
++    }
++    assert(badTzAlterException.getMessage.contains("Blart Versenwald III"))
++  }
+ }
+-- 
+1.7.9.5
+

@@ -1,0 +1,78 @@
+From 4b7c51d3c57bd0ed5d6fe4663b4284a7de7ba32e Mon Sep 17 00:00:00 2001
+From: "Oscar D. Lara Yejas" <odlaraye@oscars-mbp.attlocal.net>
+Date: Thu, 10 Mar 2016 17:10:23 -0800
+Subject: [PATCH 303/517] [SPARK-13327][SPARKR] Added parameter validations
+ for colnames<-
+
+Author: Oscar D. Lara Yejas <odlaraye@oscars-mbp.attlocal.net>
+Author: Oscar D. Lara Yejas <odlaraye@oscars-mbp.usca.ibm.com>
+
+Closes #11220 from olarayej/SPARK-13312-3.
+
+(cherry picked from commit 416e71af4d26e67afb715ea1d625341cdea4873d)
+Signed-off-by: Shivaram Venkataraman <shivaram@cs.berkeley.edu>
+(cherry picked from commit db4795a7eb1bac039e9e96237cf77e47ed76dde8)
+---
+ R/pkg/R/DataFrame.R                       |   22 +++++++++++++++++++++-
+ R/pkg/inst/tests/testthat/test_sparkSQL.R |   11 +++++++++++
+ 2 files changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/R/pkg/R/DataFrame.R b/R/pkg/R/DataFrame.R
+index 5b47f0b..65d8e92 100644
+--- a/R/pkg/R/DataFrame.R
++++ b/R/pkg/R/DataFrame.R
+@@ -303,8 +303,28 @@ setMethod("colnames",
+ #' @rdname columns
+ #' @name colnames<-
+ setMethod("colnames<-",
+-          signature(x = "DataFrame", value = "character"),
++          signature(x = "DataFrame"),
+           function(x, value) {
++
++            # Check parameter integrity
++            if (class(value) != "character") {
++              stop("Invalid column names.")
++            }
++
++            if (length(value) != ncol(x)) {
++              stop(
++                "Column names must have the same length as the number of columns in the dataset.")
++            }
++
++            if (any(is.na(value))) {
++              stop("Column names cannot be NA.")
++            }
++
++            # Check if the column names have . in it
++            if (any(regexec(".", value, fixed=TRUE)[[1]][1] != -1)) {
++              stop("Colum names cannot contain the '.' symbol.")
++            }
++
+             sdf <- callJMethod(x@sdf, "toDF", as.list(value))
+             dataFrame(sdf)
+           })
+diff --git a/R/pkg/inst/tests/testthat/test_sparkSQL.R b/R/pkg/inst/tests/testthat/test_sparkSQL.R
+index adef440..f2781bd 100644
+--- a/R/pkg/inst/tests/testthat/test_sparkSQL.R
++++ b/R/pkg/inst/tests/testthat/test_sparkSQL.R
+@@ -692,6 +692,17 @@ test_that("names() colnames() set the column names", {
+   colnames(df) <- c("col3", "col4")
+   expect_equal(names(df)[1], "col3")
+ 
++  expect_error(colnames(df) <- c("sepal.length", "sepal_width"),
++               "Colum names cannot contain the '.' symbol.")
++  expect_error(colnames(df) <- c(1, 2), "Invalid column names.")
++  expect_error(colnames(df) <- c("a"),
++               "Column names must have the same length as the number of columns in the dataset.")
++  expect_error(colnames(df) <- c("1", NA), "Column names cannot be NA.")
++
++  # Note: if this test is broken, remove check for "." character on colnames<- method
++  irisDF <- suppressWarnings(createDataFrame(sqlContext, iris))
++  expect_equal(names(irisDF)[1], "Sepal_Length")
++
+   # Test base::colnames base::names
+   m2 <- cbind(1, 1:4)
+   expect_equal(colnames(m2, do.NULL = FALSE), c("col1", "col2"))
+-- 
+1.7.9.5
+

@@ -1,0 +1,134 @@
+From 065864ef1fdff8cd42c88e45669ae47c564abd65 Mon Sep 17 00:00:00 2001
+From: sethah <seth.hendrickson16@gmail.com>
+Date: Thu, 24 Mar 2016 19:14:24 -0700
+Subject: [PATCH 317/517] [SPARK-14107][PYSPARK][ML] Add seed as named
+ argument to GBTs in pyspark
+
+## What changes were proposed in this pull request?
+
+GBTs in pyspark previously had seed parameters, but they could not be passed as keyword arguments through the class constructor. This patch adds seed as a keyword argument and also sets default value.
+
+## How was this patch tested?
+
+Doc tests were updated to pass a random seed through the GBTClassifier and GBTRegressor constructors.
+
+Author: sethah <seth.hendrickson16@gmail.com>
+
+Closes #11944 from sethah/SPARK-14107.
+
+(cherry picked from commit 585097716c1979ea538ef733cf33225ef7be06f5)
+Signed-off-by: Xiangrui Meng <meng@databricks.com>
+(cherry picked from commit 70b587841f5670a825d22ecdf9727bd7ceb684c3)
+---
+ python/pyspark/ml/classification.py |   12 ++++++------
+ python/pyspark/ml/regression.py     |   13 +++++++------
+ 2 files changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/python/pyspark/ml/classification.py b/python/pyspark/ml/classification.py
+index 5599b8f..7a300e7 100644
+--- a/python/pyspark/ml/classification.py
++++ b/python/pyspark/ml/classification.py
+@@ -468,7 +468,7 @@ class GBTClassifier(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol
+     >>> stringIndexer = StringIndexer(inputCol="label", outputCol="indexed")
+     >>> si_model = stringIndexer.fit(df)
+     >>> td = si_model.transform(df)
+-    >>> gbt = GBTClassifier(maxIter=5, maxDepth=2, labelCol="indexed")
++    >>> gbt = GBTClassifier(maxIter=5, maxDepth=2, labelCol="indexed", seed=42)
+     >>> model = gbt.fit(td)
+     >>> allclose(model.treeWeights, [1.0, 0.1, 0.1, 0.1, 0.1])
+     True
+@@ -491,12 +491,12 @@ class GBTClassifier(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol
+     def __init__(self, featuresCol="features", labelCol="label", predictionCol="prediction",
+                  maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                  maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, lossType="logistic",
+-                 maxIter=20, stepSize=0.1):
++                 maxIter=20, stepSize=0.1, seed=None):
+         """
+         __init__(self, featuresCol="features", labelCol="label", predictionCol="prediction", \
+                  maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, \
+                  maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, \
+-                 lossType="logistic", maxIter=20, stepSize=0.1)
++                 lossType="logistic", maxIter=20, stepSize=0.1, seed=None)
+         """
+         super(GBTClassifier, self).__init__()
+         self._java_obj = self._new_java_obj(
+@@ -507,7 +507,7 @@ class GBTClassifier(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol
+                               "Supported options: " + ", ".join(GBTParams.supportedLossTypes))
+         self._setDefault(maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                          maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10,
+-                         lossType="logistic", maxIter=20, stepSize=0.1)
++                         lossType="logistic", maxIter=20, stepSize=0.1, seed=None)
+         kwargs = self.__init__._input_kwargs
+         self.setParams(**kwargs)
+ 
+@@ -516,12 +516,12 @@ class GBTClassifier(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol
+     def setParams(self, featuresCol="features", labelCol="label", predictionCol="prediction",
+                   maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                   maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10,
+-                  lossType="logistic", maxIter=20, stepSize=0.1):
++                  lossType="logistic", maxIter=20, stepSize=0.1, seed=None):
+         """
+         setParams(self, featuresCol="features", labelCol="label", predictionCol="prediction", \
+                   maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, \
+                   maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, \
+-                  lossType="logistic", maxIter=20, stepSize=0.1)
++                  lossType="logistic", maxIter=20, stepSize=0.1, seed=None)
+         Sets params for Gradient Boosted Tree Classification.
+         """
+         kwargs = self.setParams._input_kwargs
+diff --git a/python/pyspark/ml/regression.py b/python/pyspark/ml/regression.py
+index a0bb8ce..b09356a 100644
+--- a/python/pyspark/ml/regression.py
++++ b/python/pyspark/ml/regression.py
+@@ -591,7 +591,7 @@ class GBTRegressor(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol,
+     >>> df = sqlContext.createDataFrame([
+     ...     (1.0, Vectors.dense(1.0)),
+     ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
+-    >>> gbt = GBTRegressor(maxIter=5, maxDepth=2)
++    >>> gbt = GBTRegressor(maxIter=5, maxDepth=2, seed=42)
+     >>> model = gbt.fit(df)
+     >>> allclose(model.treeWeights, [1.0, 0.1, 0.1, 0.1, 0.1])
+     True
+@@ -614,12 +614,12 @@ class GBTRegressor(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol,
+     def __init__(self, featuresCol="features", labelCol="label", predictionCol="prediction",
+                  maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                  maxMemoryInMB=256, cacheNodeIds=False, subsamplingRate=1.0,
+-                 checkpointInterval=10, lossType="squared", maxIter=20, stepSize=0.1):
++                 checkpointInterval=10, lossType="squared", maxIter=20, stepSize=0.1, seed=None):
+         """
+         __init__(self, featuresCol="features", labelCol="label", predictionCol="prediction", \
+                  maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, \
+                  maxMemoryInMB=256, cacheNodeIds=False, subsamplingRate=1.0, \
+-                 checkpointInterval=10, lossType="squared", maxIter=20, stepSize=0.1)
++                 checkpointInterval=10, lossType="squared", maxIter=20, stepSize=0.1, seed=None)
+         """
+         super(GBTRegressor, self).__init__()
+         self._java_obj = self._new_java_obj("org.apache.spark.ml.regression.GBTRegressor", self.uid)
+@@ -629,7 +629,8 @@ class GBTRegressor(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol,
+                               "Supported options: " + ", ".join(GBTParams.supportedLossTypes))
+         self._setDefault(maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                          maxMemoryInMB=256, cacheNodeIds=False, subsamplingRate=1.0,
+-                         checkpointInterval=10, lossType="squared", maxIter=20, stepSize=0.1)
++                         checkpointInterval=10, lossType="squared", maxIter=20, stepSize=0.1,
++                         seed=None)
+         kwargs = self.__init__._input_kwargs
+         self.setParams(**kwargs)
+ 
+@@ -638,12 +639,12 @@ class GBTRegressor(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol,
+     def setParams(self, featuresCol="features", labelCol="label", predictionCol="prediction",
+                   maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                   maxMemoryInMB=256, cacheNodeIds=False, subsamplingRate=1.0,
+-                  checkpointInterval=10, lossType="squared", maxIter=20, stepSize=0.1):
++                  checkpointInterval=10, lossType="squared", maxIter=20, stepSize=0.1, seed=None):
+         """
+         setParams(self, featuresCol="features", labelCol="label", predictionCol="prediction", \
+                   maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, \
+                   maxMemoryInMB=256, cacheNodeIds=False, subsamplingRate=1.0, \
+-                  checkpointInterval=10, lossType="squared", maxIter=20, stepSize=0.1)
++                  checkpointInterval=10, lossType="squared", maxIter=20, stepSize=0.1, seed=None)
+         Sets params for Gradient Boosted Tree Regression.
+         """
+         kwargs = self.setParams._input_kwargs
+-- 
+1.7.9.5
+

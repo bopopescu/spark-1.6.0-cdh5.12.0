@@ -1,0 +1,78 @@
+From a7b9f30ece74110d6a924b0581567999e64f3570 Mon Sep 17 00:00:00 2001
+From: Tom Magrino <tmagrino@fb.com>
+Date: Tue, 28 Jun 2016 13:36:41 -0700
+Subject: [PATCH 384/517] [SPARK-16148][SCHEDULER] Allow for underscores in
+ TaskLocation in the Executor ID
+
+## What changes were proposed in this pull request?
+
+Previously, the TaskLocation implementation would not allow for executor ids which include underscores.  This tweaks the string split used to get the hostname and executor id, allowing for underscores in the executor id.
+
+This addresses the JIRA found here: https://issues.apache.org/jira/browse/SPARK-16148
+
+This is moved over from a previous PR against branch-1.6: https://github.com/apache/spark/pull/13857
+
+## How was this patch tested?
+
+Ran existing unit tests for core and streaming.  Manually ran a simple streaming job with an executor whose id contained underscores and confirmed that the job ran successfully.
+
+This is my original work and I license the work to the project under the project's open source license.
+
+Author: Tom Magrino <tmagrino@fb.com>
+
+Closes #13858 from tmagrino/fixtasklocation.
+
+(cherry picked from commit ae14f362355b131fcb3e3633da7bb14bdd2b6893)
+Signed-off-by: Shixiong Zhu <shixiong@databricks.com>
+(cherry picked from commit 0cb06c993f487d00fdb528af9ac5720ab80bfa8f)
+---
+ .../org/apache/spark/scheduler/TaskLocation.scala  |   14 +++++++-------
+ .../spark/scheduler/TaskSetManagerSuite.scala      |    2 ++
+ 2 files changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/TaskLocation.scala b/core/src/main/scala/org/apache/spark/scheduler/TaskLocation.scala
+index 1eb6c16..06b5293 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/TaskLocation.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/TaskLocation.scala
+@@ -64,18 +64,18 @@ private[spark] object TaskLocation {
+ 
+   /**
+    * Create a TaskLocation from a string returned by getPreferredLocations.
+-   * These strings have the form [hostname] or hdfs_cache_[hostname], depending on whether the
+-   * location is cached.
++   * These strings have the form executor_[hostname]_[executorid], [hostname], or
++   * hdfs_cache_[hostname], depending on whether the location is cached.
+    */
+   def apply(str: String): TaskLocation = {
+     val hstr = str.stripPrefix(inMemoryLocationTag)
+     if (hstr.equals(str)) {
+       if (str.startsWith(executorLocationTag)) {
+-        val splits = str.split("_")
+-        if (splits.length != 3) {
+-          throw new IllegalArgumentException("Illegal executor location format: " + str)
+-        }
+-        new ExecutorCacheTaskLocation(splits(1), splits(2))
++        val hostAndExecutorId = str.stripPrefix(executorLocationTag)
++        val splits = hostAndExecutorId.split("_", 2)
++        require(splits.length == 2, "Illegal executor location format: " + str)
++        val Array(host, executorId) = splits
++        new ExecutorCacheTaskLocation(host, executorId)
+       } else {
+         new HostTaskLocation(str)
+       }
+diff --git a/core/src/test/scala/org/apache/spark/scheduler/TaskSetManagerSuite.scala b/core/src/test/scala/org/apache/spark/scheduler/TaskSetManagerSuite.scala
+index b42dcea..d365479 100644
+--- a/core/src/test/scala/org/apache/spark/scheduler/TaskSetManagerSuite.scala
++++ b/core/src/test/scala/org/apache/spark/scheduler/TaskSetManagerSuite.scala
+@@ -809,6 +809,8 @@ class TaskSetManagerSuite extends SparkFunSuite with LocalSparkContext with Logg
+     assert(TaskLocation("host1") === HostTaskLocation("host1"))
+     assert(TaskLocation("hdfs_cache_host1") === HDFSCacheTaskLocation("host1"))
+     assert(TaskLocation("executor_host1_3") === ExecutorCacheTaskLocation("host1", "3"))
++    assert(TaskLocation("executor_some.host1_executor_task_3") ===
++      ExecutorCacheTaskLocation("some.host1", "executor_task_3"))
+   }
+ 
+   private def createTaskResult(id: Int): DirectTaskResult[Int] = {
+-- 
+1.7.9.5
+

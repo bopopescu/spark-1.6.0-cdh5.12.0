@@ -1,0 +1,183 @@
+From b65a6dce6c6368f25e6e8716527bfae658bdf51c Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Fri, 16 Sep 2016 14:02:56 -0700
+Subject: [PATCH 244/517] [SPARK-17549][SQL] Only collect table size stat in
+ driver for cached relation.
+
+The existing code caches all stats for all columns for each partition
+in the driver; for a large relation, this causes extreme memory usage,
+which leads to gc hell and application failures.
+
+It seems that only the size in bytes of the data is actually used in the
+driver, so instead just colllect that. In executors, the full stats are
+still kept, but that's not a big problem; we expect the data to be distributed
+and thus not really incur in too much memory pressure in each individual
+executor.
+
+There are also potential improvements on the executor side, since the data
+being stored currently is very wasteful (e.g. storing boxed types vs.
+primitive types for stats). But that's a separate issue.
+
+On a mildly related change, I'm also adding code to catch exceptions in the
+code generator since Janino was breaking with the test data I tried this
+patch on.
+
+Tested with unit tests and by doing a count a very wide table (20k columns)
+with many partitions.
+
+Author: Marcelo Vanzin <vanzin@cloudera.com>
+
+Closes #15112 from vanzin/SPARK-17549.
+
+(cherry picked from commit 39e2bad6a866d27c3ca594d15e574a1da3ee84cc)
+---
+ .../columnar/InMemoryColumnarTableScan.scala       |   54 +++++---------------
+ .../scala/org/apache/spark/sql/QueryTest.scala     |    3 +-
+ .../columnar/InMemoryColumnarQuerySuite.scala      |   14 +++++
+ 3 files changed, 27 insertions(+), 44 deletions(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarTableScan.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarTableScan.scala
+index f817d5d..0c9bec5 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarTableScan.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarTableScan.scala
+@@ -61,54 +61,25 @@ private[sql] case class InMemoryRelation(
+     @transient child: SparkPlan,
+     tableName: Option[String])(
+     @transient private[sql] var _cachedColumnBuffers: RDD[CachedBatch] = null,
+-    @transient private[sql] var _statistics: Statistics = null,
+-    private[sql] var _batchStats: Accumulable[ArrayBuffer[InternalRow], InternalRow] = null)
++    _batchStats: Accumulator[Long] = null)
+   extends LogicalPlan with MultiInstanceRelation {
+ 
+-  private val batchStats: Accumulable[ArrayBuffer[InternalRow], InternalRow] =
++  private[sql] val batchStats: Accumulator[Long] =
+     if (_batchStats == null) {
+-      child.sqlContext.sparkContext.accumulableCollection(ArrayBuffer.empty[InternalRow])
++      child.sqlContext.sparkContext.accumulator(0L)
+     } else {
+       _batchStats
+     }
+ 
+   @transient val partitionStatistics = new PartitionStatistics(output)
+ 
+-  private def computeSizeInBytes = {
+-    val sizeOfRow: Expression =
+-      BindReferences.bindReference(
+-        output.map(a => partitionStatistics.forAttribute(a).sizeInBytes).reduce(Add),
+-        partitionStatistics.schema)
+-
+-    batchStats.value.map(row => sizeOfRow.eval(row).asInstanceOf[Long]).sum
+-  }
+-
+-  // Statistics propagation contracts:
+-  // 1. Non-null `_statistics` must reflect the actual statistics of the underlying data
+-  // 2. Only propagate statistics when `_statistics` is non-null
+-  private def statisticsToBePropagated = if (_statistics == null) {
+-    val updatedStats = statistics
+-    if (_statistics == null) null else updatedStats
+-  } else {
+-    _statistics
+-  }
+-
+   override def statistics: Statistics = {
+-    if (_statistics == null) {
+-      if (batchStats.value.isEmpty) {
+-        // Underlying columnar RDD hasn't been materialized, no useful statistics information
+-        // available, return the default statistics.
+-        Statistics(sizeInBytes = child.sqlContext.conf.defaultSizeInBytes)
+-      } else {
+-        // Underlying columnar RDD has been materialized, required information has also been
+-        // collected via the `batchStats` accumulator, compute the final statistics,
+-        // and update `_statistics`.
+-        _statistics = Statistics(sizeInBytes = computeSizeInBytes)
+-        _statistics
+-      }
++    if (batchStats.value == 0L) {
++      // Underlying columnar RDD hasn't been materialized, no useful statistics information
++      // available, return the default statistics.
++      Statistics(sizeInBytes = child.sqlContext.conf.defaultSizeInBytes)
+     } else {
+-      // Pre-computed statistics
+-      _statistics
++      Statistics(sizeInBytes = batchStats.value.longValue)
+     }
+   }
+ 
+@@ -159,10 +130,10 @@ private[sql] case class InMemoryRelation(
+             rowCount += 1
+           }
+ 
++          batchStats += totalSize
++
+           val stats = InternalRow.fromSeq(columnBuilders.map(_.columnStats.collectedStatistics)
+                         .flatMap(_.values))
+-
+-          batchStats += stats
+           CachedBatch(rowCount, columnBuilders.map(_.build().array()), stats)
+         }
+ 
+@@ -177,7 +148,7 @@ private[sql] case class InMemoryRelation(
+   def withOutput(newOutput: Seq[Attribute]): InMemoryRelation = {
+     InMemoryRelation(
+       newOutput, useCompression, batchSize, storageLevel, child, tableName)(
+-      _cachedColumnBuffers, statisticsToBePropagated, batchStats)
++      _cachedColumnBuffers, batchStats)
+   }
+ 
+   override def children: Seq[LogicalPlan] = Seq.empty
+@@ -191,14 +162,13 @@ private[sql] case class InMemoryRelation(
+       child,
+       tableName)(
+       _cachedColumnBuffers,
+-      statisticsToBePropagated,
+       batchStats).asInstanceOf[this.type]
+   }
+ 
+   def cachedColumnBuffers: RDD[CachedBatch] = _cachedColumnBuffers
+ 
+   override protected def otherCopyArgs: Seq[AnyRef] =
+-    Seq(_cachedColumnBuffers, statisticsToBePropagated, batchStats)
++    Seq(_cachedColumnBuffers, batchStats)
+ 
+   private[sql] def uncache(blocking: Boolean): Unit = {
+     Accumulators.remove(batchStats.id)
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala b/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala
+index b80dfa1..33ffcd1 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala
+@@ -265,8 +265,7 @@ abstract class QueryTest extends PlanTest {
+           origin.child,
+           l.tableName)(
+           origin.cachedColumnBuffers,
+-          l._statistics,
+-          origin._batchStats)
++          origin.batchStats)
+     }
+ 
+     assert(logicalRDDs.isEmpty)
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala
+index 25afed2..34b6d06 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/execution/columnar/InMemoryColumnarQuerySuite.scala
+@@ -219,4 +219,18 @@ class InMemoryColumnarQuerySuite extends QueryTest with SharedSQLContext {
+     assert(data.count() === 10)
+     assert(data.filter($"s" === "3").count() === 1)
+   }
++
++  test("SPARK-17549: cached table size should be correctly calculated") {
++    val data = sparkContext.parallelize(1 to 10, 5).toDF()
++    val plan = sqlContext.executePlan(data.logicalPlan).sparkPlan
++    val cached = InMemoryRelation(true, 5, MEMORY_ONLY, plan, None)
++
++    // Materialize the data.
++    val expectedAnswer = data.collect()
++    checkAnswer(cached, expectedAnswer)
++
++    // Check that the right size was calculated.
++    assert(cached.batchStats.value === expectedAnswer.size * INT.defaultSize)
++  }
++
+ }
+-- 
+1.7.9.5
+

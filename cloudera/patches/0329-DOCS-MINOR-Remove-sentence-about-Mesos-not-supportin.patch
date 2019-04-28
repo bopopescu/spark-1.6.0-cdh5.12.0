@@ -1,0 +1,38 @@
+From 072a5404e6b96ae2380c1b249c820646a2574316 Mon Sep 17 00:00:00 2001
+From: Michael Gummelt <mgummelt@mesosphere.io>
+Date: Thu, 7 Apr 2016 17:41:37 -0700
+Subject: [PATCH 329/517] [DOCS][MINOR] Remove sentence about Mesos not
+ supporting cluster mode.
+
+Docs change to remove the sentence about Mesos not supporting cluster mode.
+
+It was not.
+
+Author: Michael Gummelt <mgummelt@mesosphere.io>
+
+Closes #12249 from mgummelt/fix-mesos-cluster-docs.
+
+(cherry picked from commit 30e980ad8e6443dddd54f3c2d48b3904499545cf)
+Signed-off-by: Andrew Or <andrew@databricks.com>
+(cherry picked from commit 8a94a59f9e2efc10f1222eca1f3620336d6ebcb3)
+---
+ docs/submitting-applications.md |    3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/docs/submitting-applications.md b/docs/submitting-applications.md
+index 616e5ab..ea52c35 100644
+--- a/docs/submitting-applications.md
++++ b/docs/submitting-applications.md
+@@ -58,8 +58,7 @@ for applications that involve the REPL (e.g. Spark shell).
+ 
+ Alternatively, if your application is submitted from a machine far from the worker machines (e.g.
+ locally on your laptop), it is common to use `cluster` mode to minimize network latency between
+-the drivers and the executors. Note that `cluster` mode is currently not supported for
+-Mesos clusters. Currently only YARN supports cluster mode for Python applications.
++the drivers and the executors. Currently only YARN supports cluster mode for Python applications.
+ 
+ For Python applications, simply pass a `.py` file in the place of `<application-jar>` instead of a JAR,
+ and add Python `.zip`, `.egg` or `.py` files to the search path with `--py-files`.
+-- 
+1.7.9.5
+

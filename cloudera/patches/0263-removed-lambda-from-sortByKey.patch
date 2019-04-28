@@ -1,0 +1,34 @@
+From 3d27502069902778490b0237ff8d7bb9d48bf4b8 Mon Sep 17 00:00:00 2001
+From: Udo Klein <git@blinkenlight.net>
+Date: Mon, 11 Jan 2016 09:30:08 +0000
+Subject: [PATCH 263/517] removed lambda from sortByKey()
+
+According to the documentation the sortByKey method does not take a lambda as an argument, thus the example is flawed. Removed the argument completely as this will default to ascending sort.
+
+Author: Udo Klein <git@blinkenlight.net>
+
+Closes #10640 from udoklein/patch-1.
+
+(cherry picked from commit bd723bd53d9a28239b60939a248a4ea13340aad8)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit d4cfd2acd62f2b0638a12bbbb48a38263c04eaf8)
+---
+ examples/src/main/python/sort.py |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/examples/src/main/python/sort.py b/examples/src/main/python/sort.py
+index f6b0ecb..b6c2916 100755
+--- a/examples/src/main/python/sort.py
++++ b/examples/src/main/python/sort.py
+@@ -30,7 +30,7 @@ if __name__ == "__main__":
+     lines = sc.textFile(sys.argv[1], 1)
+     sortedCount = lines.flatMap(lambda x: x.split(' ')) \
+         .map(lambda x: (int(x), 1)) \
+-        .sortByKey(lambda x: x)
++        .sortByKey()
+     # This is just a demo on how to bring all the sorted data back to a single node.
+     # In reality, we wouldn't want to collect all the data to the driver node.
+     output = sortedCount.collect()
+-- 
+1.7.9.5
+

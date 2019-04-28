@@ -1,0 +1,36 @@
+From 7129859253ff29fdd03c5dbe0ad9703a3ad55e36 Mon Sep 17 00:00:00 2001
+From: Michael Gummelt <mgummelt@mesosphere.io>
+Date: Thu, 25 Feb 2016 13:32:09 +0000
+Subject: [PATCH 278/517] [SPARK-13439][MESOS] Document that spark.mesos.uris
+ is comma-separated
+
+Author: Michael Gummelt <mgummelt@mesosphere.io>
+
+Closes #11311 from mgummelt/document_csv.
+
+(cherry picked from commit c98a93ded36db5da2f3ebd519aa391de90927688)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit e3802a7522a83b91c84d0ee6f721a768a485774b)
+---
+ docs/running-on-mesos.md |    5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/docs/running-on-mesos.md b/docs/running-on-mesos.md
+index ed720f1..13ad535 100644
+--- a/docs/running-on-mesos.md
++++ b/docs/running-on-mesos.md
+@@ -347,8 +347,9 @@ See the [configuration page](configuration.html) for information on Spark config
+   <td><code>spark.mesos.uris</code></td>
+   <td>(none)</td>
+   <td>
+-    A list of URIs to be downloaded to the sandbox when driver or executor is launched by Mesos.
+-    This applies to both coarse-grain and fine-grain mode.
++    A comma-separated list of URIs to be downloaded to the sandbox
++    when driver or executor is launched by Mesos.  This applies to
++    both coarse-grained and fine-grained mode.
+   </td>
+ </tr>
+ <tr>
+-- 
+1.7.9.5
+

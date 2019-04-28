@@ -1,0 +1,123 @@
+From dfe9a2b4e8327ffc584a16d861dbf62eeca01b26 Mon Sep 17 00:00:00 2001
+From: Salil Surendran <salilsurendran@cloudera.com>
+Date: Fri, 10 Feb 2017 14:52:17 -0800
+Subject: [PATCH 476/517] CLOUDERA-BUILD. CDH-49619. OutputMetadata in spark
+ lineage json should contain fully qualified
+ database name
+
+The fully qualified table name is not available in the QueryExecution object for output metadata. Navigator needs a fully qualified table name. This commit aims to expose the current database via the sql catalog. It has the partial changes from the PR for SPARK-13571. This PR was never accepted into Spark upstream since the work was done by another larger piece of work associated with changing interfaces.
+---
+ .../query/analysis/HiveQueryAnalysisSuite.scala    |    7 ++++++-
+ .../spark/sql/catalyst/analysis/Catalog.scala      |   10 ++++++++++
+ .../spark/sql/hive/HiveMetastoreCatalog.scala      |    4 ++++
+ .../spark/sql/hive/HiveMetastoreCatalogSuite.scala |   14 +++++++++++++-
+ 4 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+index 0580e7c..81fd483 100644
+--- a/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
++++ b/lineage/src/test/scala/org/apache/spark/sql/query/analysis/HiveQueryAnalysisSuite.scala
+@@ -23,12 +23,17 @@ import com.cloudera.spark.lineage.{DataSourceFormat, DataSourceType, FieldDetail
+ import org.apache.spark.sql.QueryTest
+ import org.apache.spark.sql.hive.test.TestHive._
+ import org.apache.spark.sql.hive.test.TestHiveSingleton
++import org.apache.spark.sql.test.SQLTestUtils
+ import org.scalatest.BeforeAndAfterAll
+ 
+ /**
+  * Tests that check that reading and writing to Hive tables produce the desired lineage data
+  */
+-class HiveQueryAnalysisSuite extends QueryTest with TestHiveSingleton with BeforeAndAfterAll {
++class HiveQueryAnalysisSuite
++    extends QueryTest
++    with TestHiveSingleton
++    with SQLTestUtils
++    with BeforeAndAfterAll {
+ 
+   protected override def beforeAll(): Unit = {
+     super.beforeAll()
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Catalog.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Catalog.scala
+index e66d2ad..d972c7f 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Catalog.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Catalog.scala
+@@ -46,6 +46,8 @@ trait Catalog {
+ 
+   def lookupRelation(tableIdent: TableIdentifier, alias: Option[String] = None): LogicalPlan
+ 
++  def getCurrentDatabase: String
++
+   /**
+    * Returns tuples of (tableName, isTemporary) for all tables in the given database.
+    * isTemporary is a Boolean value indicates if a table is a temporary or not.
+@@ -83,6 +85,10 @@ class SimpleCatalog(val conf: CatalystConf) extends Catalog {
+   private[this] val tables: ConcurrentMap[String, LogicalPlan] =
+     new ConcurrentHashMap[String, LogicalPlan]
+ 
++  private[this] var currentDatabase = "default"
++
++  override def getCurrentDatabase: String = currentDatabase
++
+   override def registerTable(tableIdent: TableIdentifier, plan: LogicalPlan): Unit = {
+     tables.put(getTableName(tableIdent), plan)
+   }
+@@ -200,6 +206,10 @@ object EmptyCatalog extends Catalog {
+     throw new UnsupportedOperationException
+   }
+ 
++  override def getCurrentDatabase: String = {
++    throw new UnsupportedOperationException
++  }
++
+   override def getTables(databaseName: Option[String]): Seq[(String, Boolean)] = {
+     throw new UnsupportedOperationException
+   }
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
+index c4a3764..1bdcb55 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
+@@ -710,6 +710,10 @@ private[hive] class HiveMetastoreCatalog(val client: ClientInterface, hive: Hive
+   }
+ 
+   override def unregisterAllTables(): Unit = {}
++
++  override def getCurrentDatabase: String = {
++    client.currentDatabase
++  }
+ }
+ 
+ /**
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala
+index c4f0ebb..1f8a5d0 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala
+@@ -26,7 +26,8 @@ import org.apache.spark.sql.test.{ExamplePointUDT, SQLTestUtils}
+ import org.apache.spark.sql.types.{DecimalType, StringType, StructType}
+ import org.apache.spark.sql.{SQLConf, QueryTest, Row, SaveMode}
+ 
+-class HiveMetastoreCatalogSuite extends SparkFunSuite with TestHiveSingleton {
++class HiveMetastoreCatalogSuite extends SparkFunSuite with TestHiveSingleton with SQLTestUtils {
++
+   import hiveContext.implicits._
+ 
+   test("struct field should accept underscore in sub-column name") {
+@@ -68,6 +69,17 @@ class HiveMetastoreCatalogSuite extends SparkFunSuite with TestHiveSingleton {
+     hiveContext.range(10).write.saveAsTable("spark13454")
+     hiveContext.sql("drop table spark13454")
+   }
++
++  test("getCurrentDatabase") {
++    assert(hiveContext.catalog.getCurrentDatabase == "default")
++    withTempDatabase { db =>
++      assert(hiveContext.catalog.getCurrentDatabase == "default")
++      activateDatabase(db) {
++        assert(hiveContext.catalog.getCurrentDatabase == db)
++      }
++    }
++    assert(hiveContext.catalog.getCurrentDatabase == "default")
++  }
+ }
+ 
+ class DataSourceWithHiveMetastoreCatalogSuite
+-- 
+1.7.9.5
+

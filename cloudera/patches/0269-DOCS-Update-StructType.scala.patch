@@ -1,0 +1,37 @@
+From b32203d111b2bd8ae0f541ccae42a668bcb8e500 Mon Sep 17 00:00:00 2001
+From: "Kevin (Sangwoo) Kim" <sangwookim.me@gmail.com>
+Date: Tue, 2 Feb 2016 13:24:09 -0800
+Subject: [PATCH 269/517] [DOCS] Update StructType.scala
+
+The example will throw error like
+<console>:20: error: not found: value StructType
+
+Need to add this line:
+import org.apache.spark.sql.types._
+
+Author: Kevin (Sangwoo) Kim <sangwookim.me@gmail.com>
+
+Closes #10141 from swkimme/patch-1.
+
+(cherry picked from commit b377b03531d21b1d02a8f58b3791348962e1f31b)
+Signed-off-by: Michael Armbrust <michael@databricks.com>
+(cherry picked from commit e81333be05cc5e2a41e5eb1a630c5af59a47dd23)
+---
+ .../org/apache/spark/sql/types/StructType.scala    |    1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/types/StructType.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/types/StructType.scala
+index 494bb86..1939633 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/types/StructType.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/types/StructType.scala
+@@ -39,6 +39,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference,
+  * Example:
+  * {{{
+  * import org.apache.spark.sql._
++ * import org.apache.spark.sql.types._
+  *
+  * val struct =
+  *   StructType(
+-- 
+1.7.9.5
+

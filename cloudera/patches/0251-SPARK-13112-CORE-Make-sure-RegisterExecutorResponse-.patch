@@ -1,0 +1,118 @@
+From 213d289f5f5f5904d53bbf32c6232e261415302b Mon Sep 17 00:00:00 2001
+From: Shixiong Zhu <shixiong@databricks.com>
+Date: Wed, 6 Apr 2016 16:18:04 -0700
+Subject: [PATCH 251/517] [SPARK-13112][CORE] Make sure
+ RegisterExecutorResponse arrive before LaunchTask
+
+Send `RegisterExecutorResponse` using `executorRef` in order to make sure RegisterExecutorResponse and LaunchTask are both sent using the same channel. Then RegisterExecutorResponse will always arrive before LaunchTask
+
+Existing unit tests
+
+Closes #12078
+
+Author: Shixiong Zhu <shixiong@databricks.com>
+
+Closes #12211 from zsxwing/SPARK-13112.
+
+(cherry picked from commit f1def573f4c1c757f727476521a1509b5285051d)
+---
+ .../executor/CoarseGrainedExecutorBackend.scala    |   10 ++++------
+ .../cluster/CoarseGrainedSchedulerBackend.scala    |    6 ++++--
+ .../org/apache/spark/HeartbeatReceiverSuite.scala  |   11 ++++++++---
+ .../deploy/StandaloneDynamicAllocationSuite.scala  |    2 +-
+ 4 files changed, 17 insertions(+), 12 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala b/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
+index 873c5a4..10cdf23 100644
+--- a/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
++++ b/core/src/main/scala/org/apache/spark/executor/CoarseGrainedExecutorBackend.scala
+@@ -56,14 +56,12 @@ private[spark] class CoarseGrainedExecutorBackend(
+     rpcEnv.asyncSetupEndpointRefByURI(driverUrl).flatMap { ref =>
+       // This is a very fast action so we can use "ThreadUtils.sameThread"
+       driver = Some(ref)
+-      ref.ask[RegisterExecutorResponse](
+-        RegisterExecutor(executorId, self, hostPort, cores, extractLogUrls))
++      ref.ask[Boolean](RegisterExecutor(executorId, self, hostPort, cores, extractLogUrls))
+     }(ThreadUtils.sameThread).onComplete {
+       // This is a very fast action so we can use "ThreadUtils.sameThread"
+-      case Success(msg) => Utils.tryLogNonFatalError {
+-        Option(self).foreach(_.send(msg)) // msg must be RegisterExecutorResponse
+-      }
+-      case Failure(e) =>
++      case Success(msg) =>
++        // Always receive `true`. Just ignore it
++      case Failure(e) => {
+         logError(s"Cannot register with driver: $driverUrl", e)
+         exitExecutor()
+     }(ThreadUtils.sameThread)
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+index b5882e7..caeb02f 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+@@ -139,7 +139,8 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+ 
+       case RegisterExecutor(executorId, executorRef, hostPort, cores, logUrls) =>
+         if (executorDataMap.contains(executorId)) {
+-          context.reply(RegisterExecutorFailed("Duplicate executor ID: " + executorId))
++          executorRef.send(RegisterExecutorFailed("Duplicate executor ID: " + executorId))
++          context.reply(true)
+         } else {
+           // If the executor's rpc env is not listening for incoming connections, `hostPort`
+           // will be null, and the client connection should be used to contact the executor.
+@@ -163,8 +164,9 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+               logDebug(s"Decremented number of pending executors ($numPendingExecutors left)")
+             }
+           }
++          executorRef.send(RegisteredExecutor(executorAddress.host))
+           // Note: some tests expect the reply to come after we put the executor in the map
+-          context.reply(RegisteredExecutor(executorAddress.host))
++          context.reply(true)
+           listenerBus.post(
+             SparkListenerExecutorAdded(System.currentTimeMillis(), executorId, data))
+           makeOffers()
+diff --git a/core/src/test/scala/org/apache/spark/HeartbeatReceiverSuite.scala b/core/src/test/scala/org/apache/spark/HeartbeatReceiverSuite.scala
+index 0440f9c..815b5c4 100644
+--- a/core/src/test/scala/org/apache/spark/HeartbeatReceiverSuite.scala
++++ b/core/src/test/scala/org/apache/spark/HeartbeatReceiverSuite.scala
+@@ -173,9 +173,9 @@ class HeartbeatReceiverSuite
+     val dummyExecutorEndpoint2 = new FakeExecutorEndpoint(rpcEnv)
+     val dummyExecutorEndpointRef1 = rpcEnv.setupEndpoint("fake-executor-1", dummyExecutorEndpoint1)
+     val dummyExecutorEndpointRef2 = rpcEnv.setupEndpoint("fake-executor-2", dummyExecutorEndpoint2)
+-    fakeSchedulerBackend.driverEndpoint.askWithRetry[RegisterExecutorResponse](
++    fakeSchedulerBackend.driverEndpoint.askWithRetry[Boolean](
+       RegisterExecutor(executorId1, dummyExecutorEndpointRef1, "dummy:4040", 0, Map.empty))
+-    fakeSchedulerBackend.driverEndpoint.askWithRetry[RegisterExecutorResponse](
++    fakeSchedulerBackend.driverEndpoint.askWithRetry[Boolean](
+       RegisterExecutor(executorId2, dummyExecutorEndpointRef2, "dummy:4040", 0, Map.empty))
+     heartbeatReceiverRef.askWithRetry[Boolean](TaskSchedulerIsSet)
+     addExecutorAndVerify(executorId1)
+@@ -252,7 +252,12 @@ class HeartbeatReceiverSuite
+ /**
+  * Dummy RPC endpoint to simulate executors.
+  */
+-private class FakeExecutorEndpoint(override val rpcEnv: RpcEnv) extends RpcEndpoint
++private class FakeExecutorEndpoint(override val rpcEnv: RpcEnv) extends RpcEndpoint {
++
++  override def receive: PartialFunction[Any, Unit] = {
++    case _ =>
++  }
++}
+ 
+ /**
+  * Dummy scheduler backend to simulate executor allocation requests to the cluster manager.
+diff --git a/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala b/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala
+index 88f3558..bc52be6 100644
+--- a/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala
++++ b/core/src/test/scala/org/apache/spark/deploy/StandaloneDynamicAllocationSuite.scala
+@@ -538,7 +538,7 @@ class StandaloneDynamicAllocationSuite
+       when(endpointRef.address).thenReturn(mockAddress)
+       val message = RegisterExecutor(id, endpointRef, s"localhost:$port", 10, Map.empty)
+       val backend = sc.schedulerBackend.asInstanceOf[CoarseGrainedSchedulerBackend]
+-      backend.driverEndpoint.askWithRetry[CoarseGrainedClusterMessage](message)
++      backend.driverEndpoint.askWithRetry[Boolean](message)
+     }
+   }
+ 
+-- 
+1.7.9.5
+

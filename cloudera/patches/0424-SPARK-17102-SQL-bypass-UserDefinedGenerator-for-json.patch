@@ -1,0 +1,38 @@
+From 32db70a287c763049bcbe0246fcaed1e337e8b27 Mon Sep 17 00:00:00 2001
+From: Wenchen Fan <wenchen@databricks.com>
+Date: Wed, 17 Aug 2016 09:31:22 -0700
+Subject: [PATCH 424/517] [SPARK-17102][SQL] bypass UserDefinedGenerator for
+ json format check
+
+We use reflection to convert `TreeNode` to json string, and currently don't support arbitrary object. `UserDefinedGenerator` takes a function object, so we should skip json format test for it, or the tests can be flacky, e.g. `DataFrameSuite.simple explode`, this test always fail with scala 2.10(branch 1.6 builds with scala 2.10 by default), but pass with scala 2.11(master branch builds with scala 2.11 by default).
+
+N/A
+
+Author: Wenchen Fan <wenchen@databricks.com>
+
+Closes #14679 from cloud-fan/json.
+
+(cherry picked from commit 928ca1c6d12b23d84f9b6205e22d2e756311f072)
+Signed-off-by: Yin Huai <yhuai@databricks.com>
+(cherry picked from commit 60de30faf29b77b9488495fbcd57f46e3d9248ab)
+---
+ .../scala/org/apache/spark/sql/QueryTest.scala     |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala b/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala
+index 33ffcd1..4d7dbd6 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/QueryTest.scala
+@@ -201,7 +201,8 @@ abstract class QueryTest extends PlanTest {
+       case _: CoGroup[_, _, _, _] => return
+       case _: LogicalRelation => return
+     }.transformAllExpressions {
+-      case a: ImperativeAggregate => return
++      case _: ImperativeAggregate => return
++      case _: UserDefinedGenerator => return
+     }
+ 
+     // bypass hive tests before we fix all corner cases in hive module.
+-- 
+1.7.9.5
+

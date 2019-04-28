@@ -1,0 +1,38 @@
+From 3615306f633b73d5f90606e69f3a54e3f6cd1c2e Mon Sep 17 00:00:00 2001
+From: Sean Owen <sowen@cloudera.com>
+Date: Thu, 11 Aug 2016 16:59:54 +0100
+Subject: [PATCH 418/517] Revert "[SPARK-16831][PYTHON] Fixed bug in
+ CrossValidator.avgMetrics"
+
+This reverts commit 92ee6fbf5d5096245d9f1a84cd3a8e66062dd945.
+
+(cherry picked from commit b3ecff640f5ecaf07edcdc6f284644440f788201)
+---
+ python/pyspark/ml/tuning.py |    4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/python/pyspark/ml/tuning.py b/python/pyspark/ml/tuning.py
+index 8f2cd62..705ee53 100644
+--- a/python/pyspark/ml/tuning.py
++++ b/python/pyspark/ml/tuning.py
+@@ -108,8 +108,6 @@ class CrossValidator(Estimator):
+     >>> evaluator = BinaryClassificationEvaluator()
+     >>> cv = CrossValidator(estimator=lr, estimatorParamMaps=grid, evaluator=evaluator)
+     >>> cvModel = cv.fit(dataset)
+-    >>> cvModel.avgMetrics[0]
+-    0.5
+     >>> evaluator.evaluate(cvModel.transform(dataset))
+     0.8333...
+ 
+@@ -241,7 +239,7 @@ class CrossValidator(Estimator):
+                 model = est.fit(train, epm[j])
+                 # TODO: duplicate evaluator to take extra params from input
+                 metric = eva.evaluate(model.transform(validation, epm[j]))
+-                metrics[j] += metric/nFolds
++                metrics[j] += metric
+ 
+         if eva.isLargerBetter():
+             bestIndex = np.argmax(metrics)
+-- 
+1.7.9.5
+

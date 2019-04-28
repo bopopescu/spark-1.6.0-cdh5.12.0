@@ -1,0 +1,139 @@
+From 31f64ac9b49638bd5070f4794f30caa4b2030f97 Mon Sep 17 00:00:00 2001
+From: Yuming Wang <wgyumg@gmail.com>
+Date: Fri, 5 Aug 2016 16:11:54 +0100
+Subject: [PATCH 239/517] [SPARK-16625][SQL] General data types to be mapped
+ to Oracle
+
+Spark will convert **BooleanType** to **BIT(1)**, **LongType** to **BIGINT**, **ByteType**  to **BYTE** when saving DataFrame to Oracle, but Oracle does not support BIT, BIGINT and BYTE types.
+
+This PR is convert following _Spark Types_ to _Oracle types_ refer to [Oracle Developer's Guide](https://docs.oracle.com/cd/E19501-01/819-3659/gcmaz/)
+
+Spark Type | Oracle
+----|----
+BooleanType | NUMBER(1)
+IntegerType | NUMBER(10)
+LongType | NUMBER(19)
+FloatType | NUMBER(19, 4)
+DoubleType | NUMBER(19, 4)
+ByteType | NUMBER(3)
+ShortType | NUMBER(5)
+
+Add new tests in [JDBCSuite.scala](https://github.com/wangyum/spark/commit/22b0c2a4228cb8b5098ad741ddf4d1904e745ff6#diff-dc4b58851b084b274df6fe6b189db84d) and [OracleDialect.scala](https://github.com/wangyum/spark/commit/22b0c2a4228cb8b5098ad741ddf4d1904e745ff6#diff-5e0cadf526662f9281aa26315b3750ad)
+
+Author: Yuming Wang <wgyumg@gmail.com>
+
+Closes #14377 from wangyum/SPARK-16625.
+
+(cherry picked from commit cb741e0b7dac2afd1af1f1672b131914af8aa50e)
+---
+ .../org/apache/spark/sql/jdbc/OracleDialect.scala  |   42 +++++++++++++++-----
+ .../org/apache/spark/sql/jdbc/JDBCSuite.scala      |   29 ++++++++++++++
+ 2 files changed, 61 insertions(+), 10 deletions(-)
+
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/jdbc/OracleDialect.scala b/sql/core/src/main/scala/org/apache/spark/sql/jdbc/OracleDialect.scala
+index 8e432e8..3fd93da 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/jdbc/OracleDialect.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/jdbc/OracleDialect.scala
+@@ -28,22 +28,44 @@ private case object OracleDialect extends JdbcDialect {
+ 
+   override def getCatalystType(
+       sqlType: Int, typeName: String, size: Int, md: MetadataBuilder): Option[DataType] = {
+-    // Handle NUMBER fields that have no precision/scale in special way
+-    // because JDBC ResultSetMetaData converts this to 0 procision and -127 scale
+-    // For more details, please see
+-    // https://github.com/apache/spark/pull/8780#issuecomment-145598968
+-    // and
+-    // https://github.com/apache/spark/pull/8780#issuecomment-144541760
+-    if (sqlType == Types.NUMERIC && size == 0) {
+-      // This is sub-optimal as we have to pick a precision/scale in advance whereas the data
+-      //  in Oracle is allowed to have different precision/scale for each value.
+-      Option(DecimalType(DecimalType.MAX_PRECISION, 10))
++
++    if (sqlType == Types.NUMERIC) {
++      val scale = if (null != md) md.build().getLong("scale") else 0L
++      size match {
++        // Handle NUMBER fields that have no precision/scale in special way
++        // because JDBC ResultSetMetaData converts this to 0 precision and -127 scale
++        // For more details, please see
++        // https://github.com/apache/spark/pull/8780#issuecomment-145598968
++        // and
++        // https://github.com/apache/spark/pull/8780#issuecomment-144541760
++        case 0 => Option(DecimalType(DecimalType.MAX_PRECISION, 10))
++        // Handle FLOAT fields in a special way because JDBC ResultSetMetaData converts
++        // this to NUMERIC with -127 scale
++        // Not sure if there is a more robust way to identify the field as a float (or other
++        // numeric types that do not specify a scale.
++        case _ if scale == -127L => Option(DecimalType(DecimalType.MAX_PRECISION, 10))
++        case 1 => Option(BooleanType)
++        case 3 | 5 | 10 => Option(IntegerType)
++        case 19 if scale == 0L => Option(LongType)
++        case 19 if scale == 4L => Option(FloatType)
++        case _ => None
++      }
++
+     } else {
+       None
+     }
+   }
+ 
+   override def getJDBCType(dt: DataType): Option[JdbcType] = dt match {
++    // For more details, please see
++    // https://docs.oracle.com/cd/E19501-01/819-3659/gcmaz/
++    case BooleanType => Some(JdbcType("NUMBER(1)", java.sql.Types.BOOLEAN))
++    case IntegerType => Some(JdbcType("NUMBER(10)", java.sql.Types.INTEGER))
++    case LongType => Some(JdbcType("NUMBER(19)", java.sql.Types.BIGINT))
++    case FloatType => Some(JdbcType("NUMBER(19, 4)", java.sql.Types.FLOAT))
++    case DoubleType => Some(JdbcType("NUMBER(19, 4)", java.sql.Types.DOUBLE))
++    case ByteType => Some(JdbcType("NUMBER(3)", java.sql.Types.SMALLINT))
++    case ShortType => Some(JdbcType("NUMBER(5)", java.sql.Types.SMALLINT))
+     case StringType => Some(JdbcType("VARCHAR2(255)", java.sql.Types.VARCHAR))
+     case _ => None
+   }
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/jdbc/JDBCSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/jdbc/JDBCSuite.scala
+index 4b389ad..c91f75d 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/jdbc/JDBCSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/jdbc/JDBCSuite.scala
+@@ -28,6 +28,7 @@ import org.apache.spark.SparkFunSuite
+ import org.apache.spark.sql.test.SharedSQLContext
+ import org.apache.spark.sql.types._
+ import org.apache.spark.util.Utils
++import org.apache.spark.sql.execution.datasources.jdbc.JdbcUtils
+ 
+ class JDBCSuite extends SparkFunSuite with BeforeAndAfter with SharedSQLContext {
+   import testImplicits._
+@@ -507,4 +508,32 @@ class JDBCSuite extends SparkFunSuite with BeforeAndAfter with SharedSQLContext
+     assert(oracleDialect.getJDBCType(StringType).
+       map(_.databaseTypeDefinition).get == "VARCHAR2(255)")
+   }
++
++
++  test("SPARK-16625: General data types to be mapped to Oracle") {
++
++    def getJdbcType(dialect: JdbcDialect, dt: DataType): String = {
++      dialect.getJDBCType(dt).orElse(JdbcUtils.getCommonJDBCType(dt)).
++        map(_.databaseTypeDefinition).get
++    }
++
++    val oracleDialect = JdbcDialects.get("jdbc:oracle://127.0.0.1/db")
++    assert(getJdbcType(oracleDialect, BooleanType) == "NUMBER(1)")
++    assert(getJdbcType(oracleDialect, IntegerType) == "NUMBER(10)")
++    assert(getJdbcType(oracleDialect, LongType) == "NUMBER(19)")
++    assert(getJdbcType(oracleDialect, FloatType) == "NUMBER(19, 4)")
++    assert(getJdbcType(oracleDialect, DoubleType) == "NUMBER(19, 4)")
++    assert(getJdbcType(oracleDialect, ByteType) == "NUMBER(3)")
++    assert(getJdbcType(oracleDialect, ShortType) == "NUMBER(5)")
++    assert(getJdbcType(oracleDialect, StringType) == "VARCHAR2(255)")
++    assert(getJdbcType(oracleDialect, BinaryType) == "BLOB")
++    assert(getJdbcType(oracleDialect, DateType) == "DATE")
++    assert(getJdbcType(oracleDialect, TimestampType) == "TIMESTAMP")
++  }
++
++  private def assertEmptyQuery(sqlString: String): Unit = {
++    assert(sql(sqlString).collect().isEmpty)
++  }
++
++
+ }
+-- 
+1.7.9.5
+

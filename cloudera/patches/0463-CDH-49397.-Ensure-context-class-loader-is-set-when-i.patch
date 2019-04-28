@@ -1,0 +1,41 @@
+From e8e19e348bbf560b51c8aed0eea332851d31214a Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Tue, 24 Jan 2017 09:39:02 -0800
+Subject: [PATCH 463/517] CDH-49397. Ensure context class loader is set when
+ initializing Hive.
+
+This makes sure classes are loaded by the correct class loader when
+all Hive internal state is being initialized.
+---
+ .../spark/sql/hive/client/ClientWrapper.scala      |    6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/ClientWrapper.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/ClientWrapper.scala
+index 02f68bb..0db0e2b 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/ClientWrapper.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/ClientWrapper.scala
+@@ -280,17 +280,19 @@ private[hive] class ClientWrapper(
+    */
+   def withHiveState[A](f: => A): A = retryLocked {
+     val original = Thread.currentThread().getContextClassLoader
+-    // Set the thread local metastore client to the client associated with this ClientWrapper.
+-    Hive.set(client)
+     // The classloader in clientLoader could be changed after addJar, always use the latest
+     // classloader
+     state.getConf.setClassLoader(clientLoader.classLoader)
++    Thread.currentThread().setContextClassLoader(clientLoader.classLoader)
++    // Set the thread local metastore client to the client associated with this ClientWrapper.
++    Hive.set(client)
+     // setCurrentSessionState will use the classLoader associated
+     // with the HiveConf in `state` to override the context class loader of the current
+     // thread.
+     shim.setCurrentSessionState(state)
+     val ret = try f finally {
+       Thread.currentThread().setContextClassLoader(original)
++      state.getConf.setClassLoader(original)
+     }
+     ret
+   }
+-- 
+1.7.9.5
+

@@ -1,0 +1,59 @@
+From 2f27e1941c0a317b89fa9a5560ee6f130d77e56a Mon Sep 17 00:00:00 2001
+From: Yin Huai <yhuai@databricks.com>
+Date: Wed, 6 Jan 2016 22:03:31 -0800
+Subject: [PATCH 260/517] Revert "[SPARK-12006][ML][PYTHON] Fix GMM failure if
+ initialModel is not None"
+
+This reverts commit fcd013cf70e7890aa25a8fe3cb6c8b36bf0e1f04.
+
+Author: Yin Huai <yhuai@databricks.com>
+
+Closes #10632 from yhuai/pythonStyle.
+
+(cherry picked from commit e5cde7ab11a43334fa01b1bb8904da5c0774bc62)
+Signed-off-by: Yin Huai <yhuai@databricks.com>
+(cherry picked from commit 34effc46cd54735cc660d8b43f0a190e91747a06)
+---
+ python/pyspark/mllib/clustering.py |    2 +-
+ python/pyspark/mllib/tests.py      |   12 ------------
+ 2 files changed, 1 insertion(+), 13 deletions(-)
+
+diff --git a/python/pyspark/mllib/clustering.py b/python/pyspark/mllib/clustering.py
+index ff28bb5..cde4661 100644
+--- a/python/pyspark/mllib/clustering.py
++++ b/python/pyspark/mllib/clustering.py
+@@ -346,7 +346,7 @@ class GaussianMixture(object):
+             if initialModel.k != k:
+                 raise Exception("Mismatched cluster count, initialModel.k = %s, however k = %s"
+                                 % (initialModel.k, k))
+-            initialModelWeights = list(initialModel.weights)
++            initialModelWeights = initialModel.weights
+             initialModelMu = [initialModel.gaussians[i].mu for i in range(initialModel.k)]
+             initialModelSigma = [initialModel.gaussians[i].sigma for i in range(initialModel.k)]
+         java_model = callMLlibFunc("trainGaussianMixtureModel", rdd.map(_convert_to_vector),
+diff --git a/python/pyspark/mllib/tests.py b/python/pyspark/mllib/tests.py
+index b056246..843b342 100644
+--- a/python/pyspark/mllib/tests.py
++++ b/python/pyspark/mllib/tests.py
+@@ -480,18 +480,6 @@ class ListTests(MLlibTestCase):
+         for c1, c2 in zip(clusters1.weights, clusters2.weights):
+             self.assertEqual(round(c1, 7), round(c2, 7))
+ 
+-    def test_gmm_with_initial_model(self):
+-        from pyspark.mllib.clustering import GaussianMixture
+-        data = self.sc.parallelize([
+-            (-10, -5), (-9, -4), (10, 5), (9, 4)
+-        ])
+-
+-        gmm1 = GaussianMixture.train(data, 2, convergenceTol=0.001,
+-                                     maxIterations=10, seed=63)
+-        gmm2 = GaussianMixture.train(data, 2, convergenceTol=0.001,
+-                                     maxIterations=10, seed=63, initialModel=gmm1)
+-        self.assertAlmostEqual((gmm1.weights - gmm2.weights).sum(), 0.0)
+-
+     def test_classification(self):
+         from pyspark.mllib.classification import LogisticRegressionWithSGD, SVMWithSGD, NaiveBayes
+         from pyspark.mllib.tree import DecisionTree, DecisionTreeModel, RandomForest,\
+-- 
+1.7.9.5
+

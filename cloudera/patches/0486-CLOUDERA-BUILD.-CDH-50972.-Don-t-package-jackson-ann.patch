@@ -1,0 +1,25 @@
+From 22f1eb261cee97267a5fcec6f68ce8aca8d168bb Mon Sep 17 00:00:00 2001
+From: Marcelo Vanzin <vanzin@cloudera.com>
+Date: Tue, 28 Feb 2017 11:35:39 -0800
+Subject: [PATCH 486/517] CLOUDERA-BUILD. CDH-50972. Don't package
+ jackson-annotations in Spark assemblies.
+
+---
+ pom.xml |    1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/pom.xml b/pom.xml
+index eae76a0..a10a5e0 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -735,6 +735,7 @@
+         <groupId>com.fasterxml.jackson.core</groupId>
+         <artifactId>jackson-annotations</artifactId>
+         <version>${fasterxml.jackson.version}</version>
++        <scope>${hadoop.deps.scope}</scope>
+       </dependency>
+       <!-- Guava is excluded because of SPARK-6149.  The Guava version referenced in this module is
+            15.0, which causes runtime incompatibility issues. -->
+-- 
+1.7.9.5
+

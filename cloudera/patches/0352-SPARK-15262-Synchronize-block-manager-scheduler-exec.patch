@@ -1,0 +1,50 @@
+From f976687a83d5ca66d9fa7f0898bd406d9c145236 Mon Sep 17 00:00:00 2001
+From: Andrew Or <andrew@databricks.com>
+Date: Wed, 11 May 2016 13:36:58 -0700
+Subject: [PATCH 352/517] [SPARK-15262] Synchronize block manager / scheduler
+ executor state
+
+## What changes were proposed in this pull request?
+
+If an executor is still alive even after the scheduler has removed its metadata, we may receive a heartbeat from that executor and tell its block manager to reregister itself. If that happens, the block manager master will know about the executor, but the scheduler will not.
+
+That is a dangerous situation, because when the executor does get disconnected later, the scheduler will not ask the block manager to also remove metadata for that executor. Later, when we try to clean up an RDD or a broadcast variable, we may try to send a message to that executor, triggering an exception.
+
+## How was this patch tested?
+
+Jenkins.
+
+Author: Andrew Or <andrew@databricks.com>
+
+Closes #13055 from andrewor14/block-manager-remove.
+
+(cherry picked from commit 40a949aae9c3040019a52482d091912a85b0f4d4)
+Signed-off-by: Shixiong Zhu <shixiong@databricks.com>
+(cherry picked from commit e2a43d0070b7204b1c6ed1c9292f1d215e0df30d)
+---
+ .../cluster/CoarseGrainedSchedulerBackend.scala    |    9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+index c38094e..163c498 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+@@ -273,7 +273,14 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+           scheduler.executorLost(executorId, if (killed) ExecutorKilled else reason)
+           listenerBus.post(
+             SparkListenerExecutorRemoved(System.currentTimeMillis(), executorId, reason.toString))
+-        case None => logInfo(s"Asked to remove non-existent executor $executorId")
++        case None =>
++          // SPARK-15262: If an executor is still alive even after the scheduler has removed
++          // its metadata, we may receive a heartbeat from that executor and tell its block
++          // manager to reregister itself. If that happens, the block manager master will know
++          // about the executor, but the scheduler will not. Therefore, we should remove the
++          // executor from the block manager when we hit this case.
++          scheduler.sc.env.blockManager.master.removeExecutor(executorId)
++          logInfo(s"Asked to remove non-existent executor $executorId")
+       }
+     }
+ 
+-- 
+1.7.9.5
+

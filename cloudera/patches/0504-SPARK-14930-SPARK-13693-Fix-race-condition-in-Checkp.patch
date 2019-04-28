@@ -1,0 +1,107 @@
+From 69306c2b96f552912b0871474d88dd192aa1cbf7 Mon Sep 17 00:00:00 2001
+From: Josh Rosen <joshrosen@databricks.com>
+Date: Wed, 27 Apr 2016 11:23:26 -0700
+Subject: [PATCH 504/517] [SPARK-14930][SPARK-13693] Fix race condition in
+ CheckpointWriter.stop()
+
+CheckpointWriter.stop() is prone to a race condition: if one thread calls `stop()` right as a checkpoint write task begins to execute, that write task may become blocked when trying to access `fs`, the shared Hadoop FileSystem, since both the `fs` getter and `stop` method synchronize on the same lock. Here's a thread-dump excerpt which illustrates the problem:
+
+```java
+"pool-31-thread-1" #156 prio=5 os_prio=31 tid=0x00007fea02cd2000 nid=0x5c0b waiting for monitor entry [0x000000013bc4c000]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+    at org.apache.spark.streaming.CheckpointWriter.org$apache$spark$streaming$CheckpointWriter$$fs(Checkpoint.scala:302)
+    - waiting to lock <0x00000007bf53ee78> (a org.apache.spark.streaming.CheckpointWriter)
+    at org.apache.spark.streaming.CheckpointWriter$CheckpointWriteHandler.run(Checkpoint.scala:224)
+    at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1142)
+    at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:617)
+    at java.lang.Thread.run(Thread.java:745)
+
+"pool-1-thread-1-ScalaTest-running-MapWithStateSuite" #11 prio=5 os_prio=31 tid=0x00007fe9ff879800 nid=0x5703 waiting on condition [0x000000012e54c000]
+   java.lang.Thread.State: TIMED_WAITING (parking)
+    at sun.misc.Unsafe.park(Native Method)
+    - parking to wait for  <0x00000007bf564568> (a java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject)
+    at java.util.concurrent.locks.LockSupport.parkNanos(LockSupport.java:215)
+    at java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.awaitNanos(AbstractQueuedSynchronizer.java:2078)
+    at java.util.concurrent.ThreadPoolExecutor.awaitTermination(ThreadPoolExecutor.java:1465)
+    at org.apache.spark.streaming.CheckpointWriter.stop(Checkpoint.scala:291)
+    - locked <0x00000007bf53ee78> (a org.apache.spark.streaming.CheckpointWriter)
+    at org.apache.spark.streaming.scheduler.JobGenerator.stop(JobGenerator.scala:159)
+    - locked <0x00000007bf53ea90> (a org.apache.spark.streaming.scheduler.JobGenerator)
+    at org.apache.spark.streaming.scheduler.JobScheduler.stop(JobScheduler.scala:115)
+    - locked <0x00000007bf53d3f0> (a org.apache.spark.streaming.scheduler.JobScheduler)
+    at org.apache.spark.streaming.StreamingContext$$anonfun$stop$1.apply$mcV$sp(StreamingContext.scala:680)
+    at org.apache.spark.util.Utils$.tryLogNonFatalError(Utils.scala:1219)
+    at org.apache.spark.streaming.StreamingContext.stop(StreamingContext.scala:679)
+    - locked <0x00000007bf516a70> (a org.apache.spark.streaming.StreamingContext)
+    at org.apache.spark.streaming.StreamingContext.stop(StreamingContext.scala:644)
+    - locked <0x00000007bf516a70> (a org.apache.spark.streaming.StreamingContext)
+[...]
+```
+
+We can fix this problem by having `stop` and `fs` be synchronized on different locks: the synchronization on `stop` only needs to guard against multiple threads calling `stop` at the same time, whereas the synchronization on `fs` is only necessary for cross-thread visibility. There's only ever a single active checkpoint writer thread at a time, so we don't need to guard against concurrent access to `fs`. Thus, `fs` can simply become a `volatile` var, similar to `lastCheckpointTime`.
+
+This change should fix [SPARK-13693](https://issues.apache.org/jira/browse/SPARK-13693), a flaky `MapWithStateSuite` test suite which has recently been failing several times per day. It also results in a huge test speedup: prior to this patch, `MapWithStateSuite` took about 80 seconds to run, whereas it now runs in less than 10 seconds. For the `streaming` project's tests as a whole, they now run in ~220 seconds vs. ~354 before.
+
+/cc zsxwing and tdas for review.
+
+Author: Josh Rosen <joshrosen@databricks.com>
+
+Closes #12712 from JoshRosen/fix-checkpoint-writer-race.
+
+(cherry picked from commit 450136ec0dab16a12e514c842f9062a6979ee9aa)
+---
+ .../org/apache/spark/streaming/Checkpoint.scala    |   17 +++++------------
+ 1 file changed, 5 insertions(+), 12 deletions(-)
+
+diff --git a/streaming/src/main/scala/org/apache/spark/streaming/Checkpoint.scala b/streaming/src/main/scala/org/apache/spark/streaming/Checkpoint.scala
+index d0046af..26c1ac2 100644
+--- a/streaming/src/main/scala/org/apache/spark/streaming/Checkpoint.scala
++++ b/streaming/src/main/scala/org/apache/spark/streaming/Checkpoint.scala
+@@ -185,8 +185,7 @@ class CheckpointWriter(
+   val executor = Executors.newFixedThreadPool(1)
+   val compressionCodec = CompressionCodec.createCodec(conf)
+   private var stopped = false
+-  private var fs_ : FileSystem = _
+-
++  @volatile private[this] var fs: FileSystem = null
+   @volatile private var latestCheckpointTime: Time = null
+ 
+   class CheckpointWriteHandler(
+@@ -197,6 +196,9 @@ class CheckpointWriter(
+       if (latestCheckpointTime == null || latestCheckpointTime < checkpointTime) {
+         latestCheckpointTime = checkpointTime
+       }
++      if (fs == null) {
++        fs = new Path(checkpointDir).getFileSystem(hadoopConf)
++      }
+       var attempts = 0
+       val startTime = System.currentTimeMillis()
+       val tempFile = new Path(checkpointDir, "temp")
+@@ -264,7 +266,7 @@ class CheckpointWriter(
+           case ioe: IOException =>
+             logWarning("Error in attempt " + attempts + " of writing checkpoint to "
+               + checkpointFile, ioe)
+-            reset()
++            fs = null
+         }
+       }
+       logWarning("Could not write checkpoint for time " + checkpointTime + " to file "
+@@ -298,15 +300,6 @@ class CheckpointWriter(
+       ", waited for " + (endTime - startTime) + " ms.")
+     stopped = true
+   }
+-
+-  private def fs = synchronized {
+-    if (fs_ == null) fs_ = new Path(checkpointDir).getFileSystem(hadoopConf)
+-    fs_
+-  }
+-
+-  private def reset() = synchronized {
+-    fs_ = null
+-  }
+ }
+ 
+ 
+-- 
+1.7.9.5
+

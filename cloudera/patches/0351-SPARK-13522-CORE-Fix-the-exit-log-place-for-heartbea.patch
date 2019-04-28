@@ -1,0 +1,42 @@
+From 7d5909f9ef0d6024ebb80d3f88637fb25583e8d8 Mon Sep 17 00:00:00 2001
+From: Shixiong Zhu <shixiong@databricks.com>
+Date: Mon, 29 Feb 2016 11:52:11 -0800
+Subject: [PATCH 351/517] [SPARK-13522][CORE] Fix the exit log place for
+ heartbeat
+
+## What changes were proposed in this pull request?
+
+Just fixed the log place introduced by #11401
+
+## How was this patch tested?
+
+unit tests.
+
+Author: Shixiong Zhu <shixiong@databricks.com>
+
+Closes #11432 from zsxwing/SPARK-13522-follow-up.
+
+(cherry picked from commit ced71d353a0908abcf5b83503661bef97ae0953d)
+---
+ .../scala/org/apache/spark/executor/Executor.scala |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/executor/Executor.scala b/core/src/main/scala/org/apache/spark/executor/Executor.scala
+index ab3cc00..ede88e9 100644
+--- a/core/src/main/scala/org/apache/spark/executor/Executor.scala
++++ b/core/src/main/scala/org/apache/spark/executor/Executor.scala
+@@ -498,9 +498,10 @@ private[spark] class Executor(
+     } catch {
+       case NonFatal(e) =>
+         logWarning("Issue communicating with driver in heartbeater", e)
+-        logError(s"Unable to send heartbeats to driver more than $HEARTBEAT_MAX_FAILURES times")
+         heartbeatFailures += 1
+         if (heartbeatFailures >= HEARTBEAT_MAX_FAILURES) {
++          logError(s"Exit as unable to send heartbeats to driver " +
++            s"more than $HEARTBEAT_MAX_FAILURES times")
+           System.exit(ExecutorExitCode.HEARTBEAT_FAILURE)
+         }
+     }
+-- 
+1.7.9.5
+

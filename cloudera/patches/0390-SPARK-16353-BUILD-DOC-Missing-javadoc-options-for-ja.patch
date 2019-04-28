@@ -1,0 +1,46 @@
+From c5b65a2134e73bc83031e38d5da66097c6be5062 Mon Sep 17 00:00:00 2001
+From: Michael Allman <michael@videoamp.com>
+Date: Mon, 4 Jul 2016 21:16:17 +0100
+Subject: [PATCH 390/517] [SPARK-16353][BUILD][DOC] Missing javadoc options
+ for java unidoc
+
+Link to Jira issue: https://issues.apache.org/jira/browse/SPARK-16353
+
+## What changes were proposed in this pull request?
+
+The javadoc options for the java unidoc generation are ignored when generating the java unidoc. For example, the generated `index.html` has the wrong HTML page title. This can be seen at http://spark.apache.org/docs/latest/api/java/index.html.
+
+I changed the relevant setting scope from `doc` to `(JavaUnidoc, unidoc)`.
+
+## How was this patch tested?
+
+I ran `docs/jekyll build` and verified that the java unidoc `index.html` has the correct HTML page title.
+
+Author: Michael Allman <michael@videoamp.com>
+
+Closes #14031 from mallman/spark-16353.
+
+(cherry picked from commit 7dbffcdd6dc76b8e8d6a9cd6eeb24323a6b740c3)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 4fcb88843f5591619f85867e0407a49ed2a9756c)
+---
+ project/SparkBuild.scala |    3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/project/SparkBuild.scala b/project/SparkBuild.scala
+index b1dcaed..afbf93c 100644
+--- a/project/SparkBuild.scala
++++ b/project/SparkBuild.scala
+@@ -569,8 +569,7 @@ object Unidoc {
+       ignoreUndocumentedPackages((unidocAllSources in (JavaUnidoc, unidoc)).value)
+     },
+ 
+-    // Javadoc options: create a window title, and group key packages on index page
+-    javacOptions in doc := Seq(
++    javacOptions in (JavaUnidoc, unidoc) := Seq(
+       "-windowtitle", "Spark " + version.value.replaceAll("-SNAPSHOT", "") + " JavaDoc",
+       "-public",
+       "-group", "Core Java API", packageList("api.java", "api.java.function"),
+-- 
+1.7.9.5
+

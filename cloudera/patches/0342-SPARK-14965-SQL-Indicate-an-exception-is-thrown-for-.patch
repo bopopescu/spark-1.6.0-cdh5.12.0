@@ -1,0 +1,66 @@
+From 1d0242632ed61e839e50df5da3ba0893fb9b90df Mon Sep 17 00:00:00 2001
+From: Gregory Hart <greg.hart@thinkbiganalytics.com>
+Date: Thu, 28 Apr 2016 11:21:43 -0700
+Subject: [PATCH 342/517] [SPARK-14965][SQL] Indicate an exception is thrown
+ for a missing struct field
+
+## What changes were proposed in this pull request?
+
+Fix to ScalaDoc for StructType.
+
+## How was this patch tested?
+
+Built locally.
+
+Author: Gregory Hart <greg.hart@thinkbiganalytics.com>
+
+Closes #12758 from freastro/hotfix/SPARK-14965.
+
+(cherry picked from commit 12c360c057f09d13a31c458ad277640b5f6de394)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit 8ac0ce6dd742edc50ceebb65946c24bfa4b4f301)
+---
+ .../org/apache/spark/sql/types/StructType.scala    |   13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/types/StructType.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/types/StructType.scala
+index 1939633..a3090d8 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/types/StructType.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/types/StructType.scala
+@@ -204,8 +204,9 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
+   }
+ 
+   /**
+-   * Extracts a [[StructField]] of the given name. If the [[StructType]] object does not
+-   * have a name matching the given name, `null` will be returned.
++   * Extracts the [[StructField]] with the given name.
++   *
++   * @throws IllegalArgumentException if a field with the given name does not exist
+    */
+   def apply(name: String): StructField = {
+     nameToField.getOrElse(name,
+@@ -214,7 +215,9 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
+ 
+   /**
+    * Returns a [[StructType]] containing [[StructField]]s of the given names, preserving the
+-   * original order of fields. Those names which do not have matching fields will be ignored.
++   * original order of fields.
++   *
++   * @throws IllegalArgumentException if a field cannot be found for any of the given names
+    */
+   def apply(names: Set[String]): StructType = {
+     val nonExistFields = names -- fieldNamesSet
+@@ -227,7 +230,9 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
+   }
+ 
+   /**
+-   * Returns index of a given field
++   * Returns the index of a given field.
++   *
++   * @throws IllegalArgumentException if a field with the given name does not exist
+    */
+   def fieldIndex(name: String): Int = {
+     nameToIndex.getOrElse(name,
+-- 
+1.7.9.5
+

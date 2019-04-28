@@ -1,0 +1,164 @@
+From 41b780ae497232ddad88d5265cbd5addc2b34e50 Mon Sep 17 00:00:00 2001
+From: Steve Loughran <stevel@hortonworks.com>
+Date: Mon, 7 Mar 2016 13:05:07 +0000
+Subject: [PATCH 293/517] [SPARK-13599][BUILD] remove transitive groovy
+ dependencies from spark-hive and spark-hiveserver
+ (branch 1.6)
+
+## What changes were proposed in this pull request?
+
+This is just the patch of #11449 cherry picked to branch-1.6; the enforcer and dep/ diffs are cut
+
+Modifies the dependency declarations of the all the hive artifacts, to explicitly exclude the groovy-all JAR.
+
+This stops the groovy classes *and everything else in that uber-JAR* from getting into spark-assembly JAR.
+
+## How was this patch tested?
+
+1. Pre-patch build was made: `mvn clean install -Pyarn,hive,hive-thriftserver`
+1. spark-assembly expanded, observed to have the org.codehaus.groovy packages and JARs
+1. A maven dependency tree was created `mvn dependency:tree -Pyarn,hive,hive-thriftserver  -Dverbose > target/dependencies.txt`
+1. This text file examined to confirm that groovy was being imported as a dependency of `org.spark-project.hive`
+1. Patch applied
+1. Repeated step1: clean build of project with ` -Pyarn,hive,hive-thriftserver` set
+1. Examined created spark-assembly, verified no org.codehaus packages
+1. Verified that the maven dependency tree no longer references groovy
+
+The `master` version updates the dependency files and an enforcer rule to keep groovy out; this patch strips it out.
+
+Author: Steve Loughran <stevel@hortonworks.com>
+
+Closes #11473 from steveloughran/fixes/SPARK-13599-groovy+branch-1.6.
+
+(cherry picked from commit 2434f16cc743d10bb03eadc051dfd568ebe7a79e)
+---
+ dev/deps/spark-deps-hadoop-1   |    1 -
+ dev/deps/spark-deps-hadoop-2.2 |    1 -
+ dev/deps/spark-deps-hadoop-2.3 |    1 -
+ dev/deps/spark-deps-hadoop-2.4 |    1 -
+ dev/deps/spark-deps-hadoop-2.6 |    1 -
+ pom.xml                        |   20 ++++++++++++++++++++
+ 6 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/dev/deps/spark-deps-hadoop-1 b/dev/deps/spark-deps-hadoop-1
+index bd99c45..c6de27d 100644
+--- a/dev/deps/spark-deps-hadoop-1
++++ b/dev/deps/spark-deps-hadoop-1
+@@ -59,7 +59,6 @@ eigenbase-properties-1.1.5.jar
+ geronimo-annotation_1.0_spec-1.1.1.jar
+ geronimo-jaspic_1.0_spec-1.0.jar
+ geronimo-jta_1.1_spec-1.1.1.jar
+-groovy-all-2.1.6.jar
+ hadoop-client-1.2.1.jar
+ hadoop-core-1.2.1.jar
+ hsqldb-1.8.0.10.jar
+diff --git a/dev/deps/spark-deps-hadoop-2.2 b/dev/deps/spark-deps-hadoop-2.2
+index 70c3522..078046e 100644
+--- a/dev/deps/spark-deps-hadoop-2.2
++++ b/dev/deps/spark-deps-hadoop-2.2
+@@ -65,7 +65,6 @@ grizzly-http-2.1.2.jar
+ grizzly-http-server-2.1.2.jar
+ grizzly-http-servlet-2.1.2.jar
+ grizzly-rcm-2.1.2.jar
+-groovy-all-2.1.6.jar
+ guice-3.0.jar
+ guice-servlet-3.0.jar
+ hadoop-annotations-2.2.0.jar
+diff --git a/dev/deps/spark-deps-hadoop-2.3 b/dev/deps/spark-deps-hadoop-2.3
+index f80ad76..36ebd9a 100644
+--- a/dev/deps/spark-deps-hadoop-2.3
++++ b/dev/deps/spark-deps-hadoop-2.3
+@@ -60,7 +60,6 @@ eigenbase-properties-1.1.5.jar
+ geronimo-annotation_1.0_spec-1.1.1.jar
+ geronimo-jaspic_1.0_spec-1.0.jar
+ geronimo-jta_1.1_spec-1.1.1.jar
+-groovy-all-2.1.6.jar
+ guice-3.0.jar
+ guice-servlet-3.0.jar
+ hadoop-annotations-2.3.0.jar
+diff --git a/dev/deps/spark-deps-hadoop-2.4 b/dev/deps/spark-deps-hadoop-2.4
+index 5e80490..7b83385 100644
+--- a/dev/deps/spark-deps-hadoop-2.4
++++ b/dev/deps/spark-deps-hadoop-2.4
+@@ -60,7 +60,6 @@ eigenbase-properties-1.1.5.jar
+ geronimo-annotation_1.0_spec-1.1.1.jar
+ geronimo-jaspic_1.0_spec-1.0.jar
+ geronimo-jta_1.1_spec-1.1.1.jar
+-groovy-all-2.1.6.jar
+ guice-3.0.jar
+ guice-servlet-3.0.jar
+ hadoop-annotations-2.4.0.jar
+diff --git a/dev/deps/spark-deps-hadoop-2.6 b/dev/deps/spark-deps-hadoop-2.6
+index e414ce0..d430195 100644
+--- a/dev/deps/spark-deps-hadoop-2.6
++++ b/dev/deps/spark-deps-hadoop-2.6
+@@ -64,7 +64,6 @@ eigenbase-properties-1.1.5.jar
+ geronimo-annotation_1.0_spec-1.1.1.jar
+ geronimo-jaspic_1.0_spec-1.0.jar
+ geronimo-jta_1.1_spec-1.1.1.jar
+-groovy-all-2.1.6.jar
+ gson-2.2.4.jar
+ guice-3.0.jar
+ guice-servlet-3.0.jar
+diff --git a/pom.xml b/pom.xml
+index 83d5734..4afc0f7 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -1453,6 +1453,10 @@
+             <groupId>commons-logging</groupId>
+             <artifactId>commons-logging</artifactId>
+           </exclusion>
++          <exclusion>
++            <groupId>org.codehaus.groovy</groupId>
++            <artifactId>groovy-all</artifactId>
++          </exclusion>
+         </exclusions>
+       </dependency>
+       <dependency>
+@@ -1525,6 +1529,10 @@
+             <groupId>commons-logging</groupId>
+             <artifactId>commons-logging</artifactId>
+           </exclusion>
++          <exclusion>
++            <groupId>org.codehaus.groovy</groupId>
++            <artifactId>groovy-all</artifactId>
++          </exclusion>
+         </exclusions>
+       </dependency>
+ 
+@@ -1619,6 +1627,10 @@
+             <groupId>commons-logging</groupId>
+             <artifactId>commons-logging</artifactId>
+           </exclusion>
++          <exclusion>
++            <groupId>org.codehaus.groovy</groupId>
++            <artifactId>groovy-all</artifactId>
++          </exclusion>
+         </exclusions>
+       </dependency>
+ 
+@@ -1664,6 +1676,10 @@
+             <groupId>org.apache.thrift</groupId>
+             <artifactId>libthrift</artifactId>
+           </exclusion>
++          <exclusion>
++            <groupId>org.codehaus.groovy</groupId>
++            <artifactId>groovy-all</artifactId>
++          </exclusion>
+         </exclusions>
+       </dependency>
+ 
+@@ -1712,6 +1728,10 @@
+             <groupId>commons-logging</groupId>
+             <artifactId>commons-logging</artifactId>
+           </exclusion>
++          <exclusion>
++            <groupId>org.codehaus.groovy</groupId>
++            <artifactId>groovy-all</artifactId>
++          </exclusion>
+         </exclusions>
+       </dependency>
+       <dependency>
+-- 
+1.7.9.5
+

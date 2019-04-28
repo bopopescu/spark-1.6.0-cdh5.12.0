@@ -1,0 +1,42 @@
+From bde57a20f2bef20daab2b10f0e281bdfdb46745a Mon Sep 17 00:00:00 2001
+From: Sean Owen <sowen@cloudera.com>
+Date: Wed, 13 Jul 2016 11:39:32 +0100
+Subject: [PATCH 401/517] [SPARK-16440][MLLIB] Undeleted broadcast variables
+ in Word2Vec causing OoM for long runs
+
+## What changes were proposed in this pull request?
+
+Unpersist broadcasted vars in Word2Vec.fit for more timely / reliable resource cleanup
+
+## How was this patch tested?
+
+Jenkins tests
+
+Author: Sean Owen <sowen@cloudera.com>
+
+Closes #14153 from srowen/SPARK-16440.
+
+(cherry picked from commit 51ade51a9fd64fc2fe651c505a286e6f29f59d40)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 4381e212140102b4bce756146c09e866c7b2d85c)
+---
+ .../org/apache/spark/mllib/feature/Word2Vec.scala  |    3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/feature/Word2Vec.scala b/mllib/src/main/scala/org/apache/spark/mllib/feature/Word2Vec.scala
+index 30a1849..c2ed896 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/feature/Word2Vec.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/feature/Word2Vec.scala
+@@ -416,6 +416,9 @@ class Word2Vec extends Serializable with Logging {
+       }
+     }
+     newSentences.unpersist()
++    expTable.unpersist()
++    bcVocab.unpersist()
++    bcVocabHash.unpersist()
+ 
+     val wordArray = vocab.map(_.word)
+     new Word2VecModel(wordArray.zipWithIndex.toMap, syn0Global)
+-- 
+1.7.9.5
+

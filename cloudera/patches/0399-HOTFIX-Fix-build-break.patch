@@ -1,0 +1,46 @@
+From 6ac7630a0182010b8706dc2fa4b4873d8554f60a Mon Sep 17 00:00:00 2001
+From: Reynold Xin <rxin@databricks.com>
+Date: Tue, 12 Jul 2016 23:40:37 -0700
+Subject: [PATCH 399/517] [HOTFIX] Fix build break.
+
+(cherry picked from commit 980db2bd491398ac4d6db3a4550f1a377b6bf577)
+---
+ .../expressions/ExpressionEvalHelperSuite.scala    |   15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/ExpressionEvalHelperSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/ExpressionEvalHelperSuite.scala
+index 64b65e2..a176fd8 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/ExpressionEvalHelperSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/ExpressionEvalHelperSuite.scala
+@@ -19,7 +19,7 @@ package org.apache.spark.sql.catalyst.expressions
+ 
+ import org.apache.spark.SparkFunSuite
+ import org.apache.spark.sql.catalyst.InternalRow
+-import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
++import org.apache.spark.sql.catalyst.expressions.codegen.{CodeGenContext, GeneratedExpressionCode}
+ import org.apache.spark.sql.types.{DataType, IntegerType}
+ 
+ /**
+@@ -43,12 +43,13 @@ class ExpressionEvalHelperSuite extends SparkFunSuite with ExpressionEvalHelper
+ case class BadCodegenExpression() extends LeafExpression {
+   override def nullable: Boolean = false
+   override def eval(input: InternalRow): Any = 10
+-  override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
+-    ev.copy(code =
+-      s"""
+-        |int some_variable = 11;
+-        |int ${ev.value} = 10;
+-      """.stripMargin)
++
++  override def genCode(ctx: CodeGenContext, ev: GeneratedExpressionCode): String = {
++    s"""
++       |int some_variable = 11;
++       |int ${ev.value} = 10;
++    """.stripMargin
+   }
++
+   override def dataType: DataType = IntegerType
+ }
+-- 
+1.7.9.5
+

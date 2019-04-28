@@ -1,0 +1,40 @@
+From 3b9c19bbd3fd4264d4261a1cc8d746f6193c9f23 Mon Sep 17 00:00:00 2001
+From: huangzhaowei <carlmartinmax@gmail.com>
+Date: Thu, 25 Feb 2016 09:14:19 -0600
+Subject: [PATCH 279/517] [SPARK-12316] Wait a minutes to avoid cycle calling.
+
+When application end, AM will clean the staging dir.
+But if the driver trigger to update the delegation token, it will can't find the right token file and then it will endless cycle call the method 'updateCredentialsIfRequired'.
+Then it lead driver StackOverflowError.
+https://issues.apache.org/jira/browse/SPARK-12316
+
+Author: huangzhaowei <carlmartinmax@gmail.com>
+
+Closes #10475 from SaintBacchus/SPARK-12316.
+
+(cherry picked from commit 5fcf4c2bfce4b7e3543815c8e49ffdec8072c9a2)
+Signed-off-by: Tom Graves <tgraves@yahoo-inc.com>
+(cherry picked from commit 5f7440b2529a0f6edfed5038756c004acecbce39)
+---
+ .../yarn/ExecutorDelegationTokenUpdater.scala      |    5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ExecutorDelegationTokenUpdater.scala b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ExecutorDelegationTokenUpdater.scala
+index 94feb63..6febc70 100644
+--- a/yarn/src/main/scala/org/apache/spark/deploy/yarn/ExecutorDelegationTokenUpdater.scala
++++ b/yarn/src/main/scala/org/apache/spark/deploy/yarn/ExecutorDelegationTokenUpdater.scala
+@@ -76,7 +76,10 @@ private[spark] class ExecutorDelegationTokenUpdater(
+         SparkHadoopUtil.get.getTimeFromNowToRenewal(
+           sparkConf, 0.8, UserGroupInformation.getCurrentUser.getCredentials)
+       if (timeFromNowToRenewal <= 0) {
+-        executorUpdaterRunnable.run()
++        // We just checked for new credentials but none were there, wait a minute and retry.
++        // This handles the shutdown case where the staging directory may have been removed(see
++        // SPARK-12316 for more details).
++        delegationTokenRenewer.schedule(executorUpdaterRunnable, 1, TimeUnit.MINUTES)
+       } else {
+         logInfo(s"Scheduling token refresh from HDFS in $timeFromNowToRenewal millis.")
+         delegationTokenRenewer.schedule(
+-- 
+1.7.9.5
+

@@ -1,0 +1,50 @@
+From 4fc0c54ad77fb07420b7b1011d9af74abb00b682 Mon Sep 17 00:00:00 2001
+From: Yanbo Liang <ybliang8@gmail.com>
+Date: Wed, 27 Jul 2016 11:24:28 +0100
+Subject: [PATCH 404/517] [MINOR][ML] Fix some mistake in LinearRegression
+ formula.
+
+## What changes were proposed in this pull request?
+Fix some mistake in ```LinearRegression``` formula.
+
+## How was this patch tested?
+Documents change, no tests.
+
+Author: Yanbo Liang <ybliang8@gmail.com>
+
+Closes #14369 from yanboliang/LiR-formula.
+
+(cherry picked from commit 3c3371bbd6361011b138cce88f6396a2aa4e2cb9)
+Signed-off-by: Sean Owen <sowen@cloudera.com>
+(cherry picked from commit 4ff9892f61b75def8e9082d954dfcebf7e91a8e3)
+---
+ .../spark/ml/regression/LinearRegression.scala     |    6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/ml/regression/LinearRegression.scala b/mllib/src/main/scala/org/apache/spark/ml/regression/LinearRegression.scala
+index 5e58509..f308d8b 100644
+--- a/mllib/src/main/scala/org/apache/spark/ml/regression/LinearRegression.scala
++++ b/mllib/src/main/scala/org/apache/spark/ml/regression/LinearRegression.scala
+@@ -735,16 +735,16 @@ class LinearRegressionSummary private[regression] (
+  * {{{
+  * \frac{\partial L}{\partial\w_i} =
+  *     1/N \sum_j diff_j (x_{ij} - \bar{x_i}) / \hat{x_i}
+- *   = 1/N ((\sum_j diff_j x_{ij} / \hat{x_i}) - diffSum \bar{x_i}) / \hat{x_i})
++ *   = 1/N ((\sum_j diff_j x_{ij} / \hat{x_i}) - diffSum \bar{x_i} / \hat{x_i})
+  *   = 1/N ((\sum_j diff_j x_{ij} / \hat{x_i}) + correction_i)
+  * }}},
+- * where correction_i = - diffSum \bar{x_i}) / \hat{x_i}
++ * where correction_i = - diffSum \bar{x_i} / \hat{x_i}
+  *
+  * A simple math can show that diffSum is actually zero, so we don't even
+  * need to add the correction terms in the end. From the definition of diff,
+  * {{{
+  * diffSum = \sum_j (\sum_i w_i(x_{ij} - \bar{x_i}) / \hat{x_i} - (y_j - \bar{y}) / \hat{y})
+- *         = N * (\sum_i w_i(\bar{x_i} - \bar{x_i}) / \hat{x_i} - (\bar{y_j} - \bar{y}) / \hat{y})
++ *         = N * (\sum_i w_i(\bar{x_i} - \bar{x_i}) / \hat{x_i} - (\bar{y} - \bar{y}) / \hat{y})
+  *         = 0
+  * }}}
+  *
+-- 
+1.7.9.5
+

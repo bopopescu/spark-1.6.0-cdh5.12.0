@@ -1,0 +1,67 @@
+From 4fd9e047599e92d5abb12f6274ace1251ad93399 Mon Sep 17 00:00:00 2001
+From: hyukjinkwon <gurwls223@gmail.com>
+Date: Mon, 27 Jun 2016 17:40:37 -0700
+Subject: [PATCH 383/517] [SPARK-13023][PROJECT INFRA][FOLLOWUP][BRANCH-1.6]
+ Unable to check `root` module ending up failure of
+ Python tests
+
+## What changes were proposed in this pull request?
+
+This PR fixes incorrect checking for `root` module (meaning all tests).
+
+I realised that https://github.com/apache/spark/pull/13806 is being failed due to this one.
+
+The PR corrects two files in `sql` and `core`. Since it seems fixing `core` module triggers all tests by `root` value from `determine_modules_for_files`.
+So, `changed_modules` becomes as below:
+
+```
+['root', 'sql']
+```
+
+and `module.dependent_modules` becaomes as below:
+
+```
+['pyspark-mllib', 'pyspark-ml', 'hive-thriftserver', 'sparkr', 'mllib', 'examples', 'pyspark-sql']
+```
+
+Now, `modules_to_test` does not include `root` and this checking is skipped but then both `changed_modules` and `modules_to_test` are being merged after that. So, this includes `root` module to test.
+
+This ends up with failing with the message below (e.g. https://amplab.cs.berkeley.edu/jenkins/job/SparkPullRequestBuilder/60990/consoleFull):
+
+```
+Error: unrecognized module 'root'. Supported modules: pyspark-core, pyspark-sql, pyspark-streaming, pyspark-ml, pyspark-mllib
+```
+
+## How was this patch tested?
+
+N/A
+
+Author: hyukjinkwon <gurwls223@gmail.com>
+
+Closes #13845 from HyukjinKwon/fix-build-1.6.
+
+(cherry picked from commit 4a67541db24f47f8101a32cb83153bca2dabc759)
+---
+ dev/run-tests.py |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dev/run-tests.py b/dev/run-tests.py
+index e42e073..94b517d 100755
+--- a/dev/run-tests.py
++++ b/dev/run-tests.py
+@@ -113,10 +113,11 @@ def determine_modules_to_test(changed_modules):
+     modules_to_test = set()
+     for module in changed_modules:
+         modules_to_test = modules_to_test.union(determine_modules_to_test(module.dependent_modules))
++    modules_to_test = modules_to_test.union(set(changed_modules))
+     # If we need to run all of the tests, then we should short-circuit and return 'root'
+     if modules.root in modules_to_test:
+         return [modules.root]
+-    return modules_to_test.union(set(changed_modules))
++    return modules_to_test
+ 
+ 
+ def determine_tags_to_exclude(changed_modules):
+-- 
+1.7.9.5
+

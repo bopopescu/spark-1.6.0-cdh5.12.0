@@ -1,0 +1,40 @@
+From f75e65177e4644343cb79f0b948734cc0a028d01 Mon Sep 17 00:00:00 2001
+From: Sun Rui <rui.sun@intel.com>
+Date: Wed, 23 Mar 2016 07:57:03 -0700
+Subject: [PATCH 316/517] [SPARK-14074][SPARKR] Specify commit sha1 ID when
+ using install_github to install intr package.
+
+## What changes were proposed in this pull request?
+
+In dev/lint-r.R, `install_github` makes our builds depend on a unstable source. This may cause un-expected test failures and then build break. This PR adds a specified commit sha1 ID to `install_github` to get a stable source.
+
+## How was this patch tested?
+dev/lint-r
+
+Author: Sun Rui <rui.sun@intel.com>
+
+Closes #11913 from sun-rui/SPARK-14074.
+
+(cherry picked from commit 7d1175011c976756efcd4e4e4f70a8fd6f287026)
+Signed-off-by: Xiangrui Meng <meng@databricks.com>
+(cherry picked from commit b75f970948d94d12505f0414e22e4688229b90af)
+---
+ dev/lint-r.R |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dev/lint-r.R b/dev/lint-r.R
+index 999eef5..87ee36d 100644
+--- a/dev/lint-r.R
++++ b/dev/lint-r.R
+@@ -27,7 +27,7 @@ if (! library(SparkR, lib.loc = LOCAL_LIB_LOC, logical.return = TRUE)) {
+ # Installs lintr from Github in a local directory.
+ # NOTE: The CRAN's version is too old to adapt to our rules.
+ if ("lintr" %in% row.names(installed.packages())  == FALSE) {
+-  devtools::install_github("jimhester/lintr")
++  devtools::install_github("jimhester/lintr@a769c0b")
+ }
+ 
+ library(lintr)
+-- 
+1.7.9.5
+

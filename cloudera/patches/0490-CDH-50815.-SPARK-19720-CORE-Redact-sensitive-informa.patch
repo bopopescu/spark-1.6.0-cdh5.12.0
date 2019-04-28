@@ -1,0 +1,139 @@
+From 0232372ec281d928ebe59baacdafeb02afcb7518 Mon Sep 17 00:00:00 2001
+From: Mark Grover <mark@apache.org>
+Date: Mon, 6 Mar 2017 10:40:20 -0800
+Subject: [PATCH 490/517] CDH-50815. [SPARK-19720][CORE] Redact sensitive
+ information from SparkSubmit console
+
+This change redacts senstive information (based on `spark.redaction.regex` property)
+from the Spark Submit console logs. Such sensitive information is already being
+redacted from event logs and yarn logs, etc.
+
+Testing was done manually to make sure that the console logs were not printing any
+sensitive information.
+
+Here's some output from the console:
+
+```
+Spark properties used, including those specified through
+ --conf and those from the properties file /etc/spark2/conf/spark-defaults.conf:
+  (spark.yarn.appMasterEnv.HADOOP_CREDSTORE_PASSWORD,*********(redacted))
+  (spark.authenticate,false)
+  (spark.executorEnv.HADOOP_CREDSTORE_PASSWORD,*********(redacted))
+```
+
+```
+System properties:
+(spark.yarn.appMasterEnv.HADOOP_CREDSTORE_PASSWORD,*********(redacted))
+(spark.authenticate,false)
+(spark.executorEnv.HADOOP_CREDSTORE_PASSWORD,*********(redacted))
+```
+There is a risk if new print statements were added to the console down the road, sensitive information may still get leaked, since there is no test that asserts on the console log output. I considered it out of the scope of this JIRA to write an integration test to make sure new leaks don't happen in the future.
+
+Running unit tests to make sure nothing else is broken by this change.
+
+Author: Mark Grover <mark@apache.org>
+
+Closes #17047 from markgrover/master_redaction.
+
+(cherry picked from commit 5ae3516bfb7716f1793eb76b4fdc720b31829d07)
+---
+ .../org/apache/spark/deploy/SparkSubmit.scala      |    3 ++-
+ .../apache/spark/deploy/SparkSubmitArguments.scala |   12 ++++++++---
+ .../main/scala/org/apache/spark/util/Utils.scala   |   22 ++++++++++++++++++--
+ 3 files changed, 31 insertions(+), 6 deletions(-)
+
+diff --git a/core/src/main/scala/org/apache/spark/deploy/SparkSubmit.scala b/core/src/main/scala/org/apache/spark/deploy/SparkSubmit.scala
+index 41f1924..2b5f48f 100644
+--- a/core/src/main/scala/org/apache/spark/deploy/SparkSubmit.scala
++++ b/core/src/main/scala/org/apache/spark/deploy/SparkSubmit.scala
+@@ -657,7 +657,8 @@ object SparkSubmit {
+     if (verbose) {
+       printStream.println(s"Main class:\n$childMainClass")
+       printStream.println(s"Arguments:\n${childArgs.mkString("\n")}")
+-      printStream.println(s"System properties:\n${sysProps.mkString("\n")}")
++      // sysProps may contain sensitive information, so redact before printing
++      printStream.println(s"System properties:\n${Utils.redact(sysProps).mkString("\n")}")
+       printStream.println(s"Classpath elements:\n${childClasspath.mkString("\n")}")
+       printStream.println("\n")
+     }
+diff --git a/core/src/main/scala/org/apache/spark/deploy/SparkSubmitArguments.scala b/core/src/main/scala/org/apache/spark/deploy/SparkSubmitArguments.scala
+index 18a1c52..a7fa0d8 100644
+--- a/core/src/main/scala/org/apache/spark/deploy/SparkSubmitArguments.scala
++++ b/core/src/main/scala/org/apache/spark/deploy/SparkSubmitArguments.scala
+@@ -83,9 +83,15 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
+     // scalastyle:off println
+     if (verbose) SparkSubmit.printStream.println(s"Using properties file: $propertiesFile")
+     Option(propertiesFile).foreach { filename =>
+-      Utils.getPropertiesFromFile(filename).foreach { case (k, v) =>
++      val properties = Utils.getPropertiesFromFile(filename)
++      properties.foreach { case (k, v) =>
+         defaultProperties(k) = v
+-        if (verbose) SparkSubmit.printStream.println(s"Adding default property: $k=$v")
++      }
++      // Property files may contain sensitive information, so redact before printing
++      if (verbose) {
++        Utils.redact(properties).foreach { case (k, v) =>
++          SparkSubmit.printStream.println(s"Adding default property: $k=$v")
++        }
+       }
+     }
+     // scalastyle:on println
+@@ -309,7 +315,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
+     |
+     |Spark properties used, including those specified through
+     | --conf and those from the properties file $propertiesFile:
+-    |${sparkProperties.mkString("  ", "\n  ", "\n")}
++    |${Utils.redact(sparkProperties).mkString("  ", "\n  ", "\n")}
+     """.stripMargin
+   }
+ 
+diff --git a/core/src/main/scala/org/apache/spark/util/Utils.scala b/core/src/main/scala/org/apache/spark/util/Utils.scala
+index c1b2a4c..1ae7b00 100644
+--- a/core/src/main/scala/org/apache/spark/util/Utils.scala
++++ b/core/src/main/scala/org/apache/spark/util/Utils.scala
+@@ -34,6 +34,7 @@ import scala.io.Source
+ import scala.reflect.ClassTag
+ import scala.util.Try
+ import scala.util.control.{ControlThrowable, NonFatal}
++import scala.util.matching.Regex
+ 
+ import com.google.common.io.{ByteStreams, Files}
+ import com.google.common.net.InetAddresses
+@@ -2304,15 +2305,32 @@ private[spark] object Utils extends Logging {
+   }
+ 
+   private[util] val REDACTION_REPLACEMENT_TEXT = "*********(redacted)"
++  private val SECRET_REDACTION_PROPERTY = "spark.redaction.regex"
++  private val SECRET_REDACTION_DEFAULT = "(?i)secret|password"
+ 
+   def redact(conf: SparkConf, kvs: Seq[(String, String)]): Seq[(String, String)] = {
+-    val redactionPattern = conf.get("spark.redaction.regex", "(?i)secret|password").r
++    val redactionPattern = conf.get(SECRET_REDACTION_PROPERTY, SECRET_REDACTION_DEFAULT).r
++    redact(redactionPattern, kvs)
++  }
++
++  private def redact(redactionPattern: Regex, kvs: Seq[(String, String)]): Seq[(String, String)] = {
+     kvs.map { kv =>
+       redactionPattern.findFirstIn(kv._1)
+-        .map { ignore => (kv._1, REDACTION_REPLACEMENT_TEXT) }
++        .map { _ => (kv._1, REDACTION_REPLACEMENT_TEXT) }
+         .getOrElse(kv)
+     }
+   }
++
++  /**
++   * Looks up the redaction regex from within the key value pairs and uses it to redact the rest
++   * of the key value pairs. No care is taken to make sure the redaction property itself is not
++   * redacted. So theoretically, the property itself could be configured to redact its own value
++   * when printing.
++   */
++  def redact(kvs: Map[String, String]): Seq[(String, String)] = {
++    val redactionPattern = kvs.getOrElse(SECRET_REDACTION_PROPERTY, SECRET_REDACTION_DEFAULT).r
++    redact(redactionPattern, kvs.toArray)
++  }
+ }
+ 
+ /**
+-- 
+1.7.9.5
+

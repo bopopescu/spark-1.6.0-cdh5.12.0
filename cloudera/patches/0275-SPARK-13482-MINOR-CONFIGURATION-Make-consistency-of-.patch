@@ -1,0 +1,39 @@
+From 4fa437f4295882d7a1dd93011443a0b2f5a8c5db Mon Sep 17 00:00:00 2001
+From: huangzhaowei <carlmartinmax@gmail.com>
+Date: Wed, 24 Feb 2016 23:52:17 -0800
+Subject: [PATCH 275/517] [SPARK-13482][MINOR][CONFIGURATION] Make consistency
+ of the configuraiton named in TransportConf.
+
+`spark.storage.memoryMapThreshold` has two kind of the value, one is 2*1024*1024 as integer and the other one is '2m' as string.
+"2m" is recommanded in document but it will go wrong if the code goes into `TransportConf#memoryMapBytes`.
+
+[Jira](https://issues.apache.org/jira/browse/SPARK-13482)
+
+Author: huangzhaowei <carlmartinmax@gmail.com>
+
+Closes #11360 from SaintBacchus/SPARK-13482.
+
+(cherry picked from commit 264533b553be806b6c45457201952e83c028ec78)
+Signed-off-by: Reynold Xin <rxin@databricks.com>
+(cherry picked from commit 897599601a5ca0f95fd70f16e89df58b9b17705c)
+---
+ .../apache/spark/network/util/TransportConf.java   |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/network/common/src/main/java/org/apache/spark/network/util/TransportConf.java b/network/common/src/main/java/org/apache/spark/network/util/TransportConf.java
+index 115135d..9f030da 100644
+--- a/network/common/src/main/java/org/apache/spark/network/util/TransportConf.java
++++ b/network/common/src/main/java/org/apache/spark/network/util/TransportConf.java
+@@ -132,7 +132,8 @@ public class TransportConf {
+    * memory mapping has high overhead for blocks close to or below the page size of the OS.
+    */
+   public int memoryMapBytes() {
+-    return conf.getInt("spark.storage.memoryMapThreshold", 2 * 1024 * 1024);
++    return Ints.checkedCast(JavaUtils.byteStringAsBytes(
++      conf.get("spark.storage.memoryMapThreshold", "2m")));
+   }
+ 
+   /**
+-- 
+1.7.9.5
+

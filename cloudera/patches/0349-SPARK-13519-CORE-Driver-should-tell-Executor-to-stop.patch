@@ -1,0 +1,43 @@
+From d796b030707f34ec67e206eac2d9da85b4e3a635 Mon Sep 17 00:00:00 2001
+From: Shixiong Zhu <shixiong@databricks.com>
+Date: Fri, 26 Feb 2016 15:11:57 -0800
+Subject: [PATCH 349/517] [SPARK-13519][CORE] Driver should tell Executor to
+ stop itself when cleaning executor's state
+
+## What changes were proposed in this pull request?
+
+When the driver removes an executor's state, the connection between the driver and the executor may be still alive so that the executor cannot exit automatically (E.g., Master will send RemoveExecutor when a work is lost but the executor is still alive), so the driver should try to tell the executor to stop itself. Otherwise, we will leak an executor.
+
+This PR modified the driver to send `StopExecutor` to the executor when it's removed.
+
+## How was this patch tested?
+
+manual test: increase the worker heartbeat interval to force it's always timeout and the leak executors are gone.
+
+Author: Shixiong Zhu <shixiong@databricks.com>
+
+Closes #11399 from zsxwing/SPARK-13519.
+
+(cherry picked from commit c433c0afd4c3f96ef24686a1f28262af81b67723)
+---
+ .../cluster/CoarseGrainedSchedulerBackend.scala    |    4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+index caeb02f..c38094e 100644
+--- a/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
++++ b/core/src/main/scala/org/apache/spark/scheduler/cluster/CoarseGrainedSchedulerBackend.scala
+@@ -184,6 +184,10 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
+         context.reply(true)
+ 
+       case RemoveExecutor(executorId, reason) =>
++        // We will remove the executor's state and cannot restore it. However, the connection
++        // between the driver and the executor may be still alive so that the executor won't exit
++        // automatically, so try to tell the executor to stop itself. See SPARK-13519.
++        executorDataMap.get(executorId).foreach(_.executorEndpoint.send(StopExecutor))
+         removeExecutor(executorId, reason)
+         context.reply(true)
+ 
+-- 
+1.7.9.5
+

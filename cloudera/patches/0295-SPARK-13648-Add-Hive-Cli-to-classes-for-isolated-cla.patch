@@ -1,0 +1,43 @@
+From 872d909a6441939f2f6d6d0163ddb7af21e97d31 Mon Sep 17 00:00:00 2001
+From: Tim Preece <tim.preece.in.oz@gmail.com>
+Date: Mon, 7 Mar 2016 15:23:07 -0800
+Subject: [PATCH 295/517] [SPARK-13648] Add Hive Cli to classes for isolated
+ classloader
+
+## What changes were proposed in this pull request?
+
+Adding the hive-cli classes to the classloader
+
+## How was this patch tested?
+
+The hive Versionssuite tests were run
+
+This is my original work and I license the work to the project under the project's open source license.
+
+Author: Tim Preece <tim.preece.in.oz@gmail.com>
+
+Closes #11495 from preecet/master.
+
+(cherry picked from commit 46f25c241385fe4f1fff42ac4a1b6e652deb2d02)
+Signed-off-by: Michael Armbrust <michael@databricks.com>
+(cherry picked from commit 695c8a2573cd7ecf0dc9b0b8e408afb25bd88302)
+---
+ .../sql/hive/client/IsolatedClientLoader.scala     |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/IsolatedClientLoader.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/IsolatedClientLoader.scala
+index 010051d..e60048b 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/IsolatedClientLoader.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/client/IsolatedClientLoader.scala
+@@ -97,7 +97,7 @@ private[hive] object IsolatedClientLoader extends Logging {
+       hadoopVersion: String,
+       ivyPath: Option[String]): Seq[URL] = {
+     val hiveArtifacts = version.extraDeps ++
+-      Seq("hive-metastore", "hive-exec", "hive-common", "hive-serde")
++      Seq("hive-metastore", "hive-exec", "hive-common", "hive-serde", "hive-cli")
+         .map(a => s"org.apache.hive:$a:${version.fullVersion}") ++
+       Seq("com.google.guava:guava:14.0.1",
+         s"org.apache.hadoop:hadoop-client:$hadoopVersion")
+-- 
+1.7.9.5
+

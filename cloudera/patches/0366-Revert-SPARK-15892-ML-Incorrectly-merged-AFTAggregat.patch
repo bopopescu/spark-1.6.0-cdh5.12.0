@@ -1,0 +1,53 @@
+From 03f7cfb2f0f2d00cebb0770e8099894a4f847ba1 Mon Sep 17 00:00:00 2001
+From: "Joseph K. Bradley" <joseph.kurata.bradley@gmail.com>
+Date: Tue, 14 Jun 2016 14:08:33 -0700
+Subject: [PATCH 366/517] Revert "[SPARK-15892][ML] Incorrectly merged
+ AFTAggregator with zero total count"
+
+This reverts commit be3c41b2633215ff6f20885c04f288aab25a1712.
+
+(cherry picked from commit 2f3e327c4cbf163d8536c4451b4829ec7d1886a9)
+---
+ .../ml/regression/AFTSurvivalRegression.scala      |    2 +-
+ .../ml/regression/AFTSurvivalRegressionSuite.scala |   12 ------------
+ 2 files changed, 1 insertion(+), 13 deletions(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/ml/regression/AFTSurvivalRegression.scala b/mllib/src/main/scala/org/apache/spark/ml/regression/AFTSurvivalRegression.scala
+index cc1d19e..aedfb48 100644
+--- a/mllib/src/main/scala/org/apache/spark/ml/regression/AFTSurvivalRegression.scala
++++ b/mllib/src/main/scala/org/apache/spark/ml/regression/AFTSurvivalRegression.scala
+@@ -496,7 +496,7 @@ private class AFTAggregator(parameters: BDV[Double], fitIntercept: Boolean)
+    * @return This AFTAggregator object.
+    */
+   def merge(other: AFTAggregator): this.type = {
+-    if (other.count != 0) {
++    if (totalCnt != 0) {
+       totalCnt += other.totalCnt
+       lossSum += other.lossSum
+ 
+diff --git a/mllib/src/test/scala/org/apache/spark/ml/regression/AFTSurvivalRegressionSuite.scala b/mllib/src/test/scala/org/apache/spark/ml/regression/AFTSurvivalRegressionSuite.scala
+index e452efb..d718ef6 100644
+--- a/mllib/src/test/scala/org/apache/spark/ml/regression/AFTSurvivalRegressionSuite.scala
++++ b/mllib/src/test/scala/org/apache/spark/ml/regression/AFTSurvivalRegressionSuite.scala
+@@ -346,18 +346,6 @@ class AFTSurvivalRegressionSuite
+     testEstimatorAndModelReadWrite(aft, datasetMultivariate,
+       AFTSurvivalRegressionSuite.allParamSettings, checkModelData)
+   }
+-
+-  test("SPARK-15892: Incorrectly merged AFTAggregator with zero total count") {
+-    // This `dataset` will contain an empty partition because it has two rows but
+-    // the parallelism is bigger than that. Because the issue was about `AFTAggregator`s
+-    // being merged incorrectly when it has an empty partition, running the codes below
+-    // should not throw an exception.
+-    val dataset = spark.createDataFrame(
+-      sc.parallelize(generateAFTInput(
+-        1, Array(5.5), Array(0.8), 2, 42, 1.0, 2.0, 2.0), numSlices = 3))
+-    val trainer = new AFTSurvivalRegression()
+-    trainer.fit(dataset)
+-  }
+ }
+ 
+ object AFTSurvivalRegressionSuite {
+-- 
+1.7.9.5
+

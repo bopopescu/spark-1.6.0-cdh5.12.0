@@ -1,0 +1,30 @@
+From d00a8df61523622fa8a8bf0e62f213ab9fa48b35 Mon Sep 17 00:00:00 2001
+From: Imran Rashid <irashid@cloudera.com>
+Date: Mon, 22 May 2017 14:26:20 -0500
+Subject: [PATCH 509/517] Revert "SPARK-12297.  Fix Failing Unit test for
+ Parquet Timestamps."
+
+This reverts commit c677303f423d433a16f74c7b78ea015bffcdb347.
+
+This is being reverted because the feature will not be included in
+CDH5.12 for any component, because of continued upstream discussion
+around the design.
+---
+ .../parquet/ParquetTimestampSuite.scala            |    1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetTimestampSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetTimestampSuite.scala
+index e97b249..c2ef481 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetTimestampSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetTimestampSuite.scala
+@@ -53,7 +53,6 @@ class ParquetTimestampSuite extends SparkFunSuite with MockitoSugar with SharedS
+       val catalystSchema = StructType(Array(StructField("ts", TimestampType, true)))
+       CatalystWriteSupport.setSchema(catalystSchema, conf)
+       conf.set(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY, "America/Chicago")
+-      conf.set(ParquetFileFormat.FILE_CREATOR, "parquet-mr")
+       conf.set(SQLConf.PARQUET_WRITE_LEGACY_FORMAT.key, "true")
+       conf.set(SQLConf.PARQUET_BINARY_AS_STRING.key, "false")
+       conf.set(SQLConf.PARQUET_INT96_AS_TIMESTAMP.key, "true")
+-- 
+1.7.9.5
+

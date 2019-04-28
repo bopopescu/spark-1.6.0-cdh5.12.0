@@ -1,0 +1,66 @@
+From 4637ce1012a67a406b5634e96a3f33745f7b0ff1 Mon Sep 17 00:00:00 2001
+From: Yanbo Liang <ybliang8@gmail.com>
+Date: Fri, 8 Apr 2016 11:49:44 -0700
+Subject: [PATCH 333/517] [SPARK-14298][ML][MLLIB] LDA should support disable
+ checkpoint
+
+## What changes were proposed in this pull request?
+In the doc of [```checkpointInterval```](https://github.com/apache/spark/blob/master/mllib/src/main/scala/org/apache/spark/ml/param/shared/sharedParams.scala#L241), we told users that they can disable checkpoint by setting ```checkpointInterval = -1```. But we did not handle this situation for LDA actually, we should fix this bug.
+## How was this patch tested?
+Existing tests.
+
+cc jkbradley
+
+Author: Yanbo Liang <ybliang8@gmail.com>
+
+Closes #12089 from yanboliang/spark-14298.
+
+(cherry picked from commit 56af8e85cca056096fe4e765d8d287e0f9efc0d2)
+Signed-off-by: Joseph K. Bradley <joseph@databricks.com>
+(cherry picked from commit 05dbc28463ef5730708732a288953b76842cdd92)
+---
+ .../spark/mllib/impl/PeriodicCheckpointer.scala    |    6 ++++--
+ .../mllib/impl/PeriodicGraphCheckpointer.scala     |    3 ++-
+ 2 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/impl/PeriodicCheckpointer.scala b/mllib/src/main/scala/org/apache/spark/mllib/impl/PeriodicCheckpointer.scala
+index 72d3aab..e316cab 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/impl/PeriodicCheckpointer.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/impl/PeriodicCheckpointer.scala
+@@ -51,7 +51,8 @@ import org.apache.spark.storage.StorageLevel
+  *  - This class removes checkpoint files once later Datasets have been checkpointed.
+  *    However, references to the older Datasets will still return isCheckpointed = true.
+  *
+- * @param checkpointInterval  Datasets will be checkpointed at this interval
++ * @param checkpointInterval  Datasets will be checkpointed at this interval.
++ *                            If this interval was set as -1, then checkpointing will be disabled.
+  * @param sc  SparkContext for the Datasets given to this checkpointer
+  * @tparam T  Dataset type, such as RDD[Double]
+  */
+@@ -88,7 +89,8 @@ private[mllib] abstract class PeriodicCheckpointer[T](
+     updateCount += 1
+ 
+     // Handle checkpointing (after persisting)
+-    if ((updateCount % checkpointInterval) == 0 && sc.getCheckpointDir.nonEmpty) {
++    if (checkpointInterval != -1 && (updateCount % checkpointInterval) == 0
++      && sc.getCheckpointDir.nonEmpty) {
+       // Add new checkpoint before removing old checkpoints.
+       checkpoint(newData)
+       checkpointQueue.enqueue(newData)
+diff --git a/mllib/src/main/scala/org/apache/spark/mllib/impl/PeriodicGraphCheckpointer.scala b/mllib/src/main/scala/org/apache/spark/mllib/impl/PeriodicGraphCheckpointer.scala
+index 11a0595..20db608 100644
+--- a/mllib/src/main/scala/org/apache/spark/mllib/impl/PeriodicGraphCheckpointer.scala
++++ b/mllib/src/main/scala/org/apache/spark/mllib/impl/PeriodicGraphCheckpointer.scala
+@@ -69,7 +69,8 @@ import org.apache.spark.storage.StorageLevel
+  *  // checkpointed: graph4
+  * }}}
+  *
+- * @param checkpointInterval Graphs will be checkpointed at this interval
++ * @param checkpointInterval Graphs will be checkpointed at this interval.
++ *                           If this interval was set as -1, then checkpointing will be disabled.
+  * @tparam VD  Vertex descriptor type
+  * @tparam ED  Edge descriptor type
+  *
+-- 
+1.7.9.5
+

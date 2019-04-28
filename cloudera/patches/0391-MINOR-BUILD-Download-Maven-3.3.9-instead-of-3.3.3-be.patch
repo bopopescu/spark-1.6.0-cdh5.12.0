@@ -1,0 +1,40 @@
+From 6031b6406129e401286d5ca976a497058371d84f Mon Sep 17 00:00:00 2001
+From: Sean Owen <sowen@cloudera.com>
+Date: Wed, 6 Jul 2016 12:27:17 +0100
+Subject: [PATCH 391/517] [MINOR][BUILD] Download Maven 3.3.9 instead of 3.3.3
+ because the latter is no longer published on Apache
+ mirrors
+
+## What changes were proposed in this pull request?
+
+Download Maven 3.3.9 instead of 3.3.3 because the latter is no longer published on Apache mirrors
+
+## How was this patch tested?
+
+Jenkins
+
+Author: Sean Owen <sowen@cloudera.com>
+
+Closes #14066 from srowen/Maven339Branch16.
+
+(cherry picked from commit 76781950fd500ace0f939951fc7a94a58aca87c4)
+---
+ build/mvn |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/build/mvn b/build/mvn
+index 55146e0..b7dd2ca 100755
+--- a/build/mvn
++++ b/build/mvn
+@@ -69,7 +69,7 @@ install_app() {
+ 
+ # Install maven under the build/ folder
+ install_mvn() {
+-  local MVN_VERSION="3.3.3"
++  local MVN_VERSION="3.3.9"
+ 
+   local MVN_VERSION="3.3.9"
+   local APACHE_MIRROR=${APACHE_MIRROR:-https://archive.apache.org/dist}
+-- 
+1.7.9.5
+

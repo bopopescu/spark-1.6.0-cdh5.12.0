@@ -1,0 +1,53 @@
+From bb9d0b6958c55208ec78eee04e83faed495d7a63 Mon Sep 17 00:00:00 2001
+From: Yin Huai <yhuai@databricks.com>
+Date: Wed, 27 Apr 2016 16:33:30 -0700
+Subject: [PATCH 341/517] [SPARK-13023][PROJECT INFRA][BRANCH-1.6] Fix
+ handling of root module in modules_to_test()
+
+This is a 1.6 branch backport of SPARK-13023 based on JoshRosen's https://github.com/apache/spark/commit/41f0c85f9be264103c066935e743f59caf0fe268.
+
+There's a minor bug in how we handle the `root` module in the `modules_to_test()` function in `dev/run-tests.py`: since `root` now depends on `build` (since every test needs to run on any build test), we now need to check for the presence of root in `modules_to_test` instead of `changed_modules`.
+
+Author: Yin Huai <yhuai@databricks.com>
+
+Closes #12743 from yhuai/1.6build.
+
+(cherry picked from commit f4af6a8b3ce5cea4dc4096e43001c7d60fce8cdb)
+---
+ dev/run-tests.py |   10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/dev/run-tests.py b/dev/run-tests.py
+index d20edac..4a18d1a 100755
+--- a/dev/run-tests.py
++++ b/dev/run-tests.py
+@@ -101,6 +101,8 @@ def determine_modules_to_test(changed_modules):
+ 
+     >>> sorted(x.name for x in determine_modules_to_test([modules.root]))
+     ['root']
++    >>> [x.name for x in determine_modules_to_test([modules.build])]
++    ['root']
+     >>> sorted(x.name for x in determine_modules_to_test([modules.graphx]))
+     ['examples', 'graphx']
+     >>> x = sorted(x.name for x in determine_modules_to_test([modules.sql]))
+@@ -108,14 +110,12 @@ def determine_modules_to_test(changed_modules):
+     ['examples', 'hive-thriftserver', 'mllib', 'pyspark-ml', \
+      'pyspark-mllib', 'pyspark-sql', 'sparkr', 'sql']
+     """
+-    # If we're going to have to run all of the tests, then we can just short-circuit
+-    # and return 'root'. No module depends on root, so if it appears then it will be
+-    # in changed_modules.
+-    if modules.root in changed_modules:
+-        return [modules.root]
+     modules_to_test = set()
+     for module in changed_modules:
+         modules_to_test = modules_to_test.union(determine_modules_to_test(module.dependent_modules))
++    # If we need to run all of the tests, then we should short-circuit and return 'root'
++    if modules.root in modules_to_test:
++        return [modules.root]
+     return modules_to_test.union(set(changed_modules))
+ 
+ 
+-- 
+1.7.9.5
+

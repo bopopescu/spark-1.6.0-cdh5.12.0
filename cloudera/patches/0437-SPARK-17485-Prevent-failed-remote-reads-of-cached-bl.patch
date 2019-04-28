@@ -1,0 +1,109 @@
+From 0521ff1bd736c2fb703cbebaec284d8183448cfa Mon Sep 17 00:00:00 2001
+From: Josh Rosen <joshrosen@databricks.com>
+Date: Thu, 22 Sep 2016 11:05:35 -0700
+Subject: [PATCH 437/517] [SPARK-17485] Prevent failed remote reads of cached
+ blocks from failing entire job (branch-1.6
+ backport)
+
+This patch is a branch-1.6 backport of #15037:
+
+In Spark's `RDD.getOrCompute` we first try to read a local copy of a cached RDD block, then a remote copy, and only fall back to recomputing the block if no cached copy (local or remote) can be read. This logic works correctly in the case where no remote copies of the block exist, but if there _are_ remote copies and reads of those copies fail (due to network issues or internal Spark bugs) then the BlockManager will throw a `BlockFetchException` that will fail the task (and which could possibly fail the whole job if the read failures keep occurring).
+
+In the cases of TorrentBroadcast and task result fetching we really do want to fail the entire job in case no remote blocks can be fetched, but this logic is inappropriate for reads of cached RDD blocks because those can/should be recomputed in case cached blocks are unavailable.
+
+Therefore, I think that the `BlockManager.getRemoteBytes()` method should never throw on remote fetch errors and, instead, should handle failures by returning `None`.
+
+Block manager changes should be covered by modified tests in `BlockManagerSuite`: the old tests expected exceptions to be thrown on failed remote reads, while the modified tests now expect `None` to be returned from the `getRemote*` method.
+
+I also manually inspected all usages of `BlockManager.getRemoteValues()`, `getRemoteBytes()`, and `get()` to verify that they correctly pattern-match on the result and handle `None`. Note that these `None` branches are already exercised because the old `getRemoteBytes` returned `None` when no remote locations for the block could be found (which could occur if an executor died and its block manager de-registered with the master).
+
+Author: Josh Rosen <joshrosen@databricks.com>
+
+Closes #15186 from JoshRosen/SPARK-17485-branch-1.6-backport.
+
+(cherry picked from commit 94524cef4cf367a0e73ebe0e919cc21f25f1043f)
+---
+ .../apache/spark/storage/BlockFetchException.scala |   24 --------------------
+ .../org/apache/spark/storage/BlockManager.scala    |    3 ++-
+ .../apache/spark/storage/BlockManagerSuite.scala   |   12 ++++------
+ 3 files changed, 7 insertions(+), 32 deletions(-)
+ delete mode 100644 core/src/main/scala/org/apache/spark/storage/BlockFetchException.scala
+
+diff --git a/core/src/main/scala/org/apache/spark/storage/BlockFetchException.scala b/core/src/main/scala/org/apache/spark/storage/BlockFetchException.scala
+deleted file mode 100644
+index f6e46ae..0000000
+--- a/core/src/main/scala/org/apache/spark/storage/BlockFetchException.scala
++++ /dev/null
+@@ -1,24 +0,0 @@
+-/*
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.
+- * The ASF licenses this file to You under the Apache License, Version 2.0
+- * (the "License"); you may not use this file except in compliance with
+- * the License.  You may obtain a copy of the License at
+- *
+- *    http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-package org.apache.spark.storage
+-
+-import org.apache.spark.SparkException
+-
+-private[spark]
+-case class BlockFetchException(messages: String, throwable: Throwable)
+-  extends SparkException(messages, throwable)
+diff --git a/core/src/main/scala/org/apache/spark/storage/BlockManager.scala b/core/src/main/scala/org/apache/spark/storage/BlockManager.scala
+index 6e65c12..ea1d002 100644
+--- a/core/src/main/scala/org/apache/spark/storage/BlockManager.scala
++++ b/core/src/main/scala/org/apache/spark/storage/BlockManager.scala
+@@ -623,8 +623,9 @@ private[spark] class BlockManager(
+             // Give up trying anymore locations. Either we've tried all of the original locations,
+             // or we've refreshed the list of locations from the master, and have still
+             // hit failures after trying locations from the refreshed list.
+-            throw new BlockFetchException(s"Failed to fetch block after" +
++            logWarning(s"Failed to fetch block after" +
+               s" ${totalFailureCount} fetch failures. Most recent failure cause:", e)
++            return None
+           }
+ 
+           logWarning(s"Failed to fetch remote block $blockId " +
+diff --git a/core/src/test/scala/org/apache/spark/storage/BlockManagerSuite.scala b/core/src/test/scala/org/apache/spark/storage/BlockManagerSuite.scala
+index b7479a4..0450a8b 100644
+--- a/core/src/test/scala/org/apache/spark/storage/BlockManagerSuite.scala
++++ b/core/src/test/scala/org/apache/spark/storage/BlockManagerSuite.scala
+@@ -535,10 +535,9 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
+       assert(list1Get.isDefined, "list1Get expected to be fetched")
+       store3.stop()
+       store3 = null
+-      // exception throw because there is no locations
+-      intercept[BlockFetchException] {
+-        list1Get = store.getRemoteBytes("list1")
+-      }
++      // Fetch should fail because there are no locations, but no exception should be thrown
++      list1Get = store.getRemoteBytes("list1")
++      assert(list1Get.isEmpty, "list1Get expected to fail")
+     } finally {
+       origTimeoutOpt match {
+         case Some(t) => conf.set("spark.network.timeout", t)
+@@ -1393,9 +1392,8 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
+       new MockBlockTransferService(conf.getInt("spark.block.failures.beforeLocationRefresh", 5))
+     store = makeBlockManager(8000, "executor1", transferService = Option(mockBlockTransferService))
+     store.putSingle("item", 999L, StorageLevel.MEMORY_ONLY, tellMaster = true)
+-    intercept[BlockFetchException] {
+-      store.getRemoteBytes("item")
+-    }
++    // Should return None instead of throwing an exception:
++    assert(store.getRemoteBytes("list1").isEmpty)
+   }
+ 
+   test("SPARK-13328: refresh block locations (fetch should succeed after location refresh)") {
+-- 
+1.7.9.5
+
