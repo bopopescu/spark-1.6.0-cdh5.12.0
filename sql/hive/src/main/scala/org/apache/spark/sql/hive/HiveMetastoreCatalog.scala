@@ -17,12 +17,14 @@
 
 package org.apache.spark.sql.hive
 
+import java.io.IOException
+
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 import com.google.common.base.Objects
 import com.google.common.cache.{CacheBuilder, CacheLoader, LoadingCache}
-import org.apache.hadoop.fs.Path
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.hadoop.hive.common.StatsSetupConst
 import org.apache.hadoop.hive.conf.HiveConf
 import org.apache.hadoop.hive.metastore.Warehouse
@@ -808,13 +810,31 @@ private[sql] case class MetastoreRelation
       // alternative would be going through Hadoop's FileSystem API, which can be expensive if a lot
       // of RPCs are involved.  Besides `totalSize`, there are also `numFiles`, `numRows`,
       // `rawDataSize` keys (see StatsSetupConst in Hive) that we can look at in the future.
+//      BigInt(
+//        // When table is external,`totalSize` is always zero, which will influence join strategy
+//        // so when `totalSize` is zero, use `rawDataSize` instead
+//        // if the size is still less than zero, we use default size
+//        Option(totalSize).map(_.toLong).filter(_ > 0)
+//          .getOrElse(Option(rawDataSize).map(_.toLong).filter(_ > 0)
+//          .getOrElse(sqlContext.conf.defaultSizeInBytes)))
+
       BigInt(
-        // When table is external,`totalSize` is always zero, which will influence join strategy
-        // so when `totalSize` is zero, use `rawDataSize` instead
-        // if the size is still less than zero, we use default size
-        Option(totalSize).map(_.toLong).filter(_ > 0)
-          .getOrElse(Option(rawDataSize).map(_.toLong).filter(_ > 0)
-          .getOrElse(sqlContext.conf.defaultSizeInBytes)))
+        if (totalSize != null && totalSize.toLong > 0L) {
+          totalSize.toLong
+        } else if (rawDataSize != null && rawDataSize.toLong > 0L) {
+          rawDataSize.toLong
+        } else {
+          try {
+            val hadoopConf = sqlContext.sparkContext.hadoopConfiguration
+            val fs: FileSystem = hiveQlTable.getPath.getFileSystem(hadoopConf)
+            fs.getContentSummary(hiveQlTable.getPath).getLength
+          } catch {
+            case e: IOException =>
+              logWarning("Failed to get table size from hdfs.", e)
+              sqlContext.conf.defaultSizeInBytes
+          }
+        }
+      )
     }
   )
 
