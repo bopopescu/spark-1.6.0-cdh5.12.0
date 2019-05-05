@@ -249,7 +249,7 @@ private[hive] class SparkExecuteStatementOperation(
     HiveThriftServer2.listener.onStatementFinish(statementId)
   }
 
-  override def cancel(): Unit = {
+  override def cancel(paramOperationState: OperationState): Unit = {
     logInfo(s"Cancel '$statement' with $statementId")
     if (statementId != null) {
       hiveContext.sparkContext.cancelJobGroup(statementId)
