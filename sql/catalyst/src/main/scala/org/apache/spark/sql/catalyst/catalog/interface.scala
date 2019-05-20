@@ -15,21 +15,20 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.catalyst
+package org.apache.spark.sql.catalyst.catalog
+
+import org.apache.spark.sql.catalyst.FunctionIdentifier
+
+
 
 /**
- * Identifies a `table` in `database`.  If `database` is not defined, the current database is used.
+ * A function defined in the catalog.
+ *
+ * @param identifier name of the function
+ * @param className fully qualified class name, e.g. "org.apache.spark.util.MyFunc"
+ * @param resources resource types and Uris used by the function
  */
-private[sql] case class TableIdentifier(table: String, database: Option[String]) {
-  def this(table: String) = this(table, None)
-
-  override def toString: String = quotedString
-
-  def quotedString: String = database.map(db => s"`$db`.`$table`").getOrElse(s"`$table`")
-
-  def unquotedString: String = database.map(db => s"$db.$table").getOrElse(table)
-}
-
-private[sql] object TableIdentifier {
-  def apply(tableName: String): TableIdentifier = new TableIdentifier(tableName)
-}
+case class CatalogFunction(
+    identifier: FunctionIdentifier,
+    className: String,
+    resources: Seq[FunctionResource])

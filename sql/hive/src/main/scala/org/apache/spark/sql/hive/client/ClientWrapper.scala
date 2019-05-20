@@ -26,20 +26,21 @@ import scala.language.reflectiveCalls
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.hive.cli.CliSessionState
 import org.apache.hadoop.hive.conf.HiveConf
-import org.apache.hadoop.hive.metastore.api.{Database, FieldSchema}
+import org.apache.hadoop.hive.metastore.api.{FieldSchema, Database}
 import org.apache.hadoop.hive.metastore.{TableType => HTableType}
 import org.apache.hadoop.hive.ql.metadata.Hive
 import org.apache.hadoop.hive.ql.processors._
 import org.apache.hadoop.hive.ql.session.SessionState
 import org.apache.hadoop.hive.ql.{Driver, metadata}
-import org.apache.hadoop.hive.shims.{HadoopShims, ShimLoader}
+import org.apache.hadoop.hive.shims.{ShimLoader, HadoopShims}
 import org.apache.hadoop.security.UserGroupInformation
 import org.apache.hadoop.util.VersionInfo
 
-import org.apache.spark.{SparkConf, SparkException, Logging}
+import org.apache.spark.sql.catalyst.catalog.CatalogFunction
+import org.apache.spark.{Logging, SparkConf, SparkException}
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.execution.QueryExecutionException
-import org.apache.spark.util.{CircularBuffer, Utils}
+import org.apache.spark.util.{Utils, CircularBuffer}
 
 /**
  * A class that wraps the HiveClient and converts its responses to externally visible classes.
@@ -583,6 +584,31 @@ private[hive] class ClientWrapper(
       numDP,
       holdDDLTime,
       listBucketingEnabled)
+  }
+
+  override def createFunction(db: String, func: CatalogFunction): Unit = withHiveState {
+    shim.createFunction(client, db, func)
+  }
+
+  override def dropFunction(db: String, name: String): Unit = withHiveState {
+    shim.dropFunction(client, db, name)
+  }
+
+  override def renameFunction(db: String, oldName: String, newName: String): Unit = withHiveState {
+    shim.renameFunction(client, db, oldName, newName)
+  }
+
+  override def alterFunction(db: String, func: CatalogFunction): Unit = withHiveState {
+    shim.alterFunction(client, db, func)
+  }
+
+  override def getFunctionOption(
+      db: String, name: String): Option[CatalogFunction] = withHiveState {
+    shim.getFunctionOption(client, db, name)
+  }
+
+  override def listFunctions(db: String, pattern: String): Seq[String] = withHiveState {
+    shim.listFunctions(client, db, pattern)
   }
 
   def addJar(path: String): Unit = {

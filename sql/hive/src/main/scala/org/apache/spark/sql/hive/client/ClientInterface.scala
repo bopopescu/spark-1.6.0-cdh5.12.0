@@ -21,7 +21,8 @@ import java.io.PrintStream
 import java.util.{Map => JMap}
 import javax.annotation.Nullable
 
-import org.apache.spark.sql.catalyst.analysis.{NoSuchDatabaseException, NoSuchTableException}
+import org.apache.spark.sql.catalyst.analysis.{NoSuchTableException, NoSuchDatabaseException, NoSuchPermanentFunctionException}
+import org.apache.spark.sql.catalyst.catalog.CatalogFunction
 import org.apache.spark.sql.catalyst.expressions.Expression
 
 private[hive] case class HiveDatabase(name: String, location: String)
@@ -180,6 +181,34 @@ private[hive] trait ClientInterface {
       numDP: Int,
       holdDDLTime: Boolean,
       listBucketingEnabled: Boolean): Unit
+
+  /** Create a function in an existing database. */
+  def createFunction(db: String, func: CatalogFunction): Unit
+
+  /** Drop an existing function in the database. */
+  def dropFunction(db: String, name: String): Unit
+
+  /** Rename an existing function in the database. */
+  def renameFunction(db: String, oldName: String, newName: String): Unit
+
+  /** Alter a function whose name matches the one specified in `func`, assuming it exists. */
+  def alterFunction(db: String, func: CatalogFunction): Unit
+
+  /** Return an existing function in the database, assuming it exists. */
+  final def getFunction(db: String, name: String): CatalogFunction = {
+    getFunctionOption(db, name).getOrElse(throw new NoSuchPermanentFunctionException(db, name))
+  }
+
+  /** Return an existing function in the database, or None if it doesn't exist. */
+  def getFunctionOption(db: String, name: String): Option[CatalogFunction]
+
+  /** Return whether a function exists in the specified database. */
+  final def functionExists(db: String, name: String): Boolean = {
+    getFunctionOption(db, name).isDefined
+  }
+
+  /** Return the names of all functions that match the given pattern in the database. */
+  def listFunctions(db: String, pattern: String): Seq[String]
 
   /** Add a jar into class loader */
   def addJar(path: String): Unit

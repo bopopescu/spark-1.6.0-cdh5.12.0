@@ -35,6 +35,9 @@ class NoSuchTableException extends Exception
 
 class NoSuchDatabaseException extends Exception
 
+class NoSuchPermanentFunctionException(db: String, func: String)
+  extends Exception(s"Function '$func' not found in database '$db'")
+
 /**
  * An interface for looking up relations by name.  Used by an [[Analyzer]].
  */
