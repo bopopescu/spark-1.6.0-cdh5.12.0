@@ -25,13 +25,14 @@ import java.util
 import scala.language.reflectiveCalls
 import scala.util.Try
 
-import org.apache.commons.io.{FileUtils, IOUtils}
+import org.apache.commons.io.{IOUtils, FileUtils}
 
 import org.apache.spark.Logging
 import org.apache.spark.deploy.SparkSubmitUtils
 import org.apache.spark.sql.catalyst.util.quietly
 import org.apache.spark.sql.hive.HiveContext
-import org.apache.spark.util.{MutableURLClassLoader, Utils}
+import org.apache.spark.sql.internal.NonClosableMutableURLClassLoader
+import org.apache.spark.util.{Utils, MutableURLClassLoader}
 
 /** Factory for `IsolatedClientLoader` with specific versions of hive. */
 private[hive] object IsolatedClientLoader extends Logging {
@@ -269,15 +270,4 @@ private[hive] class IsolatedClientLoader(
    * IsolatedClientLoader).
    */
   private[hive] var cachedHive: Any = null
-}
-
-/**
- * URL class loader that exposes the `addURL` and `getURLs` methods in URLClassLoader.
- * This class loader cannot be closed (its `close` method is a no-op).
- */
-private[sql] class NonClosableMutableURLClassLoader(
-    parent: ClassLoader)
-  extends MutableURLClassLoader(Array.empty, parent) {
-
-  override def close(): Unit = {}
 }

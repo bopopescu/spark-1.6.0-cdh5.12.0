@@ -21,10 +21,11 @@ import scala.collection.mutable.ArrayBuffer
 import scala.collection.JavaConverters._
 import scala.util.Try
 
-import org.apache.hadoop.hive.serde2.objectinspector.{ObjectInspector, ConstantObjectInspector}
+import org.apache.hadoop.hive.serde2.objectinspector.{ConstantObjectInspector, ObjectInspector}
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory.ObjectInspectorOptions
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory
 import org.apache.hadoop.hive.ql.exec._
+import org.apache.hadoop.hive.ql.session.SessionState
 import org.apache.hadoop.hive.ql.udf.{UDFType => HiveUDFType}
 import org.apache.hadoop.hive.ql.udf.generic._
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDF._
@@ -35,7 +36,9 @@ import org.apache.spark.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis
+import org.apache.spark.sql.catalyst.analysis.{Catalog, NoSuchPermanentFunctionException}
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry.FunctionBuilder
+import org.apache.spark.sql.catalyst.catalog.{SessionResourceLoader, CatalogFunction}
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
@@ -45,18 +48,53 @@ import org.apache.spark.sql.catalyst.util.ArrayData
 import org.apache.spark.sql.hive.HiveShim._
 import org.apache.spark.sql.hive.client.ClientWrapper
 import org.apache.spark.sql.types._
+import org.apache.spark.util.Utils
 
 
 private[hive] class HiveFunctionRegistry(
     underlying: analysis.FunctionRegistry,
-    executionHive: ClientWrapper)
-  extends analysis.FunctionRegistry with HiveInspectors {
+    executionHive: ClientWrapper,
+    catalog: HiveMetastoreCatalog,
+    resourceLoader: SessionResourceLoader)
+  extends analysis.FunctionRegistry with HiveInspectors with Logging {
+
+  /**
+    * Load permanent function
+    *
+    * @param db
+    * @param name
+    */
+  def loadCatalogFunction(db: String, name: String) = {
+    val funcOption = catalog.client.getFunctionOption(db, name)
+    funcOption.map(func => {
+      func.resources.foreach(resourceLoader.loadResource(_))
+      registerFunction(func, overrideIfExists = false)
+    })
+  }
+
+  def getFunctionInfo0(db: String, name: String): FunctionInfo = {
+    executionHive.withHiveState {
+      val registryFunction = FunctionRegistry.getFunctionInfo(s"$db.$name")
+      if (registryFunction == null) {
+        val defaultRegistryFunction = FunctionRegistry.getFunctionInfo(s"defualt.$name")
+        if (defaultRegistryFunction == null) {
+          throw new NoSuchPermanentFunctionException(db, name)
+        }
+        defaultRegistryFunction
+      }
+      registryFunction
+    }
+  }
 
   def getFunctionInfo(name: String): FunctionInfo = {
-    // Hive Registry need current database to lookup function
-    // TODO: the current database of executionHive should be consistent with metadataHive
-    executionHive.withHiveState {
-      FunctionRegistry.getFunctionInfo(name)
+    val db = SessionState.get.getCurrentDatabase
+    try {
+      getFunctionInfo0(db, name)
+    } catch {
+      case _: NoSuchPermanentFunctionException => {
+        loadCatalogFunction(db, name)
+        getFunctionInfo0(db, name)
+      }
     }
   }
 
@@ -104,6 +142,75 @@ private[hive] class HiveFunctionRegistry(
             s"because: ${throwable.getMessage}."
           throw new AnalysisException(errorMessage)
       }
+    }
+  }
+
+  /**
+   * Registers a temporary or permanent function into a session-specific [[FunctionRegistry]]
+   */
+  def registerFunction(
+      funcDefinition: CatalogFunction,
+      overrideIfExists: Boolean,
+      functionBuilder: Option[FunctionBuilder] = None): Unit = {
+    val func = funcDefinition.identifier
+    if (catalog.client.functionExists(func.database.orNull, func.funcName)
+      && !overrideIfExists) {
+      throw new AnalysisException(s"Function $func already exists")
+    }
+    val info = new ExpressionInfo(funcDefinition.className, func.funcName, "", "")
+    val builder =
+      functionBuilder.getOrElse {
+        val className = funcDefinition.className
+        if (!Utils.classIsLoadable(className)) {
+          throw new AnalysisException(s"Can not load class '$className' when registering " +
+            s"the function '$func', please make sure it is on the classpath")
+        }
+        makeFunctionBuilder(func.unquotedString, className)
+      }
+    registerFunction(func.funcName, info, builder)
+  }
+
+  // ----------------------------------------------------------------
+  // | Methods that interact with temporary and metastore functions |
+  // ----------------------------------------------------------------
+
+  /**
+   * Constructs a [[FunctionBuilder]] based on the provided class that represents a function.
+   */
+  private def makeFunctionBuilder(name: String, functionClassName: String): FunctionBuilder = {
+    val clazz = Utils.classForName(functionClassName)
+    (input: Seq[Expression]) => makeFunctionExpression(name, clazz, input)
+  }
+
+  /**
+   * Constructs a [[Expression]] based on the provided class that represents a function.
+   *
+   * This performs reflection to decide what type of [[Expression]] to return in the builder.
+   */
+  protected def makeFunctionExpression(
+      name: String,
+      clazz: Class[_],
+      input: Seq[Expression]): Expression = {
+    // Unfortunately we need to use reflection here because UserDefinedAggregateFunction
+    // and ScalaUDAF are defined in sql/core module.
+    val clsForUDAF =
+      Utils.classForName("org.apache.spark.sql.expressions.UserDefinedAggregateFunction")
+    if (clsForUDAF.isAssignableFrom(clazz)) {
+      val cls = Utils.classForName("org.apache.spark.sql.execution.aggregate.ScalaUDAF")
+      val e = cls.getConstructor(classOf[Seq[Expression]], clsForUDAF, classOf[Int], classOf[Int])
+        .newInstance(input,
+          clazz.getConstructor().newInstance().asInstanceOf[Object], Int.box(1), Int.box(1))
+        .asInstanceOf[ImplicitCastInputTypes]
+
+      // Check input argument size
+      if (e.inputTypes.size != input.size) {
+        throw new AnalysisException(s"Invalid number of arguments for function $name. " +
+          s"Expected: ${e.inputTypes.size}; Found: ${input.size}")
+      }
+      e
+    } else {
+      throw new AnalysisException(s"No handler for UDAF '${clazz.getCanonicalName}'. " +
+        s"Use sparkSession.udf.register(...) instead.")
     }
   }
 

@@ -31,7 +31,7 @@ import scala.language.implicitConversions
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.hadoop.hive.common.StatsSetupConst
 import org.apache.hadoop.hive.common.`type`.HiveDecimal
-import org.apache.hadoop.hive.conf.{HiveConf, HiveVariableSource, VariableSubstitution}
+import org.apache.hadoop.hive.conf.{HiveConf, VariableSubstitution, HiveVariableSource}
 import org.apache.hadoop.hive.conf.HiveConf.ConfVars
 import org.apache.hadoop.hive.ql.metadata.Table
 import org.apache.hadoop.hive.serde2.io.{DateWritable, TimestampWritable}
@@ -42,13 +42,14 @@ import org.apache.spark.sql.SQLConf.SQLConfEntry
 import org.apache.spark.sql.SQLConf.SQLConfEntry._
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.analysis._
+import org.apache.spark.sql.catalyst.catalog.SessionResourceLoader
 import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
 import org.apache.spark.sql.catalyst.expressions.{Expression, LeafExpression}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.{InternalRow, ParserDialect, SqlParser}
-import org.apache.spark.sql.execution.datasources.{ResolveDataSource, DataSourceStrategy, PreInsertCastAndRename, PreWriteCheck}
+import org.apache.spark.sql.execution.datasources.{PreWriteCheck, DataSourceStrategy, PreInsertCastAndRename, ResolveDataSource}
 import org.apache.spark.sql.execution.ui.SQLListener
-import org.apache.spark.sql.execution.{CacheManager, ExecutedCommand, ExtractPythonUDFs, SetCommand}
+import org.apache.spark.sql.execution.{ExtractPythonUDFs, ExecutedCommand, SetCommand, CacheManager}
 import org.apache.spark.sql.hive.client._
 import org.apache.spark.sql.hive.execution.{DescribeHiveTableCommand, HiveNativeCommand}
 import org.apache.spark.sql.types._
@@ -459,10 +460,17 @@ class HiveContext private[hive](
   override protected[sql] lazy val catalog =
     new HiveMetastoreCatalog(metadataHive, this) with OverrideCatalog
 
+  /**
+   * Create a Hive aware resource loader.
+   */
+  @transient
+  protected lazy val resourceLoader: SessionResourceLoader = new SessionResourceLoader(sc)
+
   // Note that HiveUDFs will be overridden by functions registered in this context.
   @transient
   override protected[sql] lazy val functionRegistry: FunctionRegistry =
-    new HiveFunctionRegistry(FunctionRegistry.builtin.copy(), this.executionHive)
+    new HiveFunctionRegistry(FunctionRegistry.builtin.copy(), this.executionHive,
+      this.catalog, this.resourceLoader)
 
   // The Hive UDF current_database() is foldable, will be evaluated by optimizer, but the optimizer
   // can't access the SessionState of metadataHive.

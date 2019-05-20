@@ -17,24 +17,31 @@
 
 package org.apache.spark.sql.hive.client
 
-import java.lang.{Boolean => JBoolean, Integer => JInteger, Long => JLong}
+import java.lang.{Long => JLong, Boolean => JBoolean, Integer => JInteger}
 import java.lang.reflect.{Method, Modifier}
 import java.net.URI
-import java.util.{ArrayList => JArrayList, List => JList, Map => JMap, Set => JSet}
+import java.util.{Locale, Set => JSet, ArrayList => JArrayList, Map => JMap, List => JList}
 import java.util.concurrent.TimeUnit
 
 import scala.collection.JavaConverters._
+import scala.util.control.NonFatal
 
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.hadoop.hive.conf.HiveConf
+import org.apache.hadoop.hive.metastore.api.{FunctionType, Function => HiveFunction}
+import org.apache.hadoop.hive.metastore.api.{ResourceType, ResourceUri, PrincipalType}
 import org.apache.hadoop.hive.ql.Driver
-import org.apache.hadoop.hive.ql.metadata.{Hive, Partition, Table}
+import org.apache.hadoop.hive.ql.metadata.{Partition, Table, Hive}
 import org.apache.hadoop.hive.ql.processors.{CommandProcessor, CommandProcessorFactory}
 import org.apache.hadoop.hive.ql.session.SessionState
 import org.apache.hadoop.hive.serde.serdeConstants
 
 import org.apache.spark.Logging
+import org.apache.spark.sql.AnalysisException
+import org.apache.spark.sql.catalyst.FunctionIdentifier
+import org.apache.spark.sql.catalyst.analysis.NoSuchPermanentFunctionException
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.catalog.{FunctionResourceType, FunctionResource, CatalogFunction}
 import org.apache.spark.sql.types.{StringType, IntegralType}
 
 /**
@@ -100,6 +107,18 @@ private[client] sealed abstract class Shim {
       numDP: Int,
       holdDDLTime: Boolean,
       listBucketingEnabled: Boolean): Unit
+
+  def createFunction(hive: Hive, db: String, func: CatalogFunction): Unit
+
+  def dropFunction(hive: Hive, db: String, name: String): Unit
+
+  def renameFunction(hive: Hive, db: String, oldName: String, newName: String): Unit
+
+  def alterFunction(hive: Hive, db: String, func: CatalogFunction): Unit
+
+  def getFunctionOption(hive: Hive, db: String, name: String): Option[CatalogFunction]
+
+  def listFunctions(hive: Hive, db: String, pattern: String): Seq[String]
 
   def dropIndex(hive: Hive, dbName: String, tableName: String, indexName: String): Unit
 
@@ -266,6 +285,30 @@ private[client] class Shim_v0_12 extends Shim with Logging {
     dropIndexMethod.invoke(hive, dbName, tableName, indexName, true: JBoolean)
   }
 
+  override def createFunction(hive: Hive, db: String, func: CatalogFunction): Unit = {
+    throw new AnalysisException("Hive 0.12 doesn't support creating permanent functions. " +
+      "Please use Hive 0.13 or higher.")
+  }
+
+  def dropFunction(hive: Hive, db: String, name: String): Unit = {
+    throw new NoSuchPermanentFunctionException(db, name)
+  }
+
+  def renameFunction(hive: Hive, db: String, oldName: String, newName: String): Unit = {
+    throw new NoSuchPermanentFunctionException(db, oldName)
+  }
+
+  def alterFunction(hive: Hive, db: String, func: CatalogFunction): Unit = {
+    throw new NoSuchPermanentFunctionException(db, func.identifier.funcName)
+  }
+
+  def getFunctionOption(hive: Hive, db: String, name: String): Option[CatalogFunction] = {
+    None
+  }
+
+  def listFunctions(hive: Hive, db: String, pattern: String): Seq[String] = {
+    Seq.empty[String]
+  }
 }
 
 private[client] class Shim_v0_13 extends Shim_v0_12 {
@@ -370,6 +413,79 @@ private[client] class Shim_v0_13 extends Shim_v0_12 {
         case a: Array[Object] => a(0).asInstanceOf[String]
       }
     }
+  }
+
+  private def toHiveFunction(f: CatalogFunction, db: String): HiveFunction = {
+    val resourceUris = f.resources.map { resource =>
+      new ResourceUri(ResourceType.valueOf(
+        resource.resourceType.resourceType.toUpperCase(Locale.ROOT)), resource.uri)
+    }
+    new HiveFunction(
+      f.identifier.funcName,
+      db,
+      f.className,
+      null,
+      PrincipalType.USER,
+      TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis).toInt,
+      FunctionType.JAVA,
+      resourceUris.asJava)
+  }
+
+  override def createFunction(hive: Hive, db: String, func: CatalogFunction): Unit = {
+    hive.createFunction(toHiveFunction(func, db))
+  }
+
+  override def dropFunction(hive: Hive, db: String, name: String): Unit = {
+    hive.dropFunction(db, name)
+  }
+
+  override def renameFunction(hive: Hive, db: String, oldName: String, newName: String): Unit = {
+    val catalogFunc = getFunctionOption(hive, db, oldName)
+      .getOrElse(throw new NoSuchPermanentFunctionException(db, oldName))
+      .copy(identifier = FunctionIdentifier(newName, Some(db)))
+    val hiveFunc = toHiveFunction(catalogFunc, db)
+    hive.alterFunction(db, oldName, hiveFunc)
+  }
+
+  override def alterFunction(hive: Hive, db: String, func: CatalogFunction): Unit = {
+    hive.alterFunction(db, func.identifier.funcName, toHiveFunction(func, db))
+  }
+
+  private def fromHiveFunction(hf: HiveFunction): CatalogFunction = {
+    val name = FunctionIdentifier(hf.getFunctionName, Option(hf.getDbName))
+    val resources = hf.getResourceUris.asScala.map { uri =>
+      val resourceType = uri.getResourceType() match {
+        case ResourceType.ARCHIVE => "archive"
+        case ResourceType.FILE => "file"
+        case ResourceType.JAR => "jar"
+        case r => throw new AnalysisException(s"Unknown resource type: $r")
+      }
+      FunctionResource(FunctionResourceType.fromString(resourceType), uri.getUri())
+    }
+    CatalogFunction(name, hf.getClassName, resources)
+  }
+
+  override def getFunctionOption(hive: Hive, db: String, name: String): Option[CatalogFunction] = {
+    try {
+      Option(hive.getFunction(db, name)).map(fromHiveFunction)
+    } catch {
+      case NonFatal(e) if isCausedBy(e, s"$name does not exist") =>
+        None
+    }
+  }
+
+  private def isCausedBy(e: Throwable, matchMassage: String): Boolean = {
+    if (e.getMessage.contains(matchMassage)) {
+      true
+    } else if (e.getCause != null) {
+      isCausedBy(e.getCause, matchMassage)
+    } else {
+      false
+    }
+  }
+
+  override def listFunctions(hive: Hive, db: String, pattern: String): Seq[String] = {
+    hive.getFunctions(db, pattern).asScala
   }
 
 }
