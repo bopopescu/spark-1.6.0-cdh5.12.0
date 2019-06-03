@@ -18,12 +18,13 @@
 package org.apache.spark.sql.catalyst.catalog
 
 import java.io.File
+import java.net.URL
 import java.util.Locale
 
-import scala.tools.nsc.interpreter.session
-
+import org.apache.hadoop.fs.FsUrlStreamHandlerFactory
 import org.apache.hadoop.fs.Path
 
+import org.apache.spark.Logging
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.internal.NonClosableMutableURLClassLoader
@@ -72,7 +73,7 @@ object DummyFunctionResourceLoader extends FunctionResourceLoader {
 /**
  * Session shared [[FunctionResourceLoader]].
  */
-class SessionResourceLoader(sc: SparkContext) extends FunctionResourceLoader {
+class SessionResourceLoader(sc: SparkContext) extends FunctionResourceLoader with Logging {
   override def loadResource(resource: FunctionResource): Unit = {
     resource.resourceType match {
       case JarResource => addJar(resource.uri)
@@ -98,6 +99,12 @@ class SessionResourceLoader(sc: SparkContext) extends FunctionResourceLoader {
    * SessionState.
    */
   def addJar(path: String): Unit = {
+    try {
+      URL.setURLStreamHandlerFactory(new FsUrlStreamHandlerFactory())
+    } catch {
+      case e: Error =>
+        logWarning("URL.setURLStreamHandlerFactory failed to set FsUrlStreamHandlerFactory")
+    }
     sc.addJar(path)
     val uri = new Path(path).toUri
     val jarURL = if (uri.getScheme == null) {

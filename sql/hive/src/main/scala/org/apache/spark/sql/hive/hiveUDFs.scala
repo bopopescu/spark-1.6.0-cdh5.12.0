@@ -20,7 +20,6 @@ package org.apache.spark.sql.hive
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.JavaConverters._
 import scala.util.Try
-
 import org.apache.hadoop.hive.serde2.objectinspector.{ConstantObjectInspector, ObjectInspector}
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory.ObjectInspectorOptions
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory
@@ -31,14 +30,13 @@ import org.apache.hadoop.hive.ql.udf.generic._
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDF._
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDAFEvaluator.AggregationBuffer
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDFUtils.ConversionHelper
-
 import org.apache.spark.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis
 import org.apache.spark.sql.catalyst.analysis.{Catalog, NoSuchPermanentFunctionException}
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry.FunctionBuilder
-import org.apache.spark.sql.catalyst.catalog.{SessionResourceLoader, CatalogFunction}
+import org.apache.spark.sql.catalyst.catalog.{CatalogFunction, FunctionResource, FunctionResourceType, SessionResourceLoader}
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
@@ -58,44 +56,24 @@ private[hive] class HiveFunctionRegistry(
     resourceLoader: SessionResourceLoader)
   extends analysis.FunctionRegistry with HiveInspectors with Logging {
 
-  /**
-    * Load permanent function
-    *
-    * @param db
-    * @param name
-    */
-  def loadCatalogFunction(db: String, name: String) = {
-    val funcOption = catalog.client.getFunctionOption(db, name)
-    funcOption.map(func => {
-      func.resources.foreach(resourceLoader.loadResource(_))
-      registerFunction(func, overrideIfExists = false)
-    })
-  }
-
-  def getFunctionInfo0(db: String, name: String): FunctionInfo = {
-    executionHive.withHiveState {
-      val registryFunction = FunctionRegistry.getFunctionInfo(s"$db.$name")
-      if (registryFunction == null) {
-        val defaultRegistryFunction = FunctionRegistry.getFunctionInfo(s"defualt.$name")
-        if (defaultRegistryFunction == null) {
-          throw new NoSuchPermanentFunctionException(db, name)
-        }
-        defaultRegistryFunction
-      }
-      registryFunction
-    }
+  implicit def resourceTypeToString(resourceType: SessionState.ResourceType): String = {
+    resourceType.toString
   }
 
   def getFunctionInfo(name: String): FunctionInfo = {
-    val db = SessionState.get.getCurrentDatabase
-    try {
-      getFunctionInfo0(db, name)
-    } catch {
-      case _: NoSuchPermanentFunctionException => {
-        loadCatalogFunction(db, name)
-        getFunctionInfo0(db, name)
-      }
+    val (funcDb, funcName) = name.split("[.]") match {
+      case Array(funcDb: String, funcName: String) => (funcDb, funcName)
+      case Array(funcName: String) => (SessionState.get.getCurrentDatabase, funcName)
     }
+
+    val registryFunction = FunctionRegistry.getFunctionInfo(s"$funcDb.$funcName")
+    if (registryFunction == null) {
+      throw new NoSuchPermanentFunctionException(funcDb, funcName)
+    }
+    registryFunction.getResources.map(fr =>
+      FunctionResource(FunctionResourceType.fromString(fr.getResourceType), fr.getResourceURI))
+      .foreach(resourceLoader.loadResource(_))
+    registryFunction
   }
 
   override def lookupFunction(name: String, children: Seq[Expression]): Expression = {
