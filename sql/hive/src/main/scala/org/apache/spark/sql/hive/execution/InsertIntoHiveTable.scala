@@ -28,7 +28,6 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.hadoop.hive.common.FileUtils
 
 import scala.util.control.NonFatal
-
 import scala.collection.JavaConverters._
 import org.apache.hadoop.hive.conf.HiveConf
 import org.apache.hadoop.hive.conf.HiveConf.ConfVars
@@ -183,6 +182,32 @@ case class InsertIntoHiveTable(
     }
   }
 
+  def isMergeRequired(tableLocation: Path, hiveconf: HiveConf) = {
+    val mergeSparkFiles = hiveconf.getBoolVar(ConfVars.HIVEMERGESPARKFILES)
+    val taskSize = hiveconf.getLongVar(ConfVars.HIVEMERGEMAPFILESSIZE)
+    val avgConditionSize = hiveconf.getLongVar(ConfVars.HIVEMERGEMAPFILESAVGSIZE)
+
+    var targetTaskNum = 0
+    if(mergeSparkFiles) {
+      val fs = tableLocation.getFileSystem(hiveconf)
+      assert(fs.getFileStatus(tableLocation).isDirectory, "Table outputPath should be directory!")
+      var totalSize = 0L
+      var fileNum = 0L
+      fs.listStatus(tableLocation).map { status =>
+        if (!status.getPath().getName().startsWith(stagingDir)) {
+          totalSize += status.getLen
+          fileNum += 1
+        }
+      }
+
+      logInfo(s"calculate table(partition) size, path=$tableLocation, totalSize=$totalSize, " +
+        s"fileNum=$fileNum")
+      if(fileNum > 1 && totalSize / fileNum < avgConditionSize) {
+        targetTaskNum = (totalSize / taskSize).toInt + 1
+      }
+    }
+    (targetTaskNum > 0,targetTaskNum)
+  }
   /**
    * Inserts all the rows in the table into Hive.  Row objects are properly serialized with the
    * `org.apache.hadoop.hive.serde2.SerDe` and the
@@ -343,6 +368,91 @@ case class InsertIntoHiveTable(
     // however for now we return an empty list to simplify compatibility checks with hive, which
     // does not return anything for insert operations.
     // TODO: implement hive compatibility as rules.
+    if(partition.isEmpty || numDynamicPartitions ==0) {
+      val destPath = if (partition.isEmpty) {
+        tableLocation
+      } else {
+        partition.foldLeft(tableLocation) {
+          case (path, (k, Some(v))) => new Path(path, s"$k=$v")
+        }
+      }
+
+      val (chDir, targetTaskNum) = isMergeRequired(destPath, sc.hiveconf)
+      if (chDir) {
+        val srcDF = if(partition.isEmpty) {
+          sqlContext.table(qualifiedTableName)
+        } else {
+          partition.foldLeft(sqlContext.table(qualifiedTableName)) {
+            case (filterDF, (k, Some(v))) => filterDF.filter(s"$k = $v")
+          }
+        }
+        val childRDD = srcDF.repartition(targetTaskNum).queryExecution.toRdd
+        saveAsHiveFile(childRDD, outputClass, fileSinkConf, jobConfSer, writerContainer)
+
+        if (partition.nonEmpty) {
+
+          // loadPartition call orders directories created on the iteration order of the this map
+          val orderedPartitionSpec = new util.LinkedHashMap[String, String]()
+          table.hiveQlTable.getPartCols.asScala.foreach { entry =>
+            orderedPartitionSpec.put(entry.getName, partitionSpec.get(entry.getName).getOrElse(""))
+          }
+
+          // inheritTableSpecs is set to true. It should be set to false for a IMPORT query
+          // which is currently considered as a Hive native command.
+          val inheritTableSpecs = true
+          // TODO: Correctly set isSkewedStoreAsSubdir.
+          val isSkewedStoreAsSubdir = false
+          if (numDynamicPartitions > 0) {
+            catalog.synchronized {
+              catalog.client.loadDynamicPartitions(
+                outputPath.toString,
+                qualifiedTableName,
+                orderedPartitionSpec,
+                overwrite,
+                numDynamicPartitions,
+                holdDDLTime,
+                isSkewedStoreAsSubdir)
+            }
+          } else {
+            // scalastyle:off
+            // ifNotExists is only valid with static partition, refer to
+            // https://cwiki.apache.org/confluence/display/Hive/LanguageManual+DML#LanguageManualDML-InsertingdataintoHiveTablesfromqueries
+            // scalastyle:on
+            val oldPart =
+            catalog.client.getPartitionOption(
+              catalog.client.getTable(table.databaseName, table.tableName),
+              partitionSpec.asJava)
+
+            if (oldPart.isEmpty || !ifNotExists) {
+              catalog.client.loadPartition(
+                outputPath.toString,
+                qualifiedTableName,
+                orderedPartitionSpec,
+                overwrite,
+                holdDDLTime,
+                inheritTableSpecs,
+                isSkewedStoreAsSubdir)
+            }
+          }
+        } else {
+          catalog.client.loadTable(
+            outputPath.toString, // TODO: URI
+            qualifiedTableName,
+            overwrite,
+            holdDDLTime)
+        }
+
+        // Attempt to delete the staging directory and the inclusive files. If failed, the files are
+        // expected to be dropped at the normal termination of VM since deleteOnExit is used.
+        try {
+          createdTempDir.foreach { path => path.getFileSystem(jobConf).delete(path, true) }
+        } catch {
+          case NonFatal(e) =>
+            logWarning(s"Unable to delete staging directory: $stagingDir.\n" + e)
+        }
+      }
+    }
+
     Seq.empty[InternalRow]
   }
 
