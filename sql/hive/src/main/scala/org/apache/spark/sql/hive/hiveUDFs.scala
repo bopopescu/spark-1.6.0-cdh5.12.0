@@ -66,10 +66,19 @@ private[hive] class HiveFunctionRegistry(
       case Array(funcName: String) => (SessionState.get.getCurrentDatabase, funcName)
     }
 
-    val registryFunction = FunctionRegistry.getFunctionInfo(s"$funcDb.$funcName")
-    if (registryFunction == null) {
-      throw new NoSuchPermanentFunctionException(funcDb, funcName)
+    val registryFunction = {
+      val funcInfo = FunctionRegistry.getFunctionInfo(s"$funcDb.$funcName")
+      if (funcInfo == null) {
+        val defaultFuncInfo = FunctionRegistry.getFunctionInfo(s"default.$funcName")
+        if (defaultFuncInfo == null) {
+          throw new NoSuchPermanentFunctionException(funcDb, funcName)
+        }
+        defaultFuncInfo
+      } else {
+        funcInfo
+      }
     }
+
     registryFunction.getResources.map(fr =>
       FunctionResource(FunctionResourceType.fromString(fr.getResourceType), fr.getResourceURI))
       .foreach(resourceLoader.loadResource(_))
