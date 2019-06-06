@@ -74,10 +74,12 @@ private[hive] class HiveFunctionRegistry(
           val builtInFuncInfo = FunctionRegistry.getFunctionInfo(funcName)
           if (builtInFuncInfo == null) {
             throw new NoSuchPermanentFunctionException(funcDb, funcName)
+          } else {
+            builtInFuncInfo
           }
-          builtInFuncInfo
+        } else {
+          defaultDBFuncInfo
         }
-        defaultDBFuncInfo
       } else {
         funcInfo
       }
