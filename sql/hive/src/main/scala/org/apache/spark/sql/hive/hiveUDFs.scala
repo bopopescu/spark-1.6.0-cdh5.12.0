@@ -69,11 +69,15 @@ private[hive] class HiveFunctionRegistry(
     val registryFunction = {
       val funcInfo = FunctionRegistry.getFunctionInfo(s"$funcDb.$funcName")
       if (funcInfo == null) {
-        val defaultFuncInfo = FunctionRegistry.getFunctionInfo(s"default.$funcName")
-        if (defaultFuncInfo == null) {
-          throw new NoSuchPermanentFunctionException(funcDb, funcName)
+        val defaultDBFuncInfo = FunctionRegistry.getFunctionInfo(s"default.$funcName")
+        if (defaultDBFuncInfo == null) {
+          val builtInFuncInfo = FunctionRegistry.getFunctionInfo(funcName)
+          if (builtInFuncInfo == null) {
+            throw new NoSuchPermanentFunctionException(funcDb, funcName)
+          }
+          builtInFuncInfo
         }
-        defaultFuncInfo
+        defaultDBFuncInfo
       } else {
         funcInfo
       }
