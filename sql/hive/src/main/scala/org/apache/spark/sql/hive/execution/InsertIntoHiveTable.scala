@@ -413,7 +413,7 @@ case class InsertIntoHiveTable(
                 outputPath.toString,
                 qualifiedTableName,
                 orderedPartitionSpec,
-                overwrite,
+                true,
                 numDynamicPartitions,
                 holdDDLTime,
                 isSkewedStoreAsSubdir)
@@ -433,7 +433,7 @@ case class InsertIntoHiveTable(
                 outputPath.toString,
                 qualifiedTableName,
                 orderedPartitionSpec,
-                overwrite,
+                true,
                 holdDDLTime,
                 inheritTableSpecs,
                 isSkewedStoreAsSubdir)
@@ -443,7 +443,7 @@ case class InsertIntoHiveTable(
           catalog.client.loadTable(
             outputPath.toString, // TODO: URI
             qualifiedTableName,
-            overwrite,
+            true,
             holdDDLTime)
         }
 
