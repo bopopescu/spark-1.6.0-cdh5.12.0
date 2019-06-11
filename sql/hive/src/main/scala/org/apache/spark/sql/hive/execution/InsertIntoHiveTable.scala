@@ -193,18 +193,23 @@ case class InsertIntoHiveTable(
       assert(fs.getFileStatus(tableLocation).isDirectory, "Table outputPath should be directory!")
       var totalSize = 0L
       var fileNum = 0L
+      var smallFileNum = 0L
       fs.listStatus(tableLocation).map { status =>
         if (!status.getPath().getName().startsWith(stagingDir)) {
           totalSize += status.getLen
           fileNum += 1
+          if(status.getLen < avgConditionSize) {
+            smallFileNum = smallFileNum + 1
+          }
         }
       }
 
-      logInfo(s"calculate table(partition) size, path=$tableLocation, totalSize=$totalSize, " +
-        s"fileNum=$fileNum")
-      if(fileNum > 1 && totalSize / fileNum < avgConditionSize) {
+      if(fileNum > 1 && taskSize > 0 &&
+         (totalSize / fileNum < avgConditionSize || smallFileNum > 10)) {
         targetTaskNum = (totalSize / taskSize).toInt + 1
       }
+      logInfo(s"calculate table(partition) size, path=$tableLocation, totalSize=$totalSize, " +
+        s"fileNum=$fileNum, smallFileNum=$smallFileNum, targetTaskNum=$targetTaskNum" )
     }
     (targetTaskNum > 0,targetTaskNum)
   }
