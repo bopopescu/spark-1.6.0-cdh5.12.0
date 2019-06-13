@@ -383,8 +383,13 @@ private[spark] object ResolveHiveWindowFunction extends Rule[LogicalPlan] {
           u @ UnresolvedWindowFunction(name, children),
           windowSpec: WindowSpecDefinition) if shouldResolveFunction(u, windowSpec) =>
           // First, let's find the window function info.
+          val compatibleName = if(name.toLowerCase.equals("hive_row_number")) {
+            "row_number"
+          } else {
+            name.toLowerCase
+          }
           val windowFunctionInfo: WindowFunctionInfo =
-            Option(FunctionRegistry.getWindowFunctionInfo(name.toLowerCase)).getOrElse(
+            Option(FunctionRegistry.getWindowFunctionInfo(compatibleName)).getOrElse(
               throw new AnalysisException(s"Couldn't find window function $name"))
 
           // Get the class of this function.
