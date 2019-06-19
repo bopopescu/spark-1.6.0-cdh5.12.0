@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.execution.joins
 
+import java.lang.management.ManagementFactory
+
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
@@ -79,6 +81,9 @@ case class BroadcastNestedLoopJoin(
   @transient private lazy val boundCondition =
     newPredicate(condition.getOrElse(Literal(true)), left.output ++ right.output)
 
+  val maxHeapSize = ManagementFactory.getMemoryMXBean.getHeapMemoryUsage.getMax()
+  def getUsedHeapSize() = ManagementFactory.getMemoryMXBean.getHeapMemoryUsage.getUsed()
+
   protected override def doExecute(): RDD[InternalRow] = {
     val (numStreamedRows, numBuildRows) = buildSide match {
       case BuildRight => (longMetric("numLeftRows"), longMetric("numRightRows"))
@@ -129,6 +134,12 @@ case class BroadcastNestedLoopJoin(
           case (false, RightOuter | FullOuter, BuildLeft) =>
             matchedRows += resultProj(joinedRow(leftNulls, streamedRow)).copy()
           case _ =>
+        }
+        if(matchedRows.size % 10000 == 0) {
+          val maxHeapSizeMB = maxHeapSize / 1024 / 1024
+          val usedHeapSizeMB = getUsedHeapSize / 1024 / 1024
+          logDebug(s"matchedRows = ${matchedRows.size} , maxHeapSize = $maxHeapSizeMB MB , " +
+            s"usedHeapSize = $usedHeapSizeMB MB" )
         }
       }
       Iterator((matchedRows, includedBroadcastTuples))
